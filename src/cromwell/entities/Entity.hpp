@@ -120,6 +120,7 @@ public:
 
         components_[std::type_index(typeid(T))] = std::move(owned);
         ref.onAttach(*this);
+        onComponentsChanged();
         if (ref.canEverTick()) ticking_.push_back(&ref);
         if (ref.canEverThink()) {
             /* Stagger, so a squad spawned on one frame does not think in
@@ -160,8 +161,29 @@ public:
         ticking_.erase(std::remove(ticking_.begin(), ticking_.end(), raw), ticking_.end());
         thinking_.erase(std::remove(thinking_.begin(), thinking_.end(), raw), thinking_.end());
         components_.erase(it);
+        onComponentsChanged();
         return true;
     }
+
+    /* ---- the cached-pointer hook ----------------------------------------
+     * Called after any component is attached or removed. Override it to
+     * refresh pointers to the components this entity ALWAYS has.
+     *
+     * WHY THIS EXISTS. findComponent<T>() hashes a type_index and walks a
+     * bucket. That is the right cost for an optional component asked about
+     * once — "does this thing take damage" — and quite the wrong one for a
+     * facade like Unit::footprint(), which sits inside the ray caster's
+     * per-step roster scan. Measured on the demo map, resolving the five
+     * components a Unit always carries through the map cost more than the ray
+     * casting those queries existed to do.
+     *
+     * So the map stays, for the generic and optional lookups it is good at,
+     * and an entity that knows it will be asked constantly caches a pointer.
+     * THIS HOOK IS WHAT MAKES THAT SAFE: the cache is refreshed by the same
+     * call that changes the components, so there is no way to add one and
+     * forget to rebind. A cache the owner has to remember to update is a
+     * dangling pointer with a delay on it. */
+    virtual void onComponentsChanged() {}
 
     /* How many components are attached, and how many take part in each rate.
      * Diagnostics: an entity that thinks when it should not is invisible

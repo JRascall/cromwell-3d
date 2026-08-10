@@ -1,0 +1,51 @@
+# clang-tidy — the mechanical half of the performance discipline in CLAUDE.md.
+#
+# WHAT THIS CAN AND CANNOT DO. It catches LOCAL patterns: a copy where a
+# reference would do, a vector that grows without reserving, a value parameter
+# that should be const&. Those are real and worth catching for free.
+#
+# It cannot catch what actually hurt this codebase. The expensive mistake was a
+# hash lookup inside Unit::footprint() — correct, idiomatic, clean code that was
+# ruinous only because a caller four levels up sat inside a per-ray-step loop.
+# No local analysis sees that, because nothing about the line is wrong. Hot-loop
+# cost is contextual, and finding it means reading the call chain. That is a
+# review job, not a linter job.
+#
+# So: this is a floor, not a substitute for thinking about where a call sits.
+#
+# Deliberately NOT enabled:
+#   modernize-*                       opinionated churn, no runtime effect
+#   readability-*                     this codebase has its own style, and the
+#                                     header comments are the point
+#   bugprone-narrowing-conversions    int<->float is everywhere in graphics
+#   bugprone-easily-swappable-...     fires on every (x, y, z) in the tree
+#
+# Run it with tools/tidy.sh, which needs the compile database — see that script.
+
+Checks: >
+  -*,
+  performance-*,
+  -performance-avoid-endl,
+  -performance-enum-size,
+  bugprone-use-after-move,
+  bugprone-dangling-handle,
+  bugprone-integer-division,
+  bugprone-incorrect-roundings,
+  bugprone-misplaced-widening-cast,
+  bugprone-signed-char-misuse,
+  bugprone-string-integer-assignment,
+  bugprone-suspicious-memset-usage,
+  bugprone-undefined-memory-manipulation,
+  bugprone-unused-raii,
+  clang-analyzer-core.*,
+  clang-analyzer-cplusplus.*
+
+# Our code only. third_party/ and the fetched dependencies are not ours to fix,
+# and raylib's headers would bury everything else.
+HeaderFilterRegex: '.*[\\/]src[\\/](cromwell|game)[\\/].*'
+
+# Warnings, never errors. The point is to be told, not to be stopped — same
+# reasoning as the note at the top of CLAUDE.md's performance section.
+WarningsAsErrors: ''
+
+FormatStyle: none

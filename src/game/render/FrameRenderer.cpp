@@ -318,14 +318,14 @@ void FrameRenderer::resizeForWindow()
         decalBuffer_.resize(GetScreenWidth(), GetScreenHeight());
 }
 
-void FrameRenderer::drawGeometry(const Material& material, bool castersOnly)
+void FrameRenderer::drawGeometry(int maxStorey, const Material& material, bool castersOnly)
 {
-    if (view_.settings.layers.statics) statics_->draw(view_.state->isoLevel(), material, castersOnly);
+    if (view_.settings.layers.statics) statics_->draw(maxStorey, material, castersOnly);
     if (view_.settings.layers.props)   props_.draw(material);
     if (!view_.settings.layers.units)  return;
 
     const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
-    units_->drawRoster(view_.state->roster(), view_.state->isoLevel(), animating, material);
+    units_->drawRoster(view_.state->roster(), maxStorey, animating, material);
 
     if (animating) {
         const PathPoint position = (*view_.animator).positionOn((*view_.preview));
@@ -579,10 +579,32 @@ void FrameRenderer::drawShadowMap()
         sun_.shadowProjectionForSphere(centre, radius, depthExtent, ShadowMap::kResolution);
 
 
-    /* Cut away at the same storey the camera does. A hidden upper floor that
-     * still cast would drop a shadow out of an empty sky. */
+    /* THE FULL LATTICE, NOT THE PLAYER'S CUTAWAY — the same rule the probe
+     * capture follows, and for the same reason. The iso level is a CAMERA
+     * affordance: it hides the storeys between the eye and the room you want
+     * to look into. It says nothing about what the world is made of, and the
+     * sun does not care what the camera has been asked to skip.
+     *
+     * Submitting the cutaway here made the lighting a function of the view.
+     * Dropping to the ground floor deleted the roof from the sun's depth pass,
+     * so the interior it had been shading went abruptly to full sunlight — the
+     * room brightened because you looked at it. Worse, it was inconsistent
+     * with the two neighbouring systems: the baked sun (B) lightmaps the whole
+     * lattice and never moved, and the reflection probes capture at full
+     * depth, so a window reflected a shadowed room the floor in front of it no
+     * longer agreed with.
+     *
+     * WHAT THIS COSTS, stated plainly because it was the original argument for
+     * cutting: a hidden storey now throws a shadow from geometry that is not
+     * drawn. On a lattice that is nearly always the same footprint the walls
+     * below already shade, so it reads as the building's own shadow; the
+     * visible case is a roof overhang darkening ground beside the building.
+     * That is a shadow whose caster is real and merely undrawn, which is a far
+     * smaller lie than lighting that changes when the player presses 1. */
+    const int fullDepth = view_.state->world().lattice().storeys() - 1;
+
     ShadowMap::Scope scope(shadows_, projection);
-    drawGeometry(depthMaterial_, /*castersOnly=*/true);
+    drawGeometry(fullDepth, depthMaterial_, /*castersOnly=*/true);
 
     /* Then the glass, into the same target's colour plane. Depth WRITES off so
      * a window never shadows what is behind it, depth TEST on so glass already
@@ -590,7 +612,7 @@ void FrameRenderer::drawShadowMap()
      * reached that window to be tinted. */
     if (shadows_.valid()) {
         rlDisableDepthMask();
-        statics_->drawKind(view_.state->isoLevel(), SurfaceKind::Window,
+        statics_->drawKind(fullDepth, SurfaceKind::Window,
                            shadows_.transmitterMaterial());
         rlEnableDepthMask();
     }
@@ -972,42 +994,52 @@ void FrameRenderer::render(const FrameView& view)
     }
 
     using Preview = TexturePreviews::Mode;
+
+    /* WHICH WAY UP EACH SOURCE IS STORED, stated per entry because only this
+     * function knows. Almost everything here is a render target and therefore
+     * bottom-up; the two lightmap textures are the exceptions, uploaded from
+     * CPU arrays by LoadTextureFromImage above and so already top-down. Getting
+     * this wrong does not fail, it just shows the buffer inverted. */
+    using From = TexturePreviews::Origin;
+    constexpr From kTarget = From::Framebuffer;
+    constexpr From kUpload = From::Image;
+
     const Texture2D noTexture{};
     int slot = 0;
 
     DevTextures textures;
     textures.add("sun depth",
-                 previews_.render(slot++, shadows_.depthTexture(), Preview::Raw),
+                 previews_.render(slot++, shadows_.depthTexture(), Preview::Raw, kTarget),
                  "the sun's shadow map, in its own orthographic depth");
     textures.add("sun transmission",
-                 previews_.render(slot++, shadows_.transmissionTexture(), Preview::Raw),
+                 previews_.render(slot++, shadows_.transmissionTexture(), Preview::Raw, kTarget),
                  "sunlight surviving. white is open air, darker is glass");
     textures.add("ambient occlusion",
-                 previews_.render(slot++, ao_.texture(), Preview::Raw),
+                 previews_.render(slot++, ao_.texture(), Preview::Raw, kTarget),
                  "screen space. white is unoccluded; 1x1 white when off");
     textures.add("g-buffer depth",
                  previews_.render(slot++, sceneDepth_ ? sceneDepth_->depthTexture() : noTexture,
-                                  Preview::Depth),
+                                  Preview::Depth, kTarget),
                  "linearised and banded — each band is an equal slice of distance");
     textures.add("g-buffer normal",
                  previews_.render(slot++, sceneDepth_ ? sceneDepth_->colourTexture() : noTexture,
-                                  Preview::Raw),
+                                  Preview::Raw, kTarget),
                  "world normal, encoded n * 0.5 + 0.5");
     textures.add("g-buffer roughness",
                  previews_.render(slot++, sceneDepth_ ? sceneDepth_->colourTexture() : noTexture,
-                                  Preview::Alpha),
+                                  Preview::Alpha, kTarget),
                  "the same buffer's alpha. black is a mirror, white is fully diffuse");
     textures.add("lightmap atlas",
-                 previews_.render(slot++, lightmapTexture_, Preview::Raw),
+                 previews_.render(slot++, lightmapTexture_, Preview::Raw, kUpload),
                  "baked sun visibility, packed per (cell, face)");
     textures.add("lightmap index",
-                 previews_.render(slot++, lightIndexTexture_, Preview::Raw),
+                 previews_.render(slot++, lightIndexTexture_, Preview::Raw, kUpload),
                  "(cell, face) -> atlas slot, 16 bit across R and G");
     textures.add("custom stencil",
-                 previews_.render(slot++, customDepth_.stencil(), Preview::Stencil),
+                 previews_.render(slot++, customDepth_.stencil(), Preview::Stencil, kTarget),
                  "one hue per object id; dark grey is nothing drawn");
     textures.add("custom depth",
-                 previews_.render(slot++, customDepth_.depth(), Preview::Depth),
+                 previews_.render(slot++, customDepth_.depth(), Preview::Depth, kTarget),
                  "tagged objects only, to compare against the g-buffer's depth");
     /* A MEMBER BUFFER, NOT TextFormat. DevTextures borrows its name and note
      * pointers and copies nothing, and TextFormat hands back one of four
@@ -1018,7 +1050,7 @@ void FrameRenderer::render(const FrameView& view)
                   probes_.probeCount() > 0 ? probes_.previewProbe() + 1 : 0,
                   probes_.probeCount(), probes_.staleFaceCount());
     textures.add("reflection probe",
-                 previews_.render(slot++, probes_.previewTexture(), Preview::Raw),
+                 previews_.render(slot++, probes_.previewTexture(), Preview::Raw, kTarget),
                  probePreviewNote_);
 
     /* The DBuffer, alongside every other intermediate — and it earns its place
@@ -1039,13 +1071,13 @@ void FrameRenderer::render(const FrameView& view)
         decalTool.materialNames[i] = decals_.materialName(i);
 
     textures.add("dbuffer albedo",
-                 previews_.render(slot++, decalBuffer_.albedo(), Preview::Raw),
+                 previews_.render(slot++, decalBuffer_.albedo(), Preview::Raw, kTarget),
                  "decal base colour, premultiplied. black is untouched");
     textures.add("dbuffer normal",
-                 previews_.render(slot++, decalBuffer_.normal(), Preview::Raw),
+                 previews_.render(slot++, decalBuffer_.normal(), Preview::Raw, kTarget),
                  "decal world normal, encoded and premultiplied");
     textures.add("dbuffer coverage",
-                 previews_.render(slot++, decalBuffer_.albedo(), Preview::Alpha),
+                 previews_.render(slot++, decalBuffer_.albedo(), Preview::Alpha, kTarget),
                  "the SAME plane's alpha, which is 1 - coverage: "
                  "white is no decal, dark is fully inked");
 

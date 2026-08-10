@@ -76,65 +76,104 @@ bool RayCaster::cast(float ax, float ay, float aHeight,
         return false;
     };
 
+    /* See RayRules: half cover stops light but not sight. Takes the cover
+     * GRADE rather than an Edge, because that is what the occlusion grid
+     * stores — deliberately, so a new ray rule stays a change to this one
+     * predicate. See OcclusionGrid.hpp. */
+    const auto coverIsOpaque = [&](int cover) {
+        if (cover == static_cast<int>(Cover::Full)) return true;
+        return rules_ == RayRules::Sunlight && cover == static_cast<int>(Cover::Half);
+    };
+
     /* A window belongs to the BUILDING FLOOR, so the crossing height is
      * measured from the storey base — not from this 64uu cell, of which a
      * full wall occupies three. */
-    /* See RayRules: half cover stops light but not sight. */
-    const auto edgeIsOpaque = [&](const Edge& edge) {
-        if (edge.cover == Cover::Full) return true;
-        return rules_ == RayRules::Sunlight && edge.cover == Cover::Half;
-    };
-
-    const auto passesThroughGlass = [&](const Edge& edge, float t, int z) {
-        if (!edge.window) return false;
+    const auto inGlassBand = [&](float t, int z) {
         const float relative = heightAt(t) - Lattice::storeyBaseHeight(Lattice::storeyOfZ(z));
         return relative >= kWindowSill * kStoreyHeight
             && relative <= kWindowHead * kStoreyHeight;
     };
 
+    /* THE SUMMARY THE WALK READS, instead of the tiles. Fetched once for the
+     * whole ray; it is rebuilt only when the geometry changes. */
+    const OcclusionGrid& occ = world_.occlusion();
+    const int strideY = occ.strideY();
+    const int strideZ = occ.strideZ();
+
+    /* Kept in step with cx/cy/cz so a step is an add rather than a multiply.
+     * Only ever read through occAt(), which bounds-checks first. */
+    int cellIndex = occ.lattice().isValid(cx, cy, cz) ? occ.lattice().index(cx, cy, cz) : 0;
+
+    const auto occAt = [&](int x, int y, int z, int index) -> std::uint16_t {
+        return occ.lattice().isValid(x, y, z) ? occ.at(index) : std::uint16_t(0);
+    };
+
     for (int step = 0; step < kMaxSteps; step++) {
         if (cx == tx && cy == ty && cz == tz) return true;
+
+        const std::uint16_t here = occAt(cx, cy, cz, cellIndex);
 
         float t;
         if (nextX <= nextY && nextX <= nextZ) {
             t = nextX;
-            const Dir  d    = stepX > 0 ? Dir::East : Dir::West;
-            const Edge edge = world_.effectiveEdge(cx, cy, cz, d);
-            if (edgeIsOpaque(edge) && !passesThroughGlass(edge, t, cz))
+            const int d = toIndex(stepX > 0 ? Dir::East : Dir::West);
+            if (coverIsOpaque(occ::coverOf(here, d)) &&
+                !(occ::hasWindow(here, d) && inGlassBand(t, cz)))
                 return blockedAt(t);
-            cx += stepX; nextX += deltaX;
+            cx += stepX; cellIndex += stepX; nextX += deltaX;
         } else if (nextY <= nextZ) {
             t = nextY;
-            const Dir  d    = stepY > 0 ? Dir::North : Dir::South;
-            const Edge edge = world_.effectiveEdge(cx, cy, cz, d);
-            if (edgeIsOpaque(edge) && !passesThroughGlass(edge, t, cz))
+            const int d = toIndex(stepY > 0 ? Dir::North : Dir::South);
+            if (coverIsOpaque(occ::coverOf(here, d)) &&
+                !(occ::hasWindow(here, d) && inGlassBand(t, cz)))
                 return blockedAt(t);
-            cy += stepY; nextY += deltaY;
+            cy += stepY; cellIndex += stepY * strideY; nextY += deltaY;
         } else {
             t = nextZ;
             /* cell-boundary planes: only slabs sitting EXACTLY at the boundary
              * block here; offset slabs are caught by the straddle test below
              * at their REAL height. Canopies live at cell tops and always block. */
             if (stepZ > 0) {
-                const Tile* above   = world_.tryAt(cx, cy, cz + 1);
-                const Tile* current = world_.tryAt(cx, cy, cz);
-                if ((above && above->hasFloor && !above->isRamp() &&
-                     std::fabs(above->floorOffset) < 1e-6f) ||
-                    (current && current->canopy))
+                if ((occAt(cx, cy, cz + 1, cellIndex + strideZ) & occ::kSlab) ||
+                    (here & occ::kCanopy))
                     return blockedAt(t);
             } else {
-                const Tile* current = world_.tryAt(cx, cy, cz);
-                const Tile* below   = world_.tryAt(cx, cy, cz - 1);
-                if ((current && current->hasFloor && !current->isRamp() &&
-                     std::fabs(current->floorOffset) < 1e-6f) ||
-                    (below && below->canopy))
+                if ((here & occ::kSlab) ||
+                    (occAt(cx, cy, cz - 1, cellIndex - strideZ) & occ::kCanopy))
                     return blockedAt(t);
             }
-            cz += stepZ; nextZ += deltaZ;
+            cz += stepZ; cellIndex += stepZ * strideZ; nextZ += deltaZ;
         }
 
+        const bool atDestination = (cx == tx && cy == ty && cz == tz);
+
+        /* THE ESCAPE HATCH. Everything below this point needs real arithmetic
+         * against real heights — ramp surfaces, offset slabs, the top of a
+         * solid mass, a hull — and none of it is expressible in the summary.
+         * Cells that need it say so; the rest of the walk skips straight on.
+         *
+         * The cell ABOVE is included because the slab straddle test at the
+         * bottom reads cz and cz+1. That makes this a conservative superset:
+         * it can only ever send the ray into work that turns out to be
+         * unnecessary, never skip work that mattered. */
+        const std::uint16_t entered = occAt(cx, cy, cz, cellIndex);
+        const std::uint16_t above   = occAt(cx, cy, cz + 1, cellIndex + strideZ);
+
+        /* Which hull might block here, resolved BEFORE the skip so that a cell
+         * with no body in it and no awkward geometry can be stepped over
+         * whole. Hoisting this only became worth doing once the roster kept an
+         * occupancy index — as a walk over every unit it was the expensive
+         * thing, and asking it earlier would have made this slower, not
+         * faster. See UnitRoster::bindLattice. */
+        const Unit* blocker = nullptr;
+        if (roster_ && !atDestination) {
+            const Unit* occupant = roster_->lineOfSightBlockerAt({ cx, cy, cz });
+            if (occupant && occupant != shooter_) blocker = occupant;
+        }
+
+        if (!((entered | above) & occ::kNeedsTile) && !blocker) continue;
+
         const Tile* cell = world_.tryAt(cx, cy, cz);
-        const bool  atDestination = (cx == tx && cy == ty && cz == tz);
 
         float exitT = nextX;
         if (nextY < exitT) exitT = nextY;
@@ -159,13 +198,10 @@ bool RayCaster::cast(float ax, float ay, float aHeight,
          * for the destination cell — you can still shoot AT the tank. Height
          * comes from the unit's OWN footprint base, not the cell base: cells
          * are a third of a storey, so a cell-relative hull would sit wrong two
-         * times out of three. */
-        if (roster_ && !atDestination) {
-            const Unit* blocker = roster_->lineOfSightBlockerAt({ cx, cy, cz });
-            if (blocker && blocker != shooter_) {
-                const float hullTop = blocker->baseHeight(world_) + blocker->hullHeight();
-                if (enterH < hullTop) return blockedAt(t);
-            }
+         * times out of three. Resolved above the skip. */
+        if (blocker) {
+            const float hullTop = blocker->baseHeight(world_) + blocker->hullHeight();
+            if (enterH < hullTop) return blockedAt(t);
         }
 
         /* a staircase's solid mass: inside a ramp cell the volume below the

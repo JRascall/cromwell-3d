@@ -38,9 +38,19 @@ void TexturePreviews::setDepthRange(float nearPlane, float farPlane, float scale
     depthScale_ = scale;
 }
 
-Texture2D TexturePreviews::render(int index, Texture2D source, Mode mode, int height)
+Texture2D TexturePreviews::render(int index, Texture2D source, Mode mode, Origin origin,
+                                  int height)
 {
-    if (!valid() || source.id == 0 || index < 0) return source;
+    if (source.id == 0 || index < 0) return source;
+
+    /* A MISSING SHADER SKIPS THE REMAP, NOT THE COPY. Returning `source`
+     * straight back would hand the viewer a raw bottom-up framebuffer while
+     * every other entry beside it came back top-down, so the fallback would be
+     * upside down and nothing else would — the worst kind of inconsistency to
+     * debug, because it looks like a property of the buffer rather than of the
+     * path it took. Raw is the identity remap anyway; the copy still runs and
+     * still supplies the flip, and only Depth, Stencil and Alpha degrade. */
+    const bool remap = valid();
 
     if (index >= static_cast<int>(slots_.size())) slots_.resize(index + 1);
     Slot& slot = slots_[static_cast<std::size_t>(index)];
@@ -79,32 +89,45 @@ Texture2D TexturePreviews::render(int index, Texture2D source, Mode mode, int he
     ClearBackground(BLANK);
     rlDisableColorBlend();
 
-    BeginShaderMode(shader_);
+    if (remap) {
+        BeginShaderMode(shader_);
 
-    const int modeValue = static_cast<int>(mode);
-    SetShaderValue(shader_, locMode_, &modeValue, SHADER_UNIFORM_INT);
-    SetShaderValue(shader_, locNear_, &near_, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(shader_, locFar_, &far_, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(shader_, locDepthScale_, &depthScale_, SHADER_UNIFORM_FLOAT);
+        const int modeValue = static_cast<int>(mode);
+        SetShaderValue(shader_, locMode_, &modeValue, SHADER_UNIFORM_INT);
+        SetShaderValue(shader_, locNear_, &near_, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(shader_, locFar_, &far_, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(shader_, locDepthScale_, &depthScale_, SHADER_UNIFORM_FLOAT);
+    }
 
-    /* NEGATIVE SOURCE HEIGHT: the flip happens HERE, once, so that what this
-     * function returns is an upright image and the viewer does not have to
-     * know where it came from.
+    /* THE SIGN IS THE WHOLE CORRECTION, and counting the flips is the part that
+     * keeps going wrong here, so it is spelled out.
      *
-     * Everything previewed lives in a framebuffer and is therefore stored
-     * bottom-up. The inspector used to flip when it displayed, which was right
-     * while it drew those buffers directly — and became one flip too many the
-     * moment this copy sat in between, because the copy is itself a
-     * framebuffer. Two flips is upside down again. Owning the correction at
-     * the point the orientation is known is what stops that recurring. */
+     * Writing into a slot is a framebuffer write, and a framebuffer write flips
+     * what it stores. That flip is free and it is always there; the only
+     * question is whether the source needs it.
+     *
+     *   Framebuffer source — stored bottom-up, so it needs exactly one flip.
+     *     The copy already is that flip. POSITIVE rectangle, no correction.
+     *   Image source — already top-down, so it needs none, and the copy is
+     *     about to apply one anyway. NEGATIVE rectangle, to cancel it.
+     *
+     * Every entry used to take the negative branch. That is right for the two
+     * lightmap textures, which come from LoadTextureFromImage, and wrong for
+     * the twelve render targets, which is why those were upside down while the
+     * lightmaps looked fine — a split that reads like a property of the buffers
+     * and is really a property of this rectangle. Note that a negative height
+     * is what a blit to the BACKBUFFER always wants (see ToneMapPass), because
+     * the backbuffer supplies no second flip; that is a different case from
+     * either of these two and is not a precedent for them. */
+    const float sourceHeight = static_cast<float>(source.height);
     const Rectangle from{ 0.0f, 0.0f,
                           static_cast<float>(source.width),
-                          -static_cast<float>(source.height) };
+                          origin == Origin::Framebuffer ? sourceHeight : -sourceHeight };
     const Rectangle to{ 0.0f, 0.0f,
                         static_cast<float>(width), static_cast<float>(height) };
     DrawTexturePro(source, from, to, Vector2{ 0.0f, 0.0f }, 0.0f, WHITE);
 
-    EndShaderMode();
+    if (remap) EndShaderMode();
     rlEnableColorBlend();
     EndTextureMode();
 

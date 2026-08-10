@@ -246,7 +246,9 @@ private:
                        DevTunables& tunables, DevRequests& requests);
     void drawScenePanel(const HudModel& model, DevRequests& requests);
     void drawTexturePanel(const DevTextures& textures);
-    void drawSteamPanel(DevSteam steam);
+    /* const&, not by value: DevSteam carries four std::strings, so a by-value
+     * parameter was four heap allocations per frame to read a panel. */
+    void drawSteamPanel(const DevSteam& steam);
 
     /* Point at the world and stick a decal to it. The one panel here that
      * AUTHORS something rather than inspecting it, which is why the placement
@@ -263,9 +265,25 @@ private:
     void drawBrowserContents(WebSurface* browser);
 #endif
 
+    /* EVERY PANEL IS BEGUN THROUGH HERE, so the two things that keep a window
+     * reachable are written once instead of eleven times: a first-use spot that
+     * is inside the viewport, and a clamp back inside it afterwards.
+     *
+     * `flags` is ImGuiWindowFlags widened to int, so this header keeps its
+     * promise that nothing outside DevView.cpp needs to know about ImGui.
+     * `height` of zero means auto-fit, which is what all but the browser want.
+     * Returns what ImGui::Begin returned; the caller still calls End. */
+    bool beginPanel(const char* name, bool* open, int slot, float width,
+                    float height = 0.0f, int flags = 0);
+
     /* Places a category window under the toolbar the first time it opens,
-     * cascaded by `slot` so two of them do not land on top of each other. */
-    void placePanel(int slot, float width) const;
+     * gridded by `slot` so two of them do not land on top of each other. The
+     * grid is derived from the viewport, not assumed. */
+    void placePanel(int slot, float width, float height) const;
+
+    /* Drags the CURRENT window back inside the viewport if it has ended up
+     * outside. Applies to the window between Begin and End. */
+    void keepOnScreen() const;
 
     bool ready_    = false;
 

@@ -12,12 +12,22 @@ World::World(const Lattice& lattice)
 void World::clear()
 {
     tiles_.assign(tiles_.size(), Tile{});
+    occlusionDirty_ = true;
+}
+
+const OcclusionGrid& World::occlusion() const
+{
+    if (occlusionDirty_) {
+        occlusion_.rebuild(*this);
+        occlusionDirty_ = false;
+    }
+    return occlusion_;
 }
 
 Tile* World::tryAt(int x, int y, int z)
 {
     if (!lattice_.isValid(x, y, z)) return nullptr;
-    return &at(lattice_.index(x, y, z));
+    return &at(lattice_.index(x, y, z));   /* the non-const at() dirties */
 }
 
 const Tile* World::tryAt(int x, int y, int z) const

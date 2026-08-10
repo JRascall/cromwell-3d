@@ -156,16 +156,6 @@ void Logger::write(LogLevel level, const char* file, int line, const char* text)
     emit(level, file, line, text ? text : "(null)");
 }
 
-void Logger::writef(LogLevel level, const char* file, int line, const char* format, ...)
-{
-    if (level < minLevel_) return;
-
-    std::va_list args;
-    va_start(args, format);
-    vwritef(level, file, line, format, args);
-    va_end(args);
-}
-
 void Logger::vwritef(LogLevel level, const char* file, int line, const char* format,
                      std::va_list args)
 {

@@ -137,12 +137,11 @@ bool SteamAvatar::poll()
     if (result.ok) {
         bytes_ = result.bytes;
         state_ = State::Ready;
-        LOGGER->info("STEAM: avatar fetched, %zu bytes from %s",
-                     bytes_.size(), url_.c_str());
+        LOGGER->info("STEAM: avatar fetched, {} bytes from {}", bytes_.size(), url_);
     } else {
         error_ = result.error;
         state_ = State::Failed;
-        LOGGER->warn("STEAM: avatar unavailable - %s", error_.c_str());
+        LOGGER->warn("STEAM: avatar unavailable - {}", error_);
     }
 
     return true;

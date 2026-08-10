@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(XcomCpp CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+# C++20 for <format>. The logger and every diagnostic string in the tree are
+# built with std::format rather than printf: type-safe, checked at compile
+# time, and it takes a std::string without .c_str(). See src/cromwell/diag/.
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -77,6 +80,7 @@ add_library(cromwell_base STATIC
     src/cromwell/events/Crier.cpp
     src/cromwell/entities/Entity.cpp
     src/cromwell/entities/EntityProps.cpp
+    src/cromwell/spatial/SpatialHash.cpp
     src/cromwell/settings/Settings.cpp
     src/cromwell/net/WinHttpClient.cpp
     src/cromwell/steam/SteamAvatar.cpp
@@ -96,6 +100,7 @@ endif()
 set(GAME_CORE_SOURCES
     src/game/lattice/Lattice.cpp
     src/game/world/World.cpp
+    src/game/world/OcclusionGrid.cpp
     src/game/world/authoring/MapAuthor.cpp
     src/game/world/ramp/RampValidator.cpp
     src/game/world/ramp/RampSupport.cpp
@@ -107,6 +112,7 @@ set(GAME_CORE_SOURCES
     src/game/query/LadderQuery.cpp
     src/game/query/cover/CoverModel.cpp
     src/game/movement/occupancy/ColumnScanner.cpp
+    src/game/movement/occupancy/OccupancyGrid.cpp
     src/game/movement/graph/InfantryMoveGraph.cpp
     src/game/movement/graph/VehicleMoveGraph.cpp
     src/game/movement/search/ReachField.cpp
@@ -120,6 +126,7 @@ set(GAME_CORE_SOURCES
     src/game/units/roster/OccupancyMaskBuilder.cpp
     src/game/light/SunBaker.cpp
     src/game/light/SunBakeBenchmark.cpp
+    src/game/perf/PerfBenchmark.cpp
     src/game/light/RoomPartition.cpp
     src/game/los/RayCaster.cpp
     src/game/los/PeekFinder.cpp
@@ -166,16 +173,29 @@ if(XC_BUILD_TESTS)
     add_executable(xcom_services_tests tests/ServicesTests.cpp)
     target_link_libraries(xcom_services_tests PRIVATE cromwell_base)
 
+    # The engine's spatial index. Checked against a brute-force scan rather
+    # than against constants - it is an optimisation, so agreeing with the loop
+    # it replaces is the entire specification.
+    add_executable(xcom_spatial_tests tests/SpatialHashTests.cpp)
+    target_link_libraries(xcom_spatial_tests PRIVATE cromwell_base)
+
     # The avatar fetch. Registered with NO arguments, which runs only the
     # offline half - see the file header. `--live <steamid64>` exercises the
     # real transport and is a manual check, deliberately not in ctest.
     add_executable(xcom_steam_tests tests/SteamAvatarTests.cpp)
     target_link_libraries(xcom_steam_tests PRIVATE cromwell_base)
 
+    # The simulation perf benchmark. NOT registered with ctest: it asserts
+    # nothing and its output is numbers to read, so a test runner would only
+    # ever report "passed" and hide them. Run it by hand, before and after a
+    # change to the queries it times. See src/game/perf/PerfBenchmark.hpp.
+    add_executable(xcom_perf tests/PerfMain.cpp)
+    target_link_libraries(xcom_perf PRIVATE game_core)
+
     # The test binaries stay in the build tree. builds/win is the runnable
     # product - what you would zip and hand to someone - and test exes are
     # not part of it.
-    set_target_properties(xcom_tests xcom_crier_tests xcom_ui_tests xcom_entity_tests xcom_services_tests xcom_steam_tests PROPERTIES
+    set_target_properties(xcom_tests xcom_crier_tests xcom_ui_tests xcom_entity_tests xcom_services_tests xcom_steam_tests xcom_spatial_tests xcom_perf PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY                "${CMAKE_BINARY_DIR}/tests"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_BINARY_DIR}/tests"
         RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/tests"
@@ -189,6 +209,7 @@ if(XC_BUILD_TESTS)
     add_test(NAME entity   COMMAND xcom_entity_tests)
     add_test(NAME services COMMAND xcom_services_tests)
     add_test(NAME steam    COMMAND xcom_steam_tests)
+    add_test(NAME spatial  COMMAND xcom_spatial_tests)
 endif()
 
 # ---- app ---------------------------------------------------------------

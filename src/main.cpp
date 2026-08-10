@@ -64,7 +64,7 @@ int main(int argc, char** argv)
         commandLine += argv[i];
         commandLine += ' ';
     }
-    LOGGER->info("command line: " + commandLine);
+    LOGGER->info("command line: {}", commandLine);
 
     /* Headless, and before anything opens a window — the bake is core work and
      * has no business needing a GPU to be measured. */
@@ -79,7 +79,7 @@ int main(int argc, char** argv)
 
     /* The footer this writes is the point: a log that ends without one ended
      * because the process did, and that is the first thing to look for. */
-    LOGGER->info("exiting with status %d", status);
+    LOGGER->info("exiting with status {}", status);
     cromwell::logger()->close();
     return status;
 }

@@ -6,8 +6,8 @@
  * Use it through the macro, which is the whole point of the design:
  *
  *     LOGGER->info("map loaded");
- *     LOGGER->warn("probe %d has no room", index);
- *     LOGGER->error("shader %s failed to compile", name.c_str());
+ *     LOGGER->warn("probe {} has no room", index);
+ *     LOGGER->error("shader {} failed to compile", name);
  *
  * LOGGER expands to a temporary carrying __FILE__ and __LINE__, so every
  * record names the line that wrote it without the caller passing anything.
@@ -26,11 +26,15 @@
  *   3. NEVER THROWS, NEVER ASSERTS. A logger that can take the process down is
  *      worse than no logger. An unopened Logger silently drops records.
  *
- * Formatting is printf-style, and a call with NO variadic arguments is written
- * VERBATIM — LOGGER->info("50% done") logs "50% done" rather than reading %d
- * off the stack. Passing a std::string to a format call is a compile error;
- * pass .c_str(), or use the single-argument overload which takes std::string
- * directly.
+ * Formatting is std::format, not printf. The placeholder is {} and it carries
+ * no type letter, so there is nothing to get wrong: the format string is
+ * CHECKED AT COMPILE TIME against the arguments, a std::string goes straight in
+ * with no .c_str(), and any type with a std::formatter specialisation prints
+ * itself. A mismatch is a build error rather than a garbage read off the stack.
+ *
+ * A call with NO arguments is written VERBATIM — LOGGER->info("100% {done}")
+ * logs those characters rather than parsing the braces — so text assembled
+ * elsewhere never needs escaping on its way through here.
  *
  * Lives in core/ so the headless tests and the pure-C++ simulation can log
  * without linking raylib. Application installs the raylib TraceLog bridge and
@@ -41,9 +45,10 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <format>
 #include <mutex>
 #include <string>
-#include <type_traits>
+#include <utility>
 
 namespace cromwell {
 
@@ -83,10 +88,16 @@ public:
      * so this goes nowhere; on a Debug build it is the running commentary. */
     void setMirrorToStderr(bool on) { mirror_ = on; }
 
-    /* The three entry points. `file` and `line` may be nullptr/0 for a record
-     * with no call site — that is how the raylib bridge logs. */
+    /* The entry point. `file` and `line` may be nullptr/0 for a record with no
+     * call site — that is how the raylib bridge logs. Callers format first;
+     * LogSite below is what almost everything should reach for. */
     void write(LogLevel level, const char* file, int line, const char* text);
-    void writef(LogLevel level, const char* file, int line, const char* format, ...);
+
+    /* THE ONLY PRINTF SURVIVOR, and it is here for exactly one caller: raylib
+     * hands its TraceLog callback a format string and a va_list already made,
+     * and the only way to render that without formatting twice is to feed it
+     * back to the C library. Nothing else should call this — new code takes the
+     * compile-time-checked std::format path. See diag/RaylibLogBridge.cpp. */
     void vwritef(LogLevel level, const char* file, int line, const char* format,
                  std::va_list args);
 
@@ -127,24 +138,26 @@ public:
 
     const LogSite* operator->() const { return this; }
 
-/* Two overloads per level: a format one that only formats when there is
- * something to format, and a std::string one so the common case needs no
- * .c_str() and cannot misread a stray % as a conversion. */
+/* Three overloads per level, and which one runs is decided by the ARGUMENT
+ * COUNT alone. With no arguments the text is already finished and goes through
+ * verbatim — the two verbatim overloads exist so that neither a literal nor an
+ * assembled std::string is ever parsed for braces. With arguments it is a
+ * format string, and `requires` is what keeps the two cases from overlapping:
+ * without it a plain literal would be ambiguous between them. */
 #define XC_DECLARE_LOG_LEVEL(name, level)                                          \
-    template <class... Args>                                                       \
-    void name(const char* format, Args... args) const                              \
+    void name(const char* text) const                                              \
     {                                                                              \
-        static_assert((std::is_trivially_copyable_v<Args> && ...),                 \
-                      "log arguments go through varargs: pass str.c_str(), "       \
-                      "not a std::string");                                        \
-        if constexpr (sizeof...(Args) == 0)                                        \
-            logger()->write(level, file_, line_, format);                          \
-        else                                                                       \
-            logger()->writef(level, file_, line_, format, args...);                \
+        logger()->write(level, file_, line_, text);                                \
     }                                                                              \
     void name(const std::string& text) const                                       \
     {                                                                              \
         logger()->write(level, file_, line_, text.c_str());                        \
+    }                                                                              \
+    template <class... Args>                                                       \
+        requires(sizeof...(Args) > 0)                                              \
+    void name(std::format_string<Args...> format, Args&&... args) const            \
+    {                                                                              \
+        formatAndWrite(level, format, std::forward<Args>(args)...);                \
     }
 
     XC_DECLARE_LOG_LEVEL(trace, LogLevel::Trace)
@@ -162,6 +175,29 @@ public:
     void flush() const { logger()->flush(); }
 
 private:
+    template <class... Args>
+    void formatAndWrite(LogLevel level, std::format_string<Args...> format,
+                        Args&&... args) const
+    {
+        /* THE LEVEL IS TESTED HERE, not just inside the logger. The old varargs
+         * path could be handed its arguments for free and drop them; this one
+         * builds the whole string first, so without this a record below the
+         * floor would cost exactly as much as one above it. */
+        if (level < logger()->minLevel()) return;
+
+        /* RULE 3, against the one thing std::format can still throw. The format
+         * string is checked at compile time, so this is bad_alloc and nothing
+         * else — and a logger that propagates out of a log call would take the
+         * process down while trying to record why it was in trouble. A marker
+         * line loses the message; throwing here loses the whole log. */
+        try {
+            logger()->write(level, file_, line_,
+                            std::format(format, std::forward<Args>(args)...).c_str());
+        } catch (...) {
+            logger()->write(level, file_, line_, "(log message could not be formatted)");
+        }
+    }
+
     const char* file_;
     int         line_;
 };

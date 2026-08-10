@@ -33,6 +33,21 @@ public:
         Alpha   = 3,   /* the alpha channel alone, as grey             */
     };
 
+    /* WHICH WAY UP THE SOURCE IS STORED. Not a detail the caller can be spared:
+     * the two kinds are indistinguishable from a Texture2D — same struct, same
+     * fields, opposite row order — so the only place the answer exists is the
+     * call site, which knows what it is handing over.
+     *
+     * Deliberately without a default. Most previews are framebuffers and a
+     * default would be right most of the time, which is precisely the failure
+     * mode worth designing out: the lightmap atlas and index map are the two
+     * that are not, and a silent majority default is how they would end up
+     * upside down without anybody noticing they had been assumed about. */
+    enum class Origin : int {
+        Framebuffer,   /* a render target — GL stores it bottom-up         */
+        Image,         /* LoadTextureFromImage and friends — top-down      */
+    };
+
     TexturePreviews() = default;
     ~TexturePreviews();
 
@@ -48,9 +63,19 @@ public:
     void setDepthRange(float nearPlane, float farPlane, float scale);
 
     /* Renders `source` through `mode` into slot `index` and returns the
-     * result, or `source` unchanged if the shader is missing. Slots are
-     * stable: call with the same index each frame for the same buffer. */
-    Texture2D render(int index, Texture2D source, Mode mode, int height = 192);
+     * result. Slots are stable: call with the same index each frame for the
+     * same buffer.
+     *
+     * WHAT COMES BACK IS ALWAYS TOP-DOWN, whatever `origin` said going in — an
+     * ordinary texture the viewer draws with a plain positive source rectangle
+     * and no flip. Normalising here is the whole point: this is the last place
+     * that knows where the pixels came from, and a viewer that has to know is a
+     * viewer that will get it wrong.
+     *
+     * Without the shader the remap degrades to Raw but the copy still happens,
+     * so the orientation contract holds either way. */
+    Texture2D render(int index, Texture2D source, Mode mode, Origin origin,
+                     int height = 192);
 
 private:
     struct Slot {

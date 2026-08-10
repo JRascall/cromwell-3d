@@ -8,6 +8,7 @@
  */
 #pragma once
 
+#include "game/movement/occupancy/OccupancyGrid.hpp"
 #include "game/units/kinds/Unit.hpp"
 
 #include <memory>
@@ -18,10 +19,20 @@ namespace game {
 
 class UnitRoster {
 public:
+    /* ---- the occupancy index -------------------------------------------
+     * Binding a lattice turns "who is standing here" from a walk over every
+     * unit into one array read. UNBOUND ROSTERS STILL WORK — they fall back to
+     * the scan, which is what a small headless test wants and what every
+     * caller got before this existed. Anything holding a World should bind:
+     * see GameState's constructor.
+     *
+     * Rebuilding from scratch, so it is safe to call on a populated roster. */
+    void bindLattice(const Lattice& lattice);
+
     /* Returns a borrowed pointer to the stored unit. */
     Unit* add(std::unique_ptr<Unit> unit);
 
-    void clear() { units_.clear(); }
+    void clear();
 
     int size() const { return static_cast<int>(units_.size()); }
 
@@ -55,7 +66,30 @@ public:
     auto end()   const { return units_.end(); }
 
 private:
+    /* Driven by Unit, which calls these as its own state changes — a roster
+     * that had to be told separately would drift the first time somebody moved
+     * a unit and forgot. Private plus a friend, so the compiler enforces that
+     * rather than a comment asking nicely. */
+    friend class Unit;
+
+    void onBodyMoved(const Unit& unit, const Cell& from);
+    void onBodyKilled(const Unit& unit);
+
+    /* Writes/clears one body's footprint in the grid. */
+    void stamp(const Unit& unit, const Cell& anchor, int bodyId);
+    void unstamp(const Unit& unit, const Cell& anchor, int bodyId);
+
+    /* Fills the grid from scratch. */
+    void rebuildOccupancy();
+
+    /* The scan this class used to be. Kept because an unbound roster is still
+     * legal, and because it is the reference the grid is checked against. */
+    Unit* scanForOccupant(const Cell& cell, const Unit* exclude) const;
+
     std::vector<std::unique_ptr<Unit>> units_;
+
+    Lattice       lattice_;
+    OccupancyGrid occupancy_;
 };
 
 }  // namespace game

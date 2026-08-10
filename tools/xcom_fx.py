@@ -215,9 +215,66 @@ def build(scans: Path, out: Path):
     return 0
 
 
+TEXSAMPLE_RE = re.compile(r"Texture=Texture2D'([^']+)'")
+
+
+def basemats(dump: Path, pkg: str, out: Path):
+    """Material -> textures, read from a base Material's expression graph.
+
+    Particle emitters usually name a base `Material`, not a
+    MaterialInstanceConstant, so xcom_materials.py cannot resolve them: there
+    are no TextureParameterValues to read. The textures are instead wired into
+    MaterialExpressionTextureSample nodes inside the material itself, which
+    `batchexport <pkg> Material T3D` does emit.
+
+    Expensive - the editor loads every dependency, ~280s for a texture-heavy
+    package - so this is worth running for the materials you care about rather
+    than across the whole library.
+    """
+    rows = []
+    for f in sorted(dump.glob('*.T3D')):
+        texes = sorted(set(TEXSAMPLE_RE.findall(f.read_text(errors='replace'))))
+        for t in texes:
+            rows.append({'package': pkg, 'material': f.stem, 'texture': t})
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open('w', newline='', encoding='utf-8') as fh:
+        w = csv.writer(fh, delimiter='\t')
+        for r in rows:
+            w.writerow(['M', r['package'], r['material'], r['texture']])
+    print(f"{pkg}: {len({r['material'] for r in rows})} materials, {len(rows)} texture refs")
+    return 0
+
+
+def buildmats(scans: Path, out: Path):
+    rows = []
+    for tsv in sorted(scans.glob('*.tsv')):
+        for row in csv.reader(tsv.open(encoding='utf-8'), delimiter='\t'):
+            if row and row[0] == 'M' and len(row) >= 4:
+                rows.append(dict(zip(['package', 'material', 'texture'], row[1:4])))
+    if not rows:
+        print(f"No material scans in {scans}")
+        return 1
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open('w', newline='', encoding='utf-8') as fh:
+        w = csv.DictWriter(fh, fieldnames=['package', 'material', 'texture'])
+        w.writeheader(); w.writerows(rows)
+    print(f"{len({(r['package'], r['material']) for r in rows})} materials, "
+          f"{len(rows)} texture refs -> {out}")
+    print("  texture sources: " + ", ".join(
+        f"{k}={v}" for k, v in Counter(r['texture'].split('.')[0] for r in rows).most_common(5)))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest='cmd', required=True)
+    bm = sub.add_parser('basemats')
+    bm.add_argument('--pkg', required=True)
+    bm.add_argument('--dump', required=True, type=Path)
+    bm.add_argument('--out', required=True, type=Path)
+    bb = sub.add_parser('buildmats')
+    bb.add_argument('--scans', required=True, type=Path)
+    bb.add_argument('--out', required=True, type=Path)
     s = sub.add_parser('scan')
     s.add_argument('--pkg', required=True)
     s.add_argument('--dump', required=True, type=Path)
@@ -226,6 +283,10 @@ def main(argv=None):
     b.add_argument('--scans', required=True, type=Path)
     b.add_argument('--out', required=True, type=Path)
     a = ap.parse_args(argv)
+    if a.cmd == 'basemats':
+        return basemats(a.dump, a.pkg, a.out)
+    if a.cmd == 'buildmats':
+        return buildmats(a.scans, a.out)
     return scan(a.dump, a.pkg, a.out) if a.cmd == 'scan' else build(a.scans, a.out)
 
 

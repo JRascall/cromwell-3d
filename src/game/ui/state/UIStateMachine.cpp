@@ -17,7 +17,7 @@ UIStateMachine::UIStateMachine()
     cromwell::crier().onVoid(
         cromwell::events::kUIReady, kHookId, 0,
         [this](const cromwell::EventArgs&) {
-            LOGGER->info("UI ready - re-pushing state: %s", toTag(state_));
+            LOGGER->info("UI ready - re-pushing state: {}", toTag(state_));
             pushToUI();
         });
 }
@@ -34,7 +34,7 @@ void UIStateMachine::setState(UIState next)
     const UIState previous = state_;
     state_ = next;
 
-    LOGGER->info("UI state: %s -> %s", toTag(previous), toTag(next));
+    LOGGER->info("UI state: {} -> {}", toTag(previous), toTag(next));
 
     pushToUI();
     if (onStateChanged) onStateChanged(previous, next);

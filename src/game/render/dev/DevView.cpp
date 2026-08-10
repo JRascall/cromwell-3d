@@ -26,6 +26,13 @@ namespace {
 
 constexpr float kPanelWidth = 340.0f;
 
+/* The gap kept between a panel and the edge of the window, and the smallest a
+ * panel is ever allowed to become. The floor matters on a genuinely tiny
+ * window: without it the clamping arithmetic below produces negative widths
+ * and the panels collapse to nothing instead of merely being cramped. */
+constexpr float kMargin       = 8.0f;
+constexpr float kMinPanelSize = 120.0f;
+
 /* A view-mode checkbox reports a TOGGLE, never a value: the panel does not own
  * that state, it only asks for the same flip the key would have caused. */
 bool toggled(const char* label, bool current)
@@ -114,20 +121,123 @@ bool DevView::wantsKeyboard() const
 
 /* A GRID, NOT A CASCADE. Six stacked windows offset by a title bar each is
  * unreadable the one time it matters — when several are open at once — so the
- * first-use position spreads them three across and two down. They are movable
- * afterwards; this only has to be a sane opening hand. */
-void DevView::placePanel(int slot, float width) const
+ * first-use position spreads them across and down. They are movable afterwards;
+ * this only has to be a sane opening hand.
+ *
+ * THE GRID IS MEASURED, NOT ASSUMED, and that is the whole point of this
+ * function. It used to be three columns of 392 and rows without end, which is a
+ * layout for one particular 1920x1080 window: on anything smaller the third
+ * column started past the right edge, the fourth row started below the bottom,
+ * and a panel whose title bar is off-screen cannot be dragged back — the only
+ * way to reach it again was to close it and hope. Everything below is derived
+ * from viewport->WorkSize so the opening hand fits the window that exists. */
+void DevView::placePanel(int slot, float width, float height) const
 {
     constexpr float kColumnStride = 392.0f;
     constexpr float kRowStride    = 300.0f;
 
-    const float column = static_cast<float>(slot % 3);
-    const float row    = static_cast<float>(slot / 3);
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const ImVec2 origin = viewport->WorkPos;
+    const ImVec2 area   = viewport->WorkSize;
 
-    ImGui::SetNextWindowPos(ImVec2(8.0f + column * kColumnStride,
-                                   toolbarHeight_ + 8.0f + row * kRowStride),
-                            ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_FirstUseEver);
+    /* The toolbar is an ordinary window, so it does not shrink WorkSize the way
+     * a main menu bar would. Reserving its strip is this function's job. */
+    const float top    = toolbarHeight_ + kMargin;
+    const float usable = std::max(kMinPanelSize, area.y - top - kMargin);
+
+    /* NOTHING OPENS WIDER THAN THE WINDOW. The browser asks for 1100, which is
+     * 76px off the right edge of a 1024-wide window before it has even been
+     * positioned. */
+    const float w = std::clamp(width, kMinPanelSize, std::max(kMinPanelSize, area.x - kMargin * 2.0f));
+    const float h = (height > 0.0f) ? std::min(height, usable) : 0.0f;
+
+    const int columns = std::max(1, static_cast<int>((area.x - kMargin) / kColumnStride));
+    const int rows    = std::max(1, static_cast<int>(usable / kRowStride));
+
+    /* Wrap rather than march off the bottom. Two panels sharing a cell is a
+     * far smaller problem than one panel nobody can see. */
+    const int cell = slot % (columns * rows);
+    const int col  = cell % columns;
+    const int row  = cell / columns;
+
+    /* The grid gets the first say and the edges get the last: a panel wider
+     * than its column still has to end up inside. Only the width is known here
+     * — auto-fit height does not exist until the contents have been submitted,
+     * so the bottom edge is keepOnScreen()'s to catch on the next frame. */
+    const float x = std::clamp(origin.x + kMargin + static_cast<float>(col) * kColumnStride,
+                               origin.x + kMargin,
+                               std::max(origin.x + kMargin, origin.x + area.x - w - kMargin));
+    const float y = std::max(origin.y + top,
+                             std::min(origin.y + top + static_cast<float>(row) * kRowStride,
+                                      origin.y + area.y - kRowStride));
+
+    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_FirstUseEver);
+
+    /* Not FirstUseEver — a constraint, applied every frame, so an auto-height
+     * panel that grows past the bottom of the screen (the texture inspector,
+     * once a dozen previews are in it) gets a scroll bar instead of a tail
+     * nobody can see, and a manual resize cannot drag an edge out of reach
+     * either.
+     *
+     * Zero for the minimum height, not kMinPanelSize: a lower bound applies to
+     * the auto-fit size too, and "steam - not connected" is three lines that
+     * should not be padded out to a fixed box to satisfy a floor meant for
+     * manual resizing. */
+    ImGui::SetNextWindowSizeConstraints(ImVec2(kMinPanelSize, 0.0f),
+                                        ImVec2(std::max(kMinPanelSize, area.x - kMargin * 2.0f),
+                                               usable));
+}
+
+/* THE OTHER HALF, AND THE ONE THAT SURVIVES A RESIZE. Opening in the right
+ * place is not enough: ImGui keeps window positions in pixels and has no
+ * opinion about the pixels going away. Alt-tab to a smaller display, drop out
+ * of fullscreen, or drag the game window narrower and every panel keeps the
+ * coordinates it had — several of them now outside. Since the title bar is the
+ * only handle a window has, one that lands outside is unrecoverable.
+ *
+ * So this runs for every panel every frame rather than only on the frames the
+ * viewport changed. It costs two comparisons, it needs no change-detection
+ * state to get subtly wrong, and it also catches the case where the panel was
+ * simply dragged too far. */
+void DevView::keepOnScreen() const
+{
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const ImVec2 origin = viewport->WorkPos;
+    const ImVec2 area   = viewport->WorkSize;
+
+    const ImVec2 position = ImGui::GetWindowPos();
+    const ImVec2 size     = ImGui::GetWindowSize();
+
+    /* Never behind the toolbar: a title bar under the strip is as unclickable
+     * as one off the edge. */
+    const float minX = origin.x + kMargin;
+    const float minY = origin.y + toolbarHeight_;
+
+    /* max() against min(): a window taller or wider than the work area pins to
+     * the top-left corner rather than inverting the range. */
+    const float maxX = std::max(minX, origin.x + area.x - size.x - kMargin);
+    const float maxY = std::max(minY, origin.y + area.y - size.y - kMargin);
+
+    const ImVec2 clamped(std::clamp(position.x, minX, maxX),
+                         std::clamp(position.y, minY, maxY));
+
+    if (clamped.x != position.x || clamped.y != position.y)
+        ImGui::SetWindowPos(clamped);
+}
+
+bool DevView::beginPanel(const char* name, bool* open, int slot, float width,
+                         float height, int flags)
+{
+    placePanel(slot, width, height);
+
+    const bool visible = ImGui::Begin(name, open, static_cast<ImGuiWindowFlags>(flags));
+
+    /* Before the early-out, not inside it. A collapsed or clipped window still
+     * has a position, and it is exactly the window that has been shoved
+     * off-screen that most needs pulling back. */
+    keepOnScreen();
+    return visible;
 }
 
 /* ------------------------------------------------------------- the toolbar */
@@ -182,8 +292,7 @@ void DevView::drawToolbar()
 /* ---------------------------------------------------------------- panels */
 void DevView::drawLayersPanel(ViewLayers& layers)
 {
-    placePanel(0, kPanelWidth);
-    if (ImGui::Begin("layers", &open_.layers)) {
+    if (beginPanel("layers", &open_.layers, 0, kPanelWidth)) {
         layerPair("sky",      &layers.sky,      "world",    &layers.statics);
         layerPair("props",    &layers.props,    "units",    &layers.units);
         layerPair("shadows",  &layers.shadows,  "overlays", &layers.overlays);
@@ -210,8 +319,7 @@ void DevView::drawRenderingPanel(const HudModel& model, ViewLayers& layers,
 {
     /* Slot 7, not 1: every other slot is already spoken for, and two panels
      * sharing one would open exactly on top of each other. */
-    placePanel(7, kPanelWidth);
-    if (ImGui::Begin("rendering", &open_.rendering)) {
+    if (beginPanel("rendering", &open_.rendering, 7, kPanelWidth)) {
         RenderEffects& effects = tunables.effects;
 
         ImGui::TextDisabled("what contributes to a surface's colour.\n"
@@ -268,8 +376,7 @@ void DevView::drawRenderingPanel(const HudModel& model, ViewLayers& layers,
 
 void DevView::drawViewPanel(const HudModel& model, DevRequests& requests)
 {
-    placePanel(1, kPanelWidth);
-    if (ImGui::Begin("view", &open_.view)) {
+    if (beginPanel("view", &open_.view, 1, kPanelWidth)) {
         int storey = model.isoLevel;
         if (ImGui::SliderInt("storey", &storey, 0, storeys_ - 1))
             requests.isoLevel = storey;
@@ -323,8 +430,7 @@ void DevView::drawSunPanel(const HudModel& model, DevTunables& tunables,
 {
     SunLight::Tuning& tuning = tunables.sun.tuning();
 
-    placePanel(2, 380.0f);
-    if (ImGui::Begin("sun", &open_.sun)) {
+    if (beginPanel("sun", &open_.sun, 2, 380.0f)) {
         ImGui::SeparatorText("where it is");
         float azimuth = model.sunAzimuth;
         if (ImGui::SliderFloat("azimuth", &azimuth, 0.0f, 360.0f, "%.0f deg"))
@@ -382,8 +488,7 @@ void DevView::drawRibbonPanel(DevTunables& tunables)
 {
     RibbonTuning& ribbon = tunables.ribbon;
 
-    placePanel(3, 380.0f);
-    if (ImGui::Begin("ribbon", &open_.ribbon)) {
+    if (beginPanel("ribbon", &open_.ribbon, 3, 380.0f)) {
         ImGui::SeparatorText("colour");
         colourEdit("move", &ribbon.moveColour);
         colourEdit("sprint", &ribbon.sprintColour);
@@ -412,8 +517,7 @@ void DevView::drawRibbonPanel(DevTunables& tunables)
 void DevView::drawPostPanel(const HudModel& model, ViewLayers& layers,
                             DevTunables& tunables, DevRequests& requests)
 {
-    placePanel(4, kPanelWidth);
-    if (ImGui::Begin("post", &open_.post)) {
+    if (beginPanel("post", &open_.post, 4, kPanelWidth)) {
         ImGui::SeparatorText("tone map");
         ImGui::SliderFloat("exposure", &tunables.exposure, 0.25f, 16.0f, "%.2f");
         ImGui::TextDisabled("set against the sun's radiance so a lit\nwall lands near mid grey - move both or neither");
@@ -437,8 +541,7 @@ void DevView::drawPostPanel(const HudModel& model, ViewLayers& layers,
 
 void DevView::drawScenePanel(const HudModel& model, DevRequests& requests)
 {
-    placePanel(5, kPanelWidth);
-    if (ImGui::Begin("scene", &open_.scene)) {
+    if (beginPanel("scene", &open_.scene, 5, kPanelWidth)) {
         ImGui::SeparatorText("selection");
         ImGui::Text("%s at (%d,%d) storey %d", model.selectedName.c_str(),
                     model.selectedCell.x, model.selectedCell.y,
@@ -497,8 +600,7 @@ void DevView::drawScenePanel(const HudModel& model, DevRequests& requests)
 void DevView::drawDecalPanel(const DevDecalTool& tool, ViewLayers& layers,
                              DevRequests& requests)
 {
-    placePanel(9, kPanelWidth);
-    if (ImGui::Begin("decals", &open_.decals)) {
+    if (beginPanel("decals", &open_.decals, 9, kPanelWidth)) {
 
         if (!tool.available) {
             ImGui::TextDisabled("the decal pass did not come up.\n"
@@ -586,7 +688,10 @@ void DevView::drawDecalPanel(const DevDecalTool& tool, ViewLayers& layers,
 
 void DevView::drawSteamPanel(DevSteam steam)
 {
-    if (ImGui::Begin("steam", &open_.steam)) {
+    /* Slot 10, where it used to have none at all: without a slot it fell back
+     * to ImGui's own cascade, which counts every window ever opened and had it
+     * stepping further down and right each time the panel was reopened. */
+    if (beginPanel("steam", &open_.steam, 10, kPanelWidth)) {
         if (!steam.running) {
             ImGui::TextDisabled("not connected");
             if (!steam.reason.empty()) ImGui::TextWrapped("%s", steam.reason.c_str());
@@ -620,8 +725,7 @@ void DevView::drawSteamPanel(DevSteam steam)
 
 void DevView::drawTexturePanel(const DevTextures& textures)
 {
-    placePanel(6, kPanelWidth * 1.6f);
-    if (ImGui::Begin("textures", &open_.textures)) {
+    if (beginPanel("textures", &open_.textures, 6, kPanelWidth * 1.6f)) {
         ImGui::SliderFloat("preview height", &previewHeight_, 60.0f, 480.0f, "%.0f px");
         ImGui::Separator();
 
@@ -651,12 +755,13 @@ void DevView::drawTexturePanel(const DevTextures& textures)
             const int height = static_cast<int>(previewHeight_);
             const int width  = static_cast<int>(previewHeight_ * aspect);
 
-            /* Drawn AS GIVEN. GL's origin is bottom-left and ImGui's is
-             * top-left, so a framebuffer shown here needs exactly one flip —
-             * and TexturePreviews already applied it, on the way into the copy
-             * it hands over. Flipping again here is what made every preview
-             * upside down; the correction belongs where the source's
-             * orientation is actually known, not here. */
+            /* Drawn AS GIVEN, with a positive source rectangle. Everything in
+             * this list arrives from TexturePreviews::render, which promises an
+             * ordinary top-down texture — see the note on its declaration.
+             *
+             * Do not add a flip here. This panel cannot tell which buffer an
+             * entry came from and so cannot be right about it; the one place
+             * that can is the copy, and it is where the correction lives. */
             const Rectangle source{ 0.0f, 0.0f,
                                     static_cast<float>(entry.texture.width),
                                     static_cast<float>(entry.texture.height) };
@@ -685,16 +790,17 @@ DevView::~DevView() = default;
 
 void DevView::drawBrowserPanel(WebSurface* browser)
 {
-    placePanel(8, 1100.0f);
-    ImGui::SetNextWindowSize(ImVec2(1100.0f, 780.0f), ImGuiCond_FirstUseEver);
-
     /* NoScrollWithMouse and NoScrollbar: the wheel belongs to the page, and an
      * ImGui scroll region wrapped around a browser would scroll the wrong
      * thing and clip the other. The page is sized to the window instead. */
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar |
                                    ImGuiWindowFlags_NoScrollWithMouse;
 
-    if (ImGui::Begin("browser", &open_.browser, flags)) {
+    /* THE ONE PANEL THAT ASKS FOR A HEIGHT, and the one most likely not to get
+     * what it asked for: 1100x780 is bigger than the work area of a 720p
+     * window in both directions, so both numbers are wanted sizes rather than
+     * granted ones and placePanel trims them to fit. */
+    if (beginPanel("browser", &open_.browser, 8, 1100.0f, 780.0f, flags)) {
         /* SNAPPED TO WHOLE PIXELS, AND THIS IS LOAD-BEARING. ImGui window
          * positions are floats and a drag leaves them fractional. Half a pixel
          * of offset under a page of antialiased text is the difference between

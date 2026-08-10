@@ -359,6 +359,13 @@ std::int64_t SunBaker::bakeSlots(const std::vector<std::size_t>& slots, const Su
     if (workers > slots.size()) workers = static_cast<unsigned>(slots.size());
     if (workers < 1) workers = 1;
 
+    /* WARM THE OCCLUSION GRID ON THIS THREAD, before any worker exists. It is
+     * a lazily rebuilt cache behind a const accessor, so N threads arriving at
+     * an invalidated one would all rebuild it into the same vector at once.
+     * One call here and every worker below finds it already built and only
+     * reads it. See World::occlusion(). */
+    world_.occlusion();
+
     std::vector<std::int64_t> tally(workers, 0);
     std::vector<std::thread>  threads;
     threads.reserve(workers);

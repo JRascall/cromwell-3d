@@ -20,7 +20,13 @@ GameState::GameState()
 void GameState::reset()
 {
     DemoMapFactory::build(world_);
+
+    /* Before the roster is filled, so every unit is indexed as it is added
+     * rather than needing a sweep afterwards. See UnitRoster::bindLattice —
+     * this is what turns "who is standing here" into one array read. */
+    roster_.bindLattice(world_.lattice());
     DemoRosterFactory::build(roster_);
+
     selectedIndex_ = 0;
     selectIndex(0);
 }

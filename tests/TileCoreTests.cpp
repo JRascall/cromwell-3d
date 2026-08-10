@@ -519,6 +519,170 @@ void testUnits()
     CHECK(ownClear, "the tank's own hull blocked its own view");
 }
 
+/* --------------------------------------------------------------- test 9 */
+/* THE OCCUPANCY INDEX MUST AGREE WITH THE SCAN IT REPLACED, cell for cell,
+ * after every kind of edit. An index is a second copy of something already
+ * known, so the only interesting question about it is whether it drifts — and
+ * drift shows up as a unit that is invisible to sight or standing in a wall,
+ * which is a bug nobody traces back to a cache.
+ *
+ * So this holds two rosters with identical contents, one bound and one not,
+ * and compares every cell after each edit. The unbound one still runs the
+ * original walk-every-unit scan, which makes it the reference. */
+void testOccupancyIndex()
+{
+    std::printf("== occupancy index ==\n");
+    const Lattice& lattice = g_world.lattice();
+
+    UnitRoster indexed, reference;
+    indexed.bindLattice(lattice);          /* reference is deliberately unbound */
+
+    const auto populate = [](UnitRoster& roster) {
+        roster.add(makeSoldier(Cell{ 11, 10, 0 }, Team::Player));
+        roster.add(makeVehicle(Cell{ 16,  4, 0 }, Team::Player));
+        roster.add(makeSoldier(Cell{  2, 16, 0 }, Team::Enemy));
+        roster.add(makeSoldier(Cell{  6, 18, Lattice::storeyBaseZ(2) }, Team::Enemy));
+    };
+    populate(indexed);
+    populate(reference);
+
+    /* Compares every cell, and reports the FIRST disagreement rather than one
+     * per cell — a drifted index disagrees about thousands at once. */
+    const auto agree = [&](const char* stage) {
+        int mismatches = 0;
+        Cell first{};
+        for (int i = 0; i < lattice.cellCount(); i++) {
+            const Cell  cell = lattice.cellAt(i);
+            const Unit* a = indexed.occupantAt(cell);
+            const Unit* b = reference.occupantAt(cell);
+
+            /* Different rosters, so compare by index rather than by pointer. */
+            const int ai = a ? indexed.indexOf(a) : -1;
+            const int bi = b ? reference.indexOf(b) : -1;
+            if (ai != bi) {
+                if (!mismatches) first = cell;
+                mismatches++;
+            }
+        }
+        CHECK(mismatches == 0,
+              "%s: index disagrees with the scan in %d cells, first (%d,%d,%d)",
+              stage, mismatches, first.x, first.y, first.z);
+        if (!mismatches) std::printf("   %-22s agrees on all %d cells\n",
+                                     stage, lattice.cellCount());
+    };
+
+    agree("after spawn");
+
+    /* A move. The tank is 2x2, so this also covers a footprint whose old and
+     * new positions OVERLAP — the case where a careless (erase then write)
+     * blanks cells the body is keeping. */
+    indexed.at(1).setPosition(Cell{ 17, 4, 0 });
+    reference.at(1).setPosition(Cell{ 17, 4, 0 });
+    agree("after overlapping move");
+
+    indexed.at(0).setPosition(Cell{ 12, 12, 0 });
+    reference.at(0).setPosition(Cell{ 12, 12, 0 });
+    agree("after disjoint move");
+
+    /* A death. The body stays in the roster but stops occupying. */
+    indexed.at(2).kill();
+    reference.at(2).kill();
+    agree("after a death");
+
+    /* Moving onto the cell a dead body is lying in must be legal and visible. */
+    indexed.at(0).setPosition(Cell{ 2, 16, 0 });
+    reference.at(0).setPosition(Cell{ 2, 16, 0 });
+    agree("after moving onto a corpse");
+
+    /* `exclude` still works: a body never blocks itself. */
+    const Unit& tank = indexed.at(1);
+    CHECK(indexed.occupantAt(tank.position(), &tank) == nullptr,
+          "a body blocked itself through the index");
+}
+
+/* -------------------------------------------------------------- test 10 */
+/* THE OCCLUSION SUMMARY MUST SAY WHAT THE TILES SAY. RayCaster reads bits
+ * instead of Tiles now, so a wrong bit is a wall that shoots through or a
+ * window that does not — and it would look like a map authoring bug, not a
+ * cache bug, which is the expensive kind of wrong.
+ *
+ * Checked against the tiles directly rather than against a second ray caster:
+ * comparing two implementations only tells you they agree, and keeping a
+ * reference copy of the walk is the "two implementations to keep in step"
+ * problem the escape hatch exists to avoid. This asks whether the DERIVED data
+ * matches its source, which is the only thing that can drift.
+ *
+ * It also re-checks after a demolition, because the grid is rebuilt on
+ * invalidation and a rebuild that does not happen is the whole risk. */
+void testOcclusionGrid()
+{
+    std::printf("== occlusion summary ==\n");
+
+    const auto verify = [](const World& world, const char* stage) {
+        const Lattice&       lattice = world.lattice();
+        const OcclusionGrid& grid    = world.occlusion();
+
+        int mismatches = 0;
+        for (int z = 0; z < lattice.depth(); z++)
+        for (int y = 0; y < lattice.height(); y++)
+        for (int x = 0; x < lattice.width(); x++) {
+            const int           index = lattice.index(x, y, z);
+            const Tile&         tile  = world.at(index);
+            const std::uint16_t word  = grid.at(index);
+
+            /* every face, cover grade and glass */
+            for (Dir d : kAllDirs) {
+                const Edge edge = world.effectiveEdge(x, y, z, d);
+                if (occ::coverOf(word, toIndex(d)) != static_cast<int>(edge.cover)) mismatches++;
+                if (occ::hasWindow(word, toIndex(d)) != edge.window) mismatches++;
+            }
+
+            const bool ramp        = tile.isRamp();
+            const bool offsetFloor = std::fabs(tile.floorOffset) >= 1e-6f;
+
+            const bool slab = tile.hasFloor && !ramp && !offsetFloor;
+            if (((word & occ::kSlab) != 0) != slab) mismatches++;
+            if (((word & occ::kCanopy) != 0) != tile.canopy) mismatches++;
+            if (((word & occ::kBlocked) != 0) != tile.blocked) mismatches++;
+
+            /* the escape hatch must cover everything the fast path cannot
+             * decide on its own */
+            const bool needsTile = tile.blocked || ramp
+                                || (tile.hasFloor && !ramp && offsetFloor);
+            if (((word & occ::kNeedsTile) != 0) != needsTile) mismatches++;
+        }
+
+        CHECK(mismatches == 0, "%s: %d disagreements with the tiles", stage, mismatches);
+        if (!mismatches)
+            std::printf("   %-20s matches tiles across all %d cells\n",
+                        stage, lattice.cellCount());
+    };
+
+    World world;
+    DemoMapFactory::build(world);
+    verify(world, "as authored");
+
+    /* Blow a hole, exactly as the bake benchmark's demolition does: clearing
+     * destructible cover and floors must invalidate and rebuild the summary. */
+    const Lattice& lattice = world.lattice();
+    int edits = 0;
+    for (int y = 10; y <= 14; y++)
+    for (int x = 9; x <= 13; x++)
+    for (int i = 0; i < kCellsPerStorey; i++) {
+        if (!lattice.isValid(x, y, i)) continue;
+        Tile& tile = world.at(lattice.index(x, y, i));
+        for (Dir d : kAllDirs) {
+            Edge& edge = tile.edge(d);
+            if (edge.cover != Cover::None && edge.destructible) { edge = Edge{}; edits++; }
+        }
+        if (tile.blocked && tile.blockedDestructible) { tile.blocked = false; edits++; }
+        if (tile.hasFloor && tile.floorDestructible)  { tile.hasFloor = false; edits++; }
+    }
+    std::printf("   demolished %d tile properties\n", edits);
+    CHECK(edits > 0, "the demolition changed nothing - pick another site");
+    verify(world, "after demolition");
+}
+
 }  // namespace
 
 int main()
@@ -531,6 +695,8 @@ int main()
     testBorders();
     testLos();
     testUnits();
+    testOccupancyIndex();
+    testOcclusionGrid();
 
     if (g_failures) std::printf("\n%d FAILURE(S)\n", g_failures);
     else            std::printf("\nall tile-core checks passed\n");

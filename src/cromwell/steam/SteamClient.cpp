@@ -36,7 +36,7 @@ private:
 void OverlayListener::onOverlay(GameOverlayActivated_t* event)
 {
     active = event->m_bActive != 0;
-    LOGGER->info("STEAM: overlay %s", active ? "opened" : "closed");
+    LOGGER->info("STEAM: overlay {}", active ? "opened" : "closed");
 }
 
 OverlayListener* g_overlay = nullptr;
@@ -84,7 +84,7 @@ bool steamRestartIfNecessary()
     announceAppId();
     if (!SteamAPI_RestartAppIfNecessary(XC_STEAM_APPID)) return false;
 
-    LOGGER->info("STEAM: relaunching through the client for app %u",
+    LOGGER->info("STEAM: relaunching through the client for app {}",
                  static_cast<unsigned>(XC_STEAM_APPID));
     return true;
 #else
@@ -97,7 +97,7 @@ bool SteamClient::start()
 #if !XC_HAVE_STEAM
     reason_ = "built without the Steamworks SDK "
               "(see third_party/steamworks/README.md)";
-    LOGGER->info("STEAM: disabled - %s", reason_.c_str());
+    LOGGER->info("STEAM: disabled - {}", reason_);
     return false;
 #else
     if (running_) return true;
@@ -110,7 +110,7 @@ bool SteamClient::start()
     SteamErrMsg error = {};
     if (SteamAPI_InitEx(&error) != k_ESteamAPIInitResult_OK) {
         reason_ = error[0] ? error : "SteamAPI_InitEx failed";
-        LOGGER->warn("STEAM: disabled - %s", reason_.c_str());
+        LOGGER->warn("STEAM: disabled - {}", reason_);
         return false;
     }
 
@@ -124,10 +124,8 @@ bool SteamClient::start()
 
     g_overlay = new OverlayListener();
 
-    LOGGER->info("STEAM: app %u, signed in as %s (%llu)",
-                 static_cast<unsigned>(XC_STEAM_APPID),
-                 personaName_.c_str(),
-                 static_cast<unsigned long long>(steamId_));
+    LOGGER->info("STEAM: app {}, signed in as {} ({})",
+                 static_cast<unsigned>(XC_STEAM_APPID), personaName_, steamId_);
     return true;
 #endif
 }

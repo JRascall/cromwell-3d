@@ -144,7 +144,12 @@ public:
 
 private:
     /* ---- passes, all reading view_ -------------------------------------- */
-    void drawGeometry(const Material& material, bool castersOnly = false);
+    /* Both take the storey depth EXPLICITLY rather than reading the iso level
+     * themselves. The cutaway belongs to the camera, and a pass that reaches
+     * for it silently — as the shadow map used to — makes the lighting change
+     * when the player changes floor. The lit pass gets the cutaway; the sun
+     * and the probes get the whole lattice. */
+    void drawGeometry(int maxStorey, const Material& material, bool castersOnly = false);
     void drawGeometryLit(int maxStorey);
     void drawGeometryPrepass();
     void drawOverlays();

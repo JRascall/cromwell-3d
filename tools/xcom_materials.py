@@ -140,7 +140,36 @@ def resolve_png(ref: str, library: Path, home_pkg: str) -> str:
     return f"{hits[0].parent.name}/{name}.png" if hits else ''
 
 
+def load_basemats(library: Path) -> dict[str, list[str]]:
+    """material name -> its textures, from base-Material expression graphs.
+
+    A MaterialInstanceConstant exposes TextureParameterValues, which is what
+    the main path reads. A plain `Material` does not: its textures are wired
+    into MaterialExpressionTextureSample nodes instead, so ~2500 meshes came
+    out with a material reference but no texture. tools/xcom_fx.py `basemats`
+    dumps those graphs; this is the fallback that consumes them.
+    """
+    out: dict[str, list[str]] = {}
+    f = library / 'basematerials.csv'
+    if not f.exists():
+        return out
+    for r in csv.DictReader(f.open(encoding='utf-8')):
+        out.setdefault(r['material'].lower(), []).append(r['texture'])
+    return out
+
+
+def classify_texture(name: str) -> str:
+    """Guess a texture's role from its name - graphs have no parameter names."""
+    n = name.lower()
+    if any(k in n for k in ('_nrm', '_norm', '_nml', 'normal')):
+        return 'normal'
+    if any(k in n for k in ('_msk', '_mask', '_opc', '_spec', '_emis')):
+        return 'mask'
+    return 'diffuse'
+
+
 def build(library: Path, mats: Path, write_mtl: bool, patch_obj: bool):
+    basemats = load_basemats(library)
     # mesh -> [material refs]
     deps: dict[tuple[str, str], list[str]] = {}
     for tsv in (mats / 'deps').glob('*.tsv'):
@@ -157,8 +186,9 @@ def build(library: Path, mats: Path, write_mtl: bool, patch_obj: bool):
         for f in pkgdir.glob('*.T3D'):
             d = parse_t3d(f)
             d['package'] = pkgdir.name
-            micdefs.setdefault(f.stem, d)
-            micdefs[f"{pkgdir.name}::{f.stem}"] = d
+            # Keys are lowercased; see the lookup below for why.
+            micdefs.setdefault(f.stem.lower(), d)
+            micdefs[f"{pkgdir.name}::{f.stem}".lower()] = d
 
     rows = []
     per_pkg_mtl: dict[str, dict[str, dict]] = defaultdict(dict)
@@ -168,13 +198,30 @@ def build(library: Path, mats: Path, write_mtl: bool, patch_obj: bool):
         chosen = None
         for ref in matrefs:
             bits = ref.split('.')
-            cand = micdefs.get(f"{bits[0]}::{bits[-1]}") or micdefs.get(bits[-1])
+            # Case-INSENSITIVE: XCOM's own references disagree with its file
+            # names (`adventacunits.Materials.adventacunits` vs the on-disk
+            # `AdventACUnits`), and an exact match silently loses ~1600 meshes.
+            cand = (micdefs.get(f"{bits[0]}::{bits[-1]}".lower())
+                    or micdefs.get(bits[-1].lower()))
             if cand:
                 chosen = (ref, cand)
                 break
         if not chosen:
-            rows.append({'package': pkg, 'mesh': mesh, 'material': matrefs[0] if matrefs else '',
-                         'diffuse': '', 'normal': '', 'mask': '', 'parent': '', 'resolved': ''})
+            # No MIC for this mesh. Fall back to the base Material's expression
+            # graph, whose textures carry no parameter names - so the role of
+            # each is inferred from its suffix (_NRM, _MSK, ...).
+            ref = matrefs[0] if matrefs else ''
+            texes = basemats.get(ref.split('.')[-1].lower(), []) if ref else []
+            byrole: dict[str, str] = {}
+            for t in texes:
+                byrole.setdefault(classify_texture(t.split('.')[-1]), t)
+            dif = resolve_png(byrole.get('diffuse', ''), library, pkg)
+            nrm = resolve_png(byrole.get('normal', ''), library, pkg)
+            msk = resolve_png(byrole.get('mask', ''), library, pkg)
+            rows.append({'package': pkg, 'mesh': mesh, 'material': ref,
+                         'diffuse': dif, 'normal': nrm, 'mask': msk,
+                         'parent': 'base-material' if texes else '',
+                         'resolved': 'yes' if dif else ''})
             continue
         ref, d = chosen
         home = d.get('package', pkg)

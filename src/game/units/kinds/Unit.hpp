@@ -48,6 +48,7 @@ namespace game {
 using namespace cromwell;
 
 class MoveGraph;
+class UnitRoster;
 class World;
 
 class Unit : public Entity {
@@ -61,13 +62,10 @@ public:
      * the terrain, because the lattice alone cannot say how high a floor sits.
      * Read the XYZ with Entity::location(). */
     const Cell& position() const { return position_; }
-    void setPosition(const Cell& cell)
-    {
-        position_ = cell;
-        setLocation(Vec3{ static_cast<float>(cell.x) + 0.5f,
-                          location().y,
-                          static_cast<float>(cell.y) + 0.5f });
-    }
+
+    /* Out of line: it tells the roster where the body went, and the roster's
+     * header cannot be included from here without a cycle. */
+    void setPosition(const Cell& cell);
 
     Team team() const { return team_; }
 
@@ -82,17 +80,26 @@ public:
      * there is only the flag. */
     bool isDead()  const { return dead_; }
     bool isAlive() const { return !dead_; }
-    void kill() { dead_ = true; }
+
+    /* Out of line for the same reason as setPosition: the occupancy index
+     * skips the dead, so it has to be told. */
+    void kill();
 
     /* ---- the components ------------------------------------------------
-     * Named accessors over Entity::component<T>(), for the five this game's
-     * factory always attaches. Anything optional should be asked for with
-     * findComponent<T>() so its absence is a value rather than a crash. */
-    const BodyComponent&         body()         const { return component<BodyComponent>(); }
-    const MobilityComponent&     mobility()     const { return component<MobilityComponent>(); }
-    const CoverComponent&        cover()        const { return component<CoverComponent>(); }
-    const DestructibleComponent& destructible() const { return component<DestructibleComponent>(); }
-    const PresentationComponent& presentation() const { return component<PresentationComponent>(); }
+     * Named accessors for the five this game's factory always attaches.
+     * Anything optional should be asked for with findComponent<T>() so its
+     * absence is a value rather than a crash.
+     *
+     * THESE READ CACHED POINTERS, NOT THE COMPONENT MAP. The facade below is
+     * called from inside the roster scan that the ray caster runs per step, so
+     * a hash lookup here is a hash lookup a few hundred thousand times a
+     * frame. Entity::onComponentsChanged is what keeps the pointers honest —
+     * see the note on that hook. */
+    const BodyComponent&         body()         const { return *body_; }
+    const MobilityComponent&     mobility()     const { return *mobility_; }
+    const CoverComponent&        cover()        const { return *cover_; }
+    const DestructibleComponent& destructible() const { return *destructible_; }
+    const PresentationComponent& presentation() const { return *presentation_; }
 
     /* ---- facade over them ---------------------------------------------- */
     const Footprint& footprint() const { return body().footprint(); }
@@ -117,10 +124,39 @@ public:
     /* Does this body cover `cell` when anchored where it is? */
     bool occupies(const Cell& cell) const;
 
+protected:
+    /* Rebinds the cached component pointers. Driven by Entity, never called
+     * directly — see Entity::onComponentsChanged. */
+    void onComponentsChanged() override;
+
 private:
+    /* The roster tells a unit where it sits in the index, so the unit can keep
+     * that index current without the roster having to search for it. */
+    friend class UnitRoster;
+    void attachToRoster(UnitRoster* roster, int bodyId)
+    {
+        roster_ = roster;
+        bodyId_ = bodyId;
+    }
+
     Cell position_;
     Team team_;
     bool dead_ = false;
+
+    /* Null until added to a roster — a free-standing unit is legal and simply
+     * has no index to keep. */
+    UnitRoster* roster_ = nullptr;
+    int         bodyId_ = -1;
+
+    /* Borrowed from the component map, which owns them and outlives them.
+     * Null until the factory attaches each one; a facade call before then is
+     * the same mistake as dereferencing findComponent's result unchecked, and
+     * fails as loudly. */
+    const BodyComponent*         body_ = nullptr;
+    const MobilityComponent*     mobility_ = nullptr;
+    const CoverComponent*        cover_ = nullptr;
+    const DestructibleComponent* destructible_ = nullptr;
+    const PresentationComponent* presentation_ = nullptr;
 };
 
 }  // namespace game
