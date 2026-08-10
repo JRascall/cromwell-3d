@@ -23,6 +23,25 @@ option(XC_BUILD_WEB   "Build the CEF web surface"  ON)
 # cmake/steamworks.cmake and third_party/steamworks/README.md.
 option(XC_BUILD_STEAM "Link Steamworks, when the SDK has been dropped in" ON)
 
+# ---- Tracy: the frame profiler ----------------------------------------
+# OFF by default, and it must stay that way. The Tracy CLIENT is cheap but not
+# free — it opens a listening socket, allocates a ring buffer and stamps every
+# zone — so a shipping build should not carry it. Turning it on is a deliberate
+# act for a profiling session.
+#
+# WHY TRACY AND NOT VISUAL STUDIO'S PROFILER. Two reasons, both hard:
+#   1. VS profiles a whole process run. There is no in-game trigger, so it
+#      cannot answer "what happened between these two keypresses".
+#   2. VS's GPU Usage tool supports Direct3D 10/11/12 and NOT OpenGL. This
+#      renderer is GL 4.3, so VS can say nothing at all about the GPU.
+# Tracy does per-frame CPU and OpenGL GPU zones on one aligned timeline, which
+# is the only way to tell a GPU-bound frame from a CPU-bound one.
+#
+# The macros are wrapped in cromwell/diag/Profile.hpp so nothing else in the
+# tree includes Tracy or knows whether it exists; with this OFF they compile to
+# nothing.
+option(XC_TRACY "Build with the Tracy profiler client" OFF)
+
 # 480 is Spacewar, Valve's public test app. Every Steam account owns it, so
 # identity, the friends list and the overlay all work against it with no app of
 # our own and no partner paperwork. ONE PLACE: it reaches the code as a compile
@@ -80,12 +99,40 @@ add_library(cromwell_base STATIC
     src/cromwell/events/Crier.cpp
     src/cromwell/entities/Entity.cpp
     src/cromwell/entities/EntityProps.cpp
+    src/cromwell/diag/Profiler.cpp
     src/cromwell/spatial/SpatialHash.cpp
     src/cromwell/settings/Settings.cpp
     src/cromwell/net/WinHttpClient.cpp
     src/cromwell/steam/SteamAvatar.cpp
 )
 target_include_directories(cromwell_base PUBLIC src)
+
+# ---- Tracy client ------------------------------------------------------
+# Attached to cromwell_base rather than to the renderer, because the simulation
+# wants zones too — a frame spike in pathfinding is as interesting as one in a
+# shadow pass, and game_core links this. The GPU half needs GL and therefore
+# lives with the renderer; see cromwell/diag/ProfileGpu.hpp.
+#
+# PUBLIC on both counts. TracyClient's headers are in cromwell's own interface
+# through Profile.hpp, and XC_HAVE_TRACY decides what that header expands to —
+# a definition set for the engine but not for its users is how two translation
+# units end up disagreeing about what a macro does. Same reasoning as
+# XC_HAVE_STEAM and XC_HAVE_WEB further down.
+set(XC_TRACY_ENABLED 0)
+if(XC_TRACY)
+    include(FetchContent)
+    FetchContent_Declare(
+        tracy
+        GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+        GIT_TAG        v0.11.1
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(tracy)
+    target_link_libraries(cromwell_base PUBLIC TracyClient)
+    set(XC_TRACY_ENABLED 1)
+    message(STATUS "Tracy: profiler client ON - run the Tracy server to connect")
+endif()
+target_compile_definitions(cromwell_base PUBLIC XC_HAVE_TRACY=${XC_TRACY_ENABLED})
 
 # WinHTTP is the engine's HTTP transport - part of Windows, so this is a link
 # line rather than a dependency. See cromwell/net/HttpClient.hpp.
@@ -179,6 +226,12 @@ if(XC_BUILD_TESTS)
     add_executable(xcom_spatial_tests tests/SpatialHashTests.cpp)
     target_link_libraries(xcom_spatial_tests PRIVATE cromwell_base)
 
+    # The profiler's capture file. Checked for STRUCTURE, not for timings: the
+    # failure that matters is a trace Perfetto refuses to open, and it is
+    # otherwise discovered at the end of a profiling session.
+    add_executable(xcom_profiler_tests tests/ProfilerTests.cpp)
+    target_link_libraries(xcom_profiler_tests PRIVATE cromwell_base)
+
     # The avatar fetch. Registered with NO arguments, which runs only the
     # offline half - see the file header. `--live <steamid64>` exercises the
     # real transport and is a manual check, deliberately not in ctest.
@@ -195,7 +248,7 @@ if(XC_BUILD_TESTS)
     # The test binaries stay in the build tree. builds/win is the runnable
     # product - what you would zip and hand to someone - and test exes are
     # not part of it.
-    set_target_properties(xcom_tests xcom_crier_tests xcom_ui_tests xcom_entity_tests xcom_services_tests xcom_steam_tests xcom_spatial_tests xcom_perf PROPERTIES
+    set_target_properties(xcom_tests xcom_crier_tests xcom_ui_tests xcom_entity_tests xcom_services_tests xcom_steam_tests xcom_spatial_tests xcom_profiler_tests xcom_perf PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY                "${CMAKE_BINARY_DIR}/tests"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_BINARY_DIR}/tests"
         RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/tests"
@@ -210,6 +263,7 @@ if(XC_BUILD_TESTS)
     add_test(NAME services COMMAND xcom_services_tests)
     add_test(NAME steam    COMMAND xcom_steam_tests)
     add_test(NAME spatial  COMMAND xcom_spatial_tests)
+    add_test(NAME profiler COMMAND xcom_profiler_tests)
 endif()
 
 # ---- app ---------------------------------------------------------------
@@ -307,6 +361,7 @@ if(XC_BUILD_APP)
         src/cromwell/gpu/target/CustomDepthStencil.cpp
         src/cromwell/gpu/target/DepthTarget.cpp
         src/cromwell/gpu/GL.cpp
+        src/cromwell/gpu/GpuProfiler.cpp
         src/cromwell/gpu/target/HdrTarget.cpp
         src/cromwell/gpu/ShaderLibrary.cpp
         src/cromwell/input/InputHandler.cpp
@@ -387,7 +442,6 @@ if(XC_BUILD_APP)
         src/game/render/dev/DecalDemo.cpp
         src/game/render/dev/DevView.cpp
         src/game/render/ribbon/GlowPass.cpp
-        src/game/render/overlay/Hud.cpp
         src/game/render/overlay/OverlayRenderer.cpp
         src/game/render/scene/ProbePlacement.cpp
         src/game/render/scene/PropSet.cpp

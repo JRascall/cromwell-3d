@@ -19,6 +19,15 @@
 #                                     header comments are the point
 #   bugprone-narrowing-conversions    int<->float is everywhere in graphics
 #   bugprone-easily-swappable-...     fires on every (x, y, z) in the tree
+#   bugprone-incorrect-roundings      nine hits, nine false positives. It warns
+#                                     that static_cast<int>(x + 0.5f) rounds the
+#                                     wrong way for NEGATIVE x — true, and every
+#                                     site here is positive by construction (a
+#                                     colour channel, a climb height, a drop
+#                                     height) and several are clamped to >= 1
+#                                     immediately after. A check that is always
+#                                     wrong here teaches people to skim the
+#                                     output, which costs more than it finds.
 #
 # Run it with tools/tidy.sh, which needs the compile database — see that script.
 
@@ -30,7 +39,6 @@ Checks: >
   bugprone-use-after-move,
   bugprone-dangling-handle,
   bugprone-integer-division,
-  bugprone-incorrect-roundings,
   bugprone-misplaced-widening-cast,
   bugprone-signed-char-misuse,
   bugprone-string-integer-assignment,

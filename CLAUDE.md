@@ -19,6 +19,104 @@ binaries build without raylib — prefer them for a fast loop.
 | `xcom_perf --bake` | also runs the sun bake benchmark |
 | `xcom_tests` | tile core, including derived-cache equivalence checks |
 
+`./tools/tidy.sh` runs clang-tidy over the tree (ships with VS2022, no compile
+database needed). Currently clean; keep it that way. It does not substitute for
+thinking about where a call sits — see the note below on what static analysis
+cannot see.
+
+## Profiling
+
+**In-game, always available.** The dev panel (F1) has a **profiler** tab showing
+per-zone CPU and GPU milliseconds, live.
+
+**F9 starts and stops a capture.** It writes Chrome Trace JSON to
+`builds/win/profiles/profile_NNN.json` — beside the executable, not the working
+directory, and **numbered so a capture cannot overwrite the previous one**. Open
+it at [ui.perfetto.dev](https://ui.perfetto.dev) for a zoomable flame graph;
+CPU and GPU are separate lanes. The status line and the log give the exact path
+and the frame count.
+
+`xcom_profiler_tests` checks the trace is structurally loadable — the failure
+that matters is a file Perfetto refuses to open, which is otherwise discovered
+at the end of a profiling session.
+
+GPU figures lag by a frame or two. That is inherent: a timestamp query issued
+this frame is only readable once the device has caught up, and asking sooner
+stalls the pipeline being measured.
+
+### Give every new system a zone
+
+**When you add anything that runs per frame, give it a profiler zone in the same
+commit.** `CW_PROFILE_ZONE_N("name")` (cromwell/diag/Profile.hpp), plus a paired
+`CW_GPU_ZONE("name")` (cromwell/gpu/GpuProfiler.hpp) if it issues GL work.
+
+The reason is not tidiness. **An unzoned system does not show up as a zero row —
+it shows up as nothing at all, and its time silently inflates whatever encloses
+it.** The panel's `frame` row is the truth; everything under it is what has been
+accounted for. The gap between the two is work nobody can see, and it grows
+every time a system is added without a zone. Chasing a frame spike that lives in
+that gap is exactly the debugging session the panel exists to prevent.
+
+Name it after the system, at the altitude the existing rows sit at — `web`,
+`steam`, `simulation`, `entity tick`, `effects`, `pointer pick`, `render`,
+`shadow map`, `ssao`, `lit scene`, `recompute`, `reach`, `visibility`. If a new
+row would nest under one of those, nest it; the panel indents by depth and a
+capture keeps the tree.
+
+### Granularity is earned by cost, not by code structure
+
+**One zone per system is the default. Sub-zones are earned by being a large
+share of the frame.**
+
+The failure mode is mirroring the module tree in zone names — navigation gets a
+zone for the representation, one for the planner, one for steering, one for the
+flow field, and now there are twenty rows for something costing 0.3 ms. Zone
+names are not a table of contents for the code. They answer "where did the frame
+go", and a system that is not going anywhere needs exactly one row saying so.
+
+The rule:
+
+| Share of the frame | Granularity |
+|---|---|
+| under ~1% | one zone, or fold it into its parent |
+| a few % | one zone, named for the system |
+| **a big slice** | **split it — that is what sub-zones are for** |
+
+`render` earns `shadow map` / `ssao` / `lit scene` because it is most of the
+frame and the split says which pass. `steam` does not earn a breakdown, because
+knowing which part of a 0.02 ms callback pump was slow changes nothing.
+
+So: **add the system's zone when you add the system, and add sub-zones only
+after a measurement points at it.** Granularity chases cost; it does not
+anticipate it. If navigation ever becomes 8 ms, split it then — and the split
+will be along whatever line the measurement actually revealed, which is rarely
+the line the module structure would have suggested.
+
+**Investigating is different.** Ten temporary zones inside a system to find a
+spike is exactly right. Delete them afterwards and keep the one that explained
+it.
+
+Zones go on **passes and systems** — anything running once or a few dozen times
+a frame. A zone costs ~40 ns, which is nothing around a render pass and ruinous
+inside a ray step. For something running thousands of times you want a
+benchmark, not a zone.
+
+GPU zones **must not nest** — `GL_TIME_ELAPSED` allows one active query per
+context. The render passes are siblings, so this costs nothing.
+
+**Tracy**, for the deeper analysis the panel is not built for: configure with
+`-DXC_TRACY=ON` and run the Tracy server to connect. The same zone macros feed
+it, so no extra instrumentation. Off by default — the client is not free.
+
+**Why not Visual Studio's profiler:** it profiles a whole process run with no
+in-game trigger, and its GPU tool supports Direct3D and explicitly not OpenGL,
+so it can say nothing about this renderer's GPU at all.
+
+**For per-shader-line cost**, neither of these helps — a zone says the sky pass
+took 3 ms, not which GLSL line did. That needs NVIDIA Nsight Graphics' Shader
+Profiler (supports OpenGL, correlates to source lines and microcode) or AMD's
+Radeon GPU Profiler. Reach for those once a zone has told you which pass.
+
 ## The one architectural rule
 
 `cromwell` (engine) may not include, link against, or name anything under
@@ -107,6 +205,19 @@ Inside anything running per cell, per ray step, per agent or per frame:
   per access when stepping one cell at a time.
 - **Cull cheaply before testing expensively.** Range-reject a pair before running
   LOS, penetration or pathfinding on it.
+- **When ranking candidates, sort before the expensive test — then run it from
+  the best down and stop at the first pass.** Cheap filters, then score, then the
+  raycast. Testing every survivor is the mistake: you only need the *winner* to
+  pass, so the common case costs one expensive test rather than one per
+  candidate. Applies to target selection, cover scoring, ability placement —
+  anything that picks a best cell out of many. (`study/spatial_queries.md` §3.6,
+  where this is CryEngine's stated rule and raycasts are "the dominant cost of
+  the whole AI system".)
+- **Enumerate candidates in the shape of the question, not the shape of the
+  grid.** A radius scored over a square lattice puts its best cells on the
+  cardinal and diagonal axes, so units converge on eight headings and approach at
+  a visible slant — real shipped bug, not a theoretical one. Walk a ring for a
+  radial query. Cheaper *and* unbiased. (`study/spatial_queries.md` §5.2.)
 
 ### Derived caches need the escape-hatch pattern
 

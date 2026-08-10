@@ -60,7 +60,15 @@ private:
      * The controller records; this is the only place that acts. */
     void applyOutcome(const PlayerController::Outcome& outcome);
 
+    /* The next free profiles/profile_NNN.json beside the executable. Numbered
+     * rather than fixed, so an F9 capture cannot destroy the previous one. */
+    std::string nextCapturePath() const;
+
     void applyInput(const FrameInput& input);
+
+    /* Re-derives the storey cut from the selection while the cutaway is in its
+     * dynamic mode. A no-op in manual. */
+    void updateCutawayStorey();
 
     /* Folds the debug panel's clicks into the same FrameInput the keyboard
      * produced, and blanks whatever the panel is currently swallowing — a drag

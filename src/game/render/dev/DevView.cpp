@@ -10,6 +10,9 @@
 #include "cromwell/web/surface/WebSurface.hpp"
 #endif
 
+#include "cromwell/diag/Profiler.hpp"
+#include "cromwell/gpu/GpuProfiler.hpp"
+
 #include "imgui.h"
 #include "rlImGui.h"
 
@@ -279,6 +282,7 @@ void DevView::drawToolbar()
         tab("decals", &open_.decals);
         tab("browser", &open_.browser);
         tab("steam", &open_.steam);
+        tab("profiler", &open_.profiler);
 
         ImGui::TextDisabled("|  %.0f fps  %.2f ms",
                             static_cast<double>(ImGui::GetIO().Framerate),
@@ -297,24 +301,24 @@ void DevView::drawLayersPanel(ViewLayers& layers)
         layerPair("props",    &layers.props,    "units",    &layers.units);
         layerPair("shadows",  &layers.shadows,  "overlays", &layers.overlays);
         layerPair("rings",    &layers.ribbons,  "glow",     &layers.glow);
-        layerPair("text HUD", &layers.hudText,  "reflections", &layers.reflections);
+        layerPair("reflections", &layers.reflections, "custom depth", &layers.customDepth);
 
         ImGui::Separator();
         if (ImGui::Button("all on")) layers = ViewLayers{};
         ImGui::SameLine();
         if (ImGui::Button("clean")) {
-            /* The world and nothing else — how a render is judged. */
+            /* The world and nothing else — how a render is judged. The dev UI
+             * itself is not a layer and stays up; F1 hides it. */
             layers.overlays = false;
             layers.ribbons  = false;
             layers.glow     = false;
-            layers.hudText  = false;
         }
         ImGui::TextDisabled("a layer off is off in every pass,\nthe shadow map included");
     }
     ImGui::End();
 }
 
-void DevView::drawRenderingPanel(const HudModel& model, ViewLayers& layers,
+void DevView::drawRenderingPanel(const DevModel& model, ViewLayers& layers,
                                  DevTunables& tunables, DevRequests& requests)
 {
     /* Slot 7, not 1: every other slot is already spoken for, and two panels
@@ -374,7 +378,7 @@ void DevView::drawRenderingPanel(const HudModel& model, ViewLayers& layers,
     ImGui::End();
 }
 
-void DevView::drawViewPanel(const HudModel& model, DevRequests& requests)
+void DevView::drawViewPanel(const DevModel& model, DevRequests& requests)
 {
     if (beginPanel("view", &open_.view, 1, kPanelWidth)) {
         int storey = model.isoLevel;
@@ -425,7 +429,7 @@ void DevView::drawViewPanel(const HudModel& model, DevRequests& requests)
     ImGui::End();
 }
 
-void DevView::drawSunPanel(const HudModel& model, DevTunables& tunables,
+void DevView::drawSunPanel(const DevModel& model, DevTunables& tunables,
                            DevRequests& requests)
 {
     SunLight::Tuning& tuning = tunables.sun.tuning();
@@ -514,7 +518,7 @@ void DevView::drawRibbonPanel(DevTunables& tunables)
     ImGui::End();
 }
 
-void DevView::drawPostPanel(const HudModel& model, ViewLayers& layers,
+void DevView::drawPostPanel(const DevModel& model, ViewLayers& layers,
                             DevTunables& tunables, DevRequests& requests)
 {
     if (beginPanel("post", &open_.post, 4, kPanelWidth)) {
@@ -539,7 +543,7 @@ void DevView::drawPostPanel(const HudModel& model, ViewLayers& layers,
     ImGui::End();
 }
 
-void DevView::drawScenePanel(const HudModel& model, DevRequests& requests)
+void DevView::drawScenePanel(const DevModel& model, DevRequests& requests)
 {
     if (beginPanel("scene", &open_.scene, 5, kPanelWidth)) {
         ImGui::SeparatorText("selection");
@@ -560,6 +564,15 @@ void DevView::drawScenePanel(const HudModel& model, DevRequests& requests)
         } else {
             ImGui::TextDisabled("no hovered tile");
         }
+
+        /* VERBATIM, AND IT HAS TO BE. A viewpoint described in prose is not the
+         * same viewpoint, and an artefact that only shows from one angle cannot
+         * be investigated from a different one. This is the line that turns "it
+         * looks wrong here" into a view somebody else can render. F3 copies it;
+         * so does the button, for when the game does not have the keyboard. */
+        ImGui::SeparatorText("camera");
+        ImGui::TextWrapped("%s", model.cameraArgs.c_str());
+        if (ImGui::Button("copy --cam (F3)")) ImGui::SetClipboardText(model.cameraArgs.c_str());
 
         ImGui::SeparatorText("actions");
         if (ImGui::Button(model.grenadeArmed ? "disarm grenade (G)" : "arm grenade (G)"))
@@ -971,7 +984,7 @@ void DevView::drawBrowserContents(WebSurface* browser)
 }
 #endif
 
-void DevView::draw(const HudModel& model, ViewLayers& layers,
+void DevView::draw(const DevModel& model, ViewLayers& layers,
                    DevTunables tunables, const DevTextures& textures,
                    const DevDecalTool& decalTool, const DevSteam& steam,
                    DevRequests& requests, WebSurface* browser)
@@ -1001,10 +1014,101 @@ void DevView::draw(const HudModel& model, ViewLayers& layers,
     if (open_.decals)   drawDecalPanel(decalTool, layers, requests);
     if (open_.browser)  drawBrowserPanel(browser);
     if (open_.steam)    drawSteamPanel(steam);
+    if (open_.profiler) drawProfilerPanel();
 
     if (showDemo_) ImGui::ShowDemoWindow(&showDemo_);
 
     rlImGuiEnd();
+}
+
+/* THE PANEL IS THE POINT OF THE WHOLE PROFILER. An external tool answers "why
+ * was that frame slow" well and "is it slow right now" badly, because the
+ * answer arrives after you have stopped doing the thing that caused it. This
+ * sits next to the camera controls and updates while you fly. */
+void DevView::drawProfilerPanel()
+{
+    if (!beginPanel("profiler", &open_.profiler, 12, 420.0f)) {
+        ImGui::End();
+        return;
+    }
+
+    Profiler& profiler = Profiler::instance();
+
+    /* Smoothed, not raw. A per-frame number jitters by whole milliseconds and
+     * cannot be read off a moving screen; the raw one is beside it for the
+     * spike you are actually hunting. */
+    ImGui::Text("frame %5.2f ms  (%5.1f fps)   raw %5.2f ms",
+                profiler.smoothedFrameMs(),
+                profiler.smoothedFrameMs() > 0.0 ? 1000.0 / profiler.smoothedFrameMs() : 0.0,
+                profiler.frameMs());
+
+    /* ---- capture state -------------------------------------------------- */
+    if (profiler.capturing()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.35f, 1.0f));
+        ImGui::Text("RECORDING  %d frames   -  F9 to stop and write",
+                    profiler.capturedFrames());
+        ImGui::PopStyleColor();
+        if (profiler.captureTruncated())
+            ImGui::TextDisabled("(capture full - later frames dropped)");
+    } else {
+        ImGui::TextDisabled("F9 to capture  ->  profile.json  ->  ui.perfetto.dev");
+    }
+
+    /* Outstanding GPU queries. Only ever interesting when it climbs, which
+     * means results are not being collected — the one way this silently stops
+     * reporting. */
+    const int pending = GpuProfiler::instance().pending();
+    if (pending > 24)
+        ImGui::TextDisabled("gpu queries in flight: %d (collect() not running?)", pending);
+
+    ImGui::Separator();
+
+    const std::vector<Profiler::Row>& rows = profiler.rows();
+    if (rows.empty()) {
+        ImGui::TextDisabled("no zones this frame");
+        ImGui::End();
+        return;
+    }
+
+    /* GPU column is blank rather than zero where a zone has no device work.
+     * A zero would read as "measured, and free", which is a different and
+     * wrong claim. */
+    if (ImGui::BeginTable("zones", 4,
+                          ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                          ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("zone", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("cpu ms");
+        ImGui::TableSetupColumn("gpu ms");
+        ImGui::TableSetupColumn("n");
+        ImGui::TableHeadersRow();
+
+        for (const Profiler::Row& row : rows) {
+            ImGui::TableNextRow();
+
+            ImGui::TableNextColumn();
+            /* Indent by nesting depth, so the tree that the capture holds is
+             * at least hinted at in the flat live view. */
+            if (row.depth > 0) ImGui::Indent(static_cast<float>(row.depth) * 12.0f);
+            ImGui::TextUnformatted(row.name ? row.name : "?");
+            if (row.depth > 0) ImGui::Unindent(static_cast<float>(row.depth) * 12.0f);
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%6.2f", row.cpuMs);
+
+            ImGui::TableNextColumn();
+            if (row.gpuMs > 0.0) ImGui::Text("%6.2f", row.gpuMs);
+            else                 ImGui::TextDisabled("  -");
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%d", row.calls);
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("gpu figures lag by a frame or two - see GpuProfiler.hpp");
+
+    ImGui::End();
 }
 
 }  // namespace game

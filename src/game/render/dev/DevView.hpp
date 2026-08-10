@@ -20,7 +20,7 @@
 #pragma once
 
 #include "cromwell/lighting/SunLight.hpp"
-#include "game/render/overlay/Hud.hpp"
+#include "game/render/dev/DevModel.hpp"
 #include "cromwell/overlay/RenderEffects.hpp"
 #include "cromwell/overlay/ViewLayers.hpp"
 #include "cromwell/post/AmbientOcclusion.hpp"
@@ -205,7 +205,7 @@ public:
      *
      * `browser` may be null — CEF is optional at build time and degrades at
      * run time, and the tab simply says so when there is nothing behind it. */
-    void draw(const HudModel& model, ViewLayers& layers,
+    void draw(const DevModel& model, ViewLayers& layers,
               DevTunables tunables, const DevTextures& textures,
               const DevDecalTool& decalTool, const DevSteam& steam,
               DevRequests& requests, WebSurface* browser = nullptr);
@@ -220,10 +220,6 @@ public:
     bool wantsMouse() const;
     bool wantsKeyboard() const;
 
-    /* How much of the top of the screen the toolbar is occupying, so whatever
-     * else draws up there can get out of its way. Zero while hidden. */
-    float toolbarHeight() const { return visible_ ? toolbarHeight_ : 0.0f; }
-
 private:
     /* The strip along the top. Returns nothing; it edits open_. */
     void drawToolbar();
@@ -236,19 +232,25 @@ private:
      * whole passes (shadows, probes, SSAO, the sun bake). Gathering them is the
      * point — chasing an artefact means removing terms one at a time, and
      * hunting four panels for the switches is most of the cost of doing it. */
-    void drawRenderingPanel(const HudModel& model, ViewLayers& layers,
+    void drawRenderingPanel(const DevModel& model, ViewLayers& layers,
                             DevTunables& tunables, DevRequests& requests);
-    void drawViewPanel(const HudModel& model, DevRequests& requests);
-    void drawSunPanel(const HudModel& model, DevTunables& tunables,
+    void drawViewPanel(const DevModel& model, DevRequests& requests);
+    void drawSunPanel(const DevModel& model, DevTunables& tunables,
                       DevRequests& requests);
     void drawRibbonPanel(DevTunables& tunables);
-    void drawPostPanel(const HudModel& model, ViewLayers& layers,
+    void drawPostPanel(const DevModel& model, ViewLayers& layers,
                        DevTunables& tunables, DevRequests& requests);
-    void drawScenePanel(const HudModel& model, DevRequests& requests);
+    void drawScenePanel(const DevModel& model, DevRequests& requests);
     void drawTexturePanel(const DevTextures& textures);
     /* const&, not by value: DevSteam carries four std::strings, so a by-value
      * parameter was four heap allocations per frame to read a panel. */
     void drawSteamPanel(const DevSteam& steam);
+
+    /* Live CPU/GPU timings from cromwell's Profiler, and the F9 capture state.
+     * Takes nothing: it reads the profiler singleton directly, because a frame
+     * view that carried timings would have to be built before the frame it is
+     * describing has finished. */
+    void drawProfilerPanel();
 
     /* Point at the world and stick a decal to it. The one panel here that
      * AUTHORS something rather than inspecting it, which is why the placement
@@ -309,6 +311,7 @@ private:
         bool decals   = false;
         bool browser  = false;
         bool steam    = false;
+        bool profiler = false;
     } open_;
 
     /* The decal tool's live settings. They persist across frames because they

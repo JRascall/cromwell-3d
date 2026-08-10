@@ -51,7 +51,6 @@ struct ViewLayers {
     bool overlays = true;   /* LOS tint, cover shields, hover, path, blasts */
     bool ribbons  = true;   /* the movement rings                       */
     bool glow     = true;   /* their bloom, which is a separate pass    */
-    bool hudText  = true;   /* the raylib text panel, not this one      */
 };
 
 }  // namespace cromwell

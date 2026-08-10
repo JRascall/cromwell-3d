@@ -20,7 +20,7 @@ StaticsMesh::~StaticsMesh() { unloadMeshes(); }
 
 void StaticsMesh::unloadMeshes()
 {
-    for (std::array<StoreyMesh, kSurfaceKindCount>& storey : storeys_)
+    for (std::array<StoreyMesh, kBucketCount>& storey : storeys_)
         for (StoreyMesh& entry : storey)
             if (entry.built) { UnloadMesh(entry.mesh); entry.built = false; }
 }
@@ -29,7 +29,7 @@ void StaticsMesh::rebuild(const World& world)
 {
     unloadMeshes();
     storeys_.assign(static_cast<std::size_t>(world.lattice().storeys()),
-                    std::array<StoreyMesh, kSurfaceKindCount>{});
+                    std::array<StoreyMesh, kBucketCount>{});
     triangleCount_ = 0;
     drawCalls_ = 0;
 
@@ -40,8 +40,11 @@ void StaticsMesh::rebuild(const World& world)
         buffers.clear();
         emitter.emit(storey, buffers);
 
-        for (int i = 0; i < kSurfaceKindCount; i++) {
-            const MeshVertexBuffer& source = buffers[static_cast<SurfaceKind>(i)];
+        /* One walk over every (kind, facing) bucket. The empty ones — which is
+         * most of them, since only walls and glass are ever faced — cost a
+         * branch each and upload nothing. */
+        for (int i = 0; i < kBucketCount; i++) {
+            const MeshVertexBuffer& source = buffers(kindOfSlot(i), facingOfSlot(i));
             if (source.empty()) continue;
 
             StoreyMesh& target = storeys_[static_cast<std::size_t>(storey)][static_cast<std::size_t>(i)];
@@ -53,36 +56,37 @@ void StaticsMesh::rebuild(const World& world)
     }
 }
 
-void StaticsMesh::draw(int maxStorey, const Material& material, bool castersOnly) const
+void StaticsMesh::draw(const CutawayView& cutaway, const Material& material,
+                       bool castersOnly) const
 {
     const Matrix identity = MatrixIdentity();
-    for (int storey = 0; storey < static_cast<int>(storeys_.size()) && storey <= maxStorey; storey++) {
-        const std::array<StoreyMesh, kSurfaceKindCount>& meshes =
+    for (int storey = 0; storey < static_cast<int>(storeys_.size()) && storey <= cutaway.maxStorey; storey++) {
+        const std::array<StoreyMesh, kBucketCount>& meshes =
             storeys_[static_cast<std::size_t>(storey)];
 
-        for (int i = 0; i < kSurfaceKindCount; i++) {
+        for (int i = 0; i < kBucketCount; i++) {
             const StoreyMesh& entry = meshes[static_cast<std::size_t>(i)];
             if (!entry.built) continue;
-            if (castersOnly && !castsSunShadow(static_cast<SurfaceKind>(i))) continue;
+            if (!cutaway.shows(facingOfSlot(i))) continue;
+            if (castersOnly && !castsSunShadow(kindOfSlot(i))) continue;
             DrawMesh(entry.mesh, material, identity);
         }
     }
 }
 
-void StaticsMesh::drawPrepass(int maxStorey, const Material& material,
+void StaticsMesh::drawPrepass(const CutawayView& cutaway, const Material& material,
                               const MaterialLibrary& library,
                               const PrepassShader& shader) const
 {
     const Matrix identity = MatrixIdentity();
-    for (int storey = 0; storey < static_cast<int>(storeys_.size()) && storey <= maxStorey; storey++) {
-        const std::array<StoreyMesh, kSurfaceKindCount>& meshes =
+    for (int storey = 0; storey < static_cast<int>(storeys_.size()) && storey <= cutaway.maxStorey; storey++) {
+        const std::array<StoreyMesh, kBucketCount>& meshes =
             storeys_[static_cast<std::size_t>(storey)];
 
-        for (int i = 0; i < kSurfaceKindCount; i++) {
+        for (int i = 0; i < kBucketCount; i++) {
             const StoreyMesh& entry = meshes[static_cast<std::size_t>(i)];
             if (!entry.built) continue;
-
-            const SurfaceKind kind = static_cast<SurfaceKind>(i);
+            if (!cutaway.shows(facingOfSlot(i))) continue;
 
             /* factorsOf().x is the roughness SCALAR. Where a material has a
              * packed map its green channel modulates this per texel, and the
@@ -90,7 +94,7 @@ void StaticsMesh::drawPrepass(int maxStorey, const Material& material,
              * material's roughness rather than the surface's. For deciding how
              * sharply to trace a reflection that is close enough; the lit pass
              * still uses the real per-texel value for the shading itself. */
-            shader.setRoughness(library.factorsOf(kind).x);
+            shader.setRoughness(library.factorsOf(kindOfSlot(i)).x);
             DrawMesh(entry.mesh, material, identity);
         }
     }
@@ -101,19 +105,20 @@ void StaticsMesh::drawPrepass(int maxStorey, const Material& material,
  * are not sorted against each other; two overlapping windows will blend in
  * submission order rather than back to front, which on a tile lattice needs a
  * fairly contrived view to notice. */
-void StaticsMesh::drawTransparentLit(int maxStorey, const MaterialLibrary& library,
+void StaticsMesh::drawTransparentLit(const CutawayView& cutaway, const MaterialLibrary& library,
                                      const PbrShader& shader) const
 {
     const Matrix identity = MatrixIdentity();
 
     rlDisableDepthMask();
-    for (int storey = 0; storey < static_cast<int>(storeys_.size()) && storey <= maxStorey; storey++) {
-        const std::array<StoreyMesh, kSurfaceKindCount>& meshes =
+    for (int storey = 0; storey < static_cast<int>(storeys_.size()) && storey <= cutaway.maxStorey; storey++) {
+        const std::array<StoreyMesh, kBucketCount>& meshes =
             storeys_[static_cast<std::size_t>(storey)];
 
-        for (int i = 0; i < kSurfaceKindCount; i++) {
-            const SurfaceKind kind = static_cast<SurfaceKind>(i);
+        for (int i = 0; i < kBucketCount; i++) {
+            const SurfaceKind kind = kindOfSlot(i);
             if (!isTransparent(kind)) continue;
+            if (!cutaway.shows(facingOfSlot(i))) continue;
 
             const StoreyMesh& entry = meshes[static_cast<std::size_t>(i)];
             if (!entry.built) continue;
@@ -132,29 +137,36 @@ void StaticsMesh::drawTransparentLit(int maxStorey, const MaterialLibrary& libra
     rlEnableDepthMask();
 }
 
-void StaticsMesh::drawKind(int maxStorey, SurfaceKind kind, const Material& material) const
+void StaticsMesh::drawKind(const CutawayView& cutaway, SurfaceKind kind,
+                           const Material& material) const
 {
     const Matrix identity = MatrixIdentity();
-    for (int storey = 0; storey < static_cast<int>(storeys_.size()) && storey <= maxStorey; storey++) {
-        const StoreyMesh& entry =
-            storeys_[static_cast<std::size_t>(storey)][indexOf(kind)];
-        if (entry.built) DrawMesh(entry.mesh, material, identity);
+    for (int storey = 0; storey < static_cast<int>(storeys_.size()) && storey <= cutaway.maxStorey; storey++) {
+        for (int f = 0; f < kSurfaceFacingCount; f++) {
+            const SurfaceFacing facing = static_cast<SurfaceFacing>(f);
+            if (!cutaway.shows(facing)) continue;
+
+            const StoreyMesh& entry =
+                storeys_[static_cast<std::size_t>(storey)][slot(kind, facing)];
+            if (entry.built) DrawMesh(entry.mesh, material, identity);
+        }
     }
 }
 
-void StaticsMesh::drawLit(int maxStorey, const MaterialLibrary& library,
+void StaticsMesh::drawLit(const CutawayView& cutaway, const MaterialLibrary& library,
                           const PbrShader& shader, bool includeTransparent) const
 {
     const Matrix identity = MatrixIdentity();
-    for (int storey = 0; storey < static_cast<int>(storeys_.size()) && storey <= maxStorey; storey++) {
-        const std::array<StoreyMesh, kSurfaceKindCount>& meshes =
+    for (int storey = 0; storey < static_cast<int>(storeys_.size()) && storey <= cutaway.maxStorey; storey++) {
+        const std::array<StoreyMesh, kBucketCount>& meshes =
             storeys_[static_cast<std::size_t>(storey)];
 
-        for (int i = 0; i < kSurfaceKindCount; i++) {
+        for (int i = 0; i < kBucketCount; i++) {
             const StoreyMesh& entry = meshes[static_cast<std::size_t>(i)];
             if (!entry.built) continue;
+            if (!cutaway.shows(facingOfSlot(i))) continue;
 
-            const SurfaceKind kind = static_cast<SurfaceKind>(i);
+            const SurfaceKind kind = kindOfSlot(i);
             if (isTransparent(kind) && !includeTransparent)
                 continue;   /* drawn later, see the header */
 

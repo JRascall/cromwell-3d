@@ -3,6 +3,7 @@
 #include "game/render/Palette.hpp"
 #include "cromwell/geometry/BoxEmitter.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace game {
@@ -207,6 +208,47 @@ void StoreyGeometryEmitter::emitLadders(const Tile& tile, int x, int y, int z, f
     }
 }
 
+/* The lattice's compass mapped onto the engine's world axes. A cell's y is a
+ * world z — that conversion lives on this side of the fence because cromwell
+ * has no opinion about which way north is. */
+namespace {
+
+/* HOW MUCH OF A CUT WALL IS LEFT STANDING.
+ *
+ * A wall that vanishes entirely takes its floor plan with it: the room reads
+ * as an open platform and you lose where the doorways were, which is exactly
+ * the information the cutaway was opened to look at. XCOM leaves a low kerb for
+ * this reason, and it costs nothing here because the stub is simply emitted
+ * into the uncuttable bucket — the cut then removes the wall ABOVE it rather
+ * than the wall.
+ *
+ * THE NUMBER IS BOUNDED FROM ABOVE BY GAMEPLAY, NOT BY TASTE. Half cover
+ * stands at 0.42 (see the half branch below), and a kerb approaching that
+ * height would read as cover a unit could take — a stub is scenery and cover is
+ * a promise, so they must not be confusable at a glance. 0.18 is comfortably
+ * under half that: about 17uu on this lattice's 96uu tile, a kerb rather than a
+ * parapet. Raise it and check it against a sandbag line before keeping it. */
+constexpr float kCutStubHeight = 0.18f;
+
+SurfaceFacing facingOfDir(Dir d)
+{
+    switch (d) {
+        case Dir::North: return SurfaceFacing::PlusZ;
+        case Dir::South: return SurfaceFacing::MinusZ;
+        case Dir::East:  return SurfaceFacing::PlusX;
+        case Dir::West:  return SurfaceFacing::MinusX;
+    }
+    return SurfaceFacing::None;
+}
+
+}  // namespace
+
+SurfaceFacing StoreyGeometryEmitter::outwardFacing(int x, int y, int z, Dir d) const
+{
+    const std::optional<Dir> outward = outwardWallDirection(rooms_, x, y, z, d);
+    return outward ? facingOfDir(*outward) : SurfaceFacing::None;
+}
+
 void StoreyGeometryEmitter::emitEdges(const Tile& tile, int x, int y, int z, float cellBase,
                                       bool storeyBase, float fx, float fy,
                                       SurfaceBuffers& out) const
@@ -237,15 +279,39 @@ void StoreyGeometryEmitter::emitEdges(const Tile& tile, int x, int y, int z, flo
             if (neighbourBase < baseOffset) baseOffset = neighbourBase;
         }
 
+        /* Which bucket this edge's full-height geometry goes in. Computed once
+         * per edge rather than per box, so a window's parapet, glass and
+         * header cannot land in different buckets and be cut apart. */
+        const SurfaceFacing facing = outwardFacing(x, y, z, d);
+
         const auto wallBox = [&](float height, float bottom, SurfaceKind kind,
-                                 Color colour, float thick) {
+                                 Color colour, float thick, SurfaceFacing bucket) {
             if (height <= 0.001f) return;
             if (northSouth)
-                emitBox(out[kind], edgeX, cellBase + bottom + height * 0.5f, edgeY,
+                emitBox(out(kind, bucket), edgeX, cellBase + bottom + height * 0.5f, edgeY,
                         length, height, thick, colour);
             else
-                emitBox(out[kind], edgeX, cellBase + bottom + height * 0.5f, edgeY,
+                emitBox(out(kind, bucket), edgeX, cellBase + bottom + height * 0.5f, edgeY,
                         thick, height, length, colour);
+        };
+
+        /* The same wall, split so a cut leaves its kerb behind — see
+         * kCutStubHeight. Two boxes rather than one, and only for the piece
+         * that sits on the ground: a full wall is emitted as one slice per
+         * cell, so stubbing every slice would leave a ledge floating at each
+         * cell boundary up the height of the building. Walls that face nowhere
+         * are never cut and are emitted whole, which is also what keeps the
+         * interior partitions from growing a seam they would never show. */
+        const auto wallWithKerb = [&](float height, float bottom, SurfaceKind kind,
+                                      Color colour, float thick) {
+            if (facing == SurfaceFacing::None || !storeyBase) {
+                wallBox(height, bottom, kind, colour, thick, facing);
+                return;
+            }
+
+            const float kerb = std::min(kCutStubHeight, height);
+            wallBox(kerb, bottom, kind, colour, thick, SurfaceFacing::None);
+            wallBox(height - kerb, bottom + kerb, kind, colour, thick, facing);
         };
 
         if (edge.window && !half) {
@@ -266,16 +332,24 @@ void StoreyGeometryEmitter::emitEdges(const Tile& tile, int x, int y, int z, flo
              * and adjacent edges therefore overlap at every corner. Coplanar
              * faces z-fight. Being inset is what keeps the pane clear of its
              * neighbours' surfaces. */
-            wallBox(sill,  baseOffset,                SurfaceKind::Wall,   palette::kWall,   thickness);
-            wallBox(glass, baseOffset + sill,         SurfaceKind::Window, palette::kWindow, thickness * 0.6f);
-            wallBox(head,  baseOffset + sill + glass, SurfaceKind::Wall,   palette::kWall,   thickness);
+            /* Only the parapet grows a kerb — it is the piece standing on the
+             * floor. The glass and the header are cut whole. */
+            wallWithKerb(sill, baseOffset, SurfaceKind::Wall, palette::kWall, thickness);
+            wallBox(glass, baseOffset + sill,         SurfaceKind::Window, palette::kWindow, thickness * 0.6f, facing);
+            wallBox(head,  baseOffset + sill + glass, SurfaceKind::Wall,   palette::kWall,   thickness,        facing);
         } else if (half) {
-            wallBox(0.42f - baseOffset, baseOffset, SurfaceKind::Cover, palette::kHalf, thickness);
+            /* HALF COVER IS NEVER CUT. A sandbag line is waist high — it hides
+             * nothing from a camera looking down at it, so removing it would
+             * buy no visibility at all, and it would cost the player the one
+             * piece of tactical information most worth reading off the board.
+             * It goes in the uncuttable bucket deliberately, not by omission. */
+            wallBox(0.42f - baseOffset, baseOffset, SurfaceKind::Cover, palette::kHalf, thickness,
+                    SurfaceFacing::None);
         } else {
             /* full walls: ONE kCellHeight slice per cell — three stacked reach
              * the ceiling, matching the three edge records setWall wrote */
             const float bottom = storeyBase ? baseOffset : 0.0f;
-            wallBox(kCellHeight - bottom, bottom, SurfaceKind::Wall, palette::kWall, thickness);
+            wallWithKerb(kCellHeight - bottom, bottom, SurfaceKind::Wall, palette::kWall, thickness);
         }
     }
 }

@@ -5,6 +5,8 @@
 #include "rlImGui.h"
 #include "imgui.h"
 
+#include "cromwell/diag/Profile.hpp"
+#include "cromwell/gpu/GpuProfiler.hpp"
 #include "cromwell/gpu/GL.hpp"
 #include "cromwell/gpu/ShaderLibrary.hpp"
 #include "game/border/band/BandExtractor.hpp"
@@ -318,14 +320,15 @@ void FrameRenderer::resizeForWindow()
         decalBuffer_.resize(GetScreenWidth(), GetScreenHeight());
 }
 
-void FrameRenderer::drawGeometry(int maxStorey, const Material& material, bool castersOnly)
+void FrameRenderer::drawGeometry(const CutawayView& cutaway, const Material& material,
+                                 bool castersOnly)
 {
-    if (view_.settings.layers.statics) statics_->draw(maxStorey, material, castersOnly);
+    if (view_.settings.layers.statics) statics_->draw(cutaway, material, castersOnly);
     if (view_.settings.layers.props)   props_.draw(material);
     if (!view_.settings.layers.units)  return;
 
     const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
-    units_->drawRoster(view_.state->roster(), maxStorey, animating, material);
+    units_->drawRoster(view_.state->roster(), cutaway.maxStorey, animating, material);
 
     if (animating) {
         const PathPoint position = (*view_.animator).positionOn((*view_.preview));
@@ -338,7 +341,7 @@ void FrameRenderer::drawGeometry(int maxStorey, const Material& material, bool c
     }
 }
 
-void FrameRenderer::drawGeometryLit(int maxStorey)
+void FrameRenderer::drawGeometryLit(const CutawayView& cutaway)
 {
     /* The lattice is baked; everything else is not. Props carry no lightmap
      * UVs and units move, so both stay on the shadow map — which is exactly
@@ -352,7 +355,7 @@ void FrameRenderer::drawGeometryLit(int maxStorey)
     pbr_.setLightingSuppress(view_.settings.effects.suppressMask());
     pbr_.setLightmapEnabled(view_.settings.useBakedSun);
     if (view_.settings.layers.statics)
-        statics_->drawLit(maxStorey, materials_, pbr_,
+        statics_->drawLit(cutaway, materials_, pbr_,
                           /*includeTransparent=*/view_.settings.flatShading());
 
     pbr_.setLightmapEnabled(false);
@@ -369,7 +372,7 @@ void FrameRenderer::drawGeometryLit(int maxStorey)
 
     if (view_.settings.layers.units) {
         const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
-        units_->drawRoster(view_.state->roster(), maxStorey, animating, bodyMaterial);
+        units_->drawRoster(view_.state->roster(), cutaway.maxStorey, animating, bodyMaterial);
 
         if (animating) {
             const PathPoint position = (*view_.animator).positionOn((*view_.preview));
@@ -416,7 +419,7 @@ void FrameRenderer::drawGeometryLit(int maxStorey)
     rlEnableColorBlend();
     rlSetBlendFactors(RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD);
     BeginBlendMode(BLEND_CUSTOM);
-    statics_->drawTransparentLit(maxStorey, materials_, pbr_);
+    statics_->drawTransparentLit(cutaway, materials_, pbr_);
     EndBlendMode();
 }
 
@@ -452,9 +455,9 @@ void FrameRenderer::drawOverlays()
     flashes_.draw();
 }
 
-HudModel FrameRenderer::buildHudModel() const
+DevModel FrameRenderer::buildDevModel() const
 {
-    HudModel model;
+    DevModel model;
     const Unit& selected = view_.state->selectedUnit();
 
     model.selectedName = selected.hudLabel();
@@ -470,8 +473,6 @@ HudModel FrameRenderer::buildHudModel() const
     model.moveEdges   = ribbonStats_.moveEdges;
     model.sprintLoops = ribbonStats_.sprintLoops;
     model.sprintEdges = ribbonStats_.sprintEdges;
-    model.visibleRings = (*view_.rings).visibleRings(view_.state->reach(), view_.hovered, view_.state->moveBudget());
-    model.solidRing    = (*view_.rings).solidRing(view_.state->reach(), view_.hovered, view_.state->moveBudget());
 
     if (view_.hovered && !(*view_.animator).isRunning()) {
         model.hoverCell = view_.state->world().lattice().cellAt(*view_.hovered);
@@ -489,10 +490,6 @@ HudModel FrameRenderer::buildHudModel() const
     model.cameraArgs      = view_.cameraArgs;
 
     model.status = view_.status;
-
-    /* Out from under the dev toolbar, which is pinned to the top of the
-     * viewport and cannot move itself. */
-    model.topOffset = static_cast<int>(devView_.toolbarHeight());
     return model;
 }
 
@@ -600,11 +597,18 @@ void FrameRenderer::drawShadowMap()
      * below already shade, so it reads as the building's own shadow; the
      * visible case is a roof overhang darkening ground beside the building.
      * That is a shadow whose caster is real and merely undrawn, which is a far
-     * smaller lie than lighting that changes when the player presses 1. */
-    const int fullDepth = view_.state->world().lattice().storeys() - 1;
-
+     * smaller lie than lighting that changes when the player presses 1.
+     *
+     * AND NOW THE FACINGS TOO, which is the same rule applied to the newer
+     * cut and matters more than the storey one ever did. The dynamic cutaway
+     * removes the walls between the camera and a building's interior, and it
+     * re-decides that every time the camera turns. Letting it reach this pass
+     * would mean every building's near walls stopped and started casting as
+     * the player swung the camera round — a shadow that breathes with the
+     * rotation key. A default CutawayView cuts nothing, so this pass gets the
+     * world as it is without having to ask for it. */
     ShadowMap::Scope scope(shadows_, projection);
-    drawGeometry(fullDepth, depthMaterial_, /*castersOnly=*/true);
+    drawGeometry(CutawayView::whole(), depthMaterial_, /*castersOnly=*/true);
 
     /* Then the glass, into the same target's colour plane. Depth WRITES off so
      * a window never shadows what is behind it, depth TEST on so glass already
@@ -612,7 +616,7 @@ void FrameRenderer::drawShadowMap()
      * reached that window to be tinted. */
     if (shadows_.valid()) {
         rlDisableDepthMask();
-        statics_->drawKind(fullDepth, SurfaceKind::Window,
+        statics_->drawKind(CutawayView::whole(), SurfaceKind::Window,
                            shadows_.transmitterMaterial());
         rlEnableDepthMask();
     }
@@ -632,7 +636,7 @@ void FrameRenderer::drawGeometryPrepass()
     const Material& material = prepassMaterial();
 
     if (view_.settings.layers.statics)
-        statics_->drawPrepass(view_.state->isoLevel(), material, materials_, prepass_);
+        statics_->drawPrepass(view_.cutaway, material, materials_, prepass_);
 
     prepass_.setRoughness(0.8f);
     if (view_.settings.layers.props) props_.draw(material);
@@ -640,7 +644,7 @@ void FrameRenderer::drawGeometryPrepass()
     prepass_.setRoughness(materials_.factorsOf(SurfaceKind::Body).x);
     if (view_.settings.layers.units) {
         const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
-        units_->drawRoster(view_.state->roster(), view_.state->isoLevel(), animating, material);
+        units_->drawRoster(view_.state->roster(), view_.cutaway.maxStorey, animating, material);
 
         if (animating) {
             const PathPoint position = (*view_.animator).positionOn((*view_.preview));
@@ -725,12 +729,10 @@ void FrameRenderer::captureEnvironmentProbes()
      * be, and every surface in that room then reflects the outdoors. That is
      * indistinguishable from the wall-leak this whole system exists to fix,
      * and it appears only once the player cuts away. */
-    const int fullDepth = view_.state->world().lattice().storeys() - 1;
-
     const int slices = probes_.stale() ? probeFacesPerFrame_ * 4 : probeFacesPerFrame_;
-    probes_.capture([this, fullDepth](Vector3 eye) {
+    probes_.capture([this](Vector3 eye) {
         pbr_.updateEnvironment(sun_, shadows_, eye);
-        drawGeometryLit(fullDepth);
+        drawGeometryLit(CutawayView::whole());
     }, slices);
 }
 
@@ -750,9 +752,20 @@ void FrameRenderer::render(const FrameView& view)
 
     const RibbonPassSettings settings = view_.ribbon;
 
+    /* PROFILING ZONES ARE PAIRED, CPU AND GPU, PER PASS. Both are needed and
+     * they answer different questions: the CPU zone is how long submitting the
+     * pass took, the GPU zone is how long running it took. A pass that is cheap
+     * to submit and expensive to run is a shader problem; the reverse is a
+     * draw-call problem. One timeline cannot tell them apart. */
+    CW_PROFILE_ZONE_N("render");
+
     /* 1. THE SUN'S VIEW. Depth only, and first, because the lit pass samples
      *    what it writes. */
-    drawShadowMap();
+    {
+        CW_PROFILE_ZONE_N("shadow map");
+        CW_GPU_ZONE("shadow map");
+        drawShadowMap();
+    }
 
     /* 1b. THE REFLECTION PROBES. After the shadow map, so the world reflected
      *     in a window is a shadowed one.
@@ -853,7 +866,7 @@ void FrameRenderer::render(const FrameView& view)
 
         int nextStencil = kFirstUnitStencil;
         const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
-        units_->drawRoster(view_.state->roster(), view_.state->isoLevel(), animating,
+        units_->drawRoster(view_.state->roster(), view_.cutaway.maxStorey, animating,
                            customDepth_.material(),
                            [this, &nextStencil](const Unit&) {
                                customDepth_.setStencil(nextStencil++);
@@ -873,7 +886,11 @@ void FrameRenderer::render(const FrameView& view)
 
     /* 3. AMBIENT OCCLUSION, from that prepass. Two fullscreen passes, no
      *    geometry resubmitted. */
-    ao_.render(settings.camera, sceneDepth_->depthTexture(), sceneDepth_->colourTexture());
+    {
+        CW_PROFILE_ZONE_N("ssao");
+        CW_GPU_ZONE("ssao");
+        ao_.render(settings.camera, sceneDepth_->depthTexture(), sceneDepth_->colourTexture());
+    }
 
     /* 4. THE LIT SCENE, in linear radiance at supersampled resolution. */
     pbr_.updateEnvironment(sun_, shadows_, settings.camera.position);
@@ -911,6 +928,8 @@ void FrameRenderer::render(const FrameView& view)
     if (view_.settings.layers.reflections) pbr_.setEnvironmentProbes(probes_);
     else                     pbr_.clearEnvironmentProbes();
     {
+        CW_PROFILE_ZONE_N("lit scene");
+        CW_GPU_ZONE("lit scene");
         HdrTarget::Scope scope(scene_);
         ClearBackground(BLANK);
 
@@ -920,7 +939,7 @@ void FrameRenderer::render(const FrameView& view)
         if (view_.settings.layers.sky) sky_.draw(sun_, settings.camera, sceneWidth_, sceneHeight_);
 
         BeginMode3D(settings.camera);
-        drawGeometryLit(view_.state->isoLevel());
+        drawGeometryLit(view_.cutaway);
 
         /* THE PROBE BALLS, and deliberately NOT inside drawGeometryLit: that
          * function is also what the probe capture draws with, so a ball added
@@ -962,13 +981,13 @@ void FrameRenderer::render(const FrameView& view)
 
         /* the emissive halo: unlit emissive is only half the material, the
          * other half is the bloom that would pick it up. Must come after
-         * EndMode3D and before the HUD, which should not glow. */
+         * EndMode3D and before anything 2D over the top, which should not
+         * glow. */
         if (view_.settings.layers.glow)
             glow_->render(*ribbonRenderer_, settings, sceneDepth_->depthTexture());
     }
 
-    const HudModel model = buildHudModel();
-    if (view_.settings.layers.hudText) hud_.draw(model);
+    const DevModel model = buildDevModel();
 
     /* Last, over everything, and inside BeginDrawing — rlImGui submits its
      * vertices through rlgl like any other 2D draw. The UI is not a layer: it

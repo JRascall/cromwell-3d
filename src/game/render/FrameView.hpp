@@ -30,6 +30,7 @@
 #include "cromwell/ribbon/RibbonRenderer.hpp"
 #include "game/movement/search/PathPoint.hpp"
 #include "game/render/ribbon/RibbonTuning.hpp"
+#include "game/render/scene/CutawayView.hpp"
 #include "game/ui/state/UIState.hpp"
 
 #include <cstdint>
@@ -107,6 +108,17 @@ struct FrameView {
     const GameState* state = nullptr;
 
     Camera3D camera{};
+
+    /* HOW MUCH OF THE WORLD THE CAMERA IS SHOWING — the storey cut and the
+     * wall facings the camera angle removes, already decided.
+     *
+     * This is the CAMERA'S view of the world, and only the passes that draw
+     * for the camera may use it. The sun's depth pass and the probe capture
+     * take CutawayView::whole() instead, because what casts a shadow is a
+     * question about the world and not about where the player is standing.
+     * Getting that wrong is what made the lighting change when the iso level
+     * did; see CutawayView.hpp for the full account. */
+    CutawayView cutaway;
 
     /* ---- what the player is pointing at ------------------------------- */
     std::optional<int>            hovered;

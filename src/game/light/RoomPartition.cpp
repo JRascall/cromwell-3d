@@ -108,7 +108,105 @@ RoomPartition::RoomPartition(const World& world)
     }
     outdoor_ = best;
 
+    measureWayOut();
     chooseCaptureCells();
+}
+
+/* ONE MULTI-SOURCE BREADTH-FIRST SWEEP PER STOREY SLICE, seeded from the open
+ * cells along the board's rim. Cold code — once per world edit, beside a flood
+ * that has already walked the same cells — so it is written for clarity.
+ *
+ * SIDEWAYS ONLY, AND THAT IS THE WHOLE POINT. An earlier version of this
+ * measured the distance to open sky and stepped vertically to find it, which
+ * the demo map's staircase promptly defeated: the stairwell is a hole in the
+ * upper floor with no roof above it, so cells at the bottom of it stood zero
+ * steps from daylight and the facade beside them faced inward. Walking only in
+ * plan means a hole in a ceiling cannot make an interior cell look outdoors,
+ * because getting out still means getting out THROUGH something.
+ *
+ * IT CROSSES DOORWAYS ON PURPOSE, unlike the room flood above. That flood
+ * refuses to step between an indoor cell and an outdoor one, because a doorway
+ * must not merge a room with the street into one reflection environment. Here
+ * the doorway is precisely what is being measured — it is the way out — and
+ * refusing it would score every interior cell unreachable and tie every
+ * comparison. */
+void RoomPartition::measureWayOut()
+{
+    const Lattice& lattice = world_.lattice();
+    wayOut_.assign(static_cast<std::size_t>(lattice.cellCount()), kUnreachable);
+
+    std::vector<Cell> frontier;
+    std::vector<Cell> next;
+
+    const auto onRim = [&](int x, int y) {
+        return x == 0 || y == 0 || x == lattice.width() - 1 || y == lattice.height() - 1;
+    };
+
+    for (int z = 0; z < lattice.depth(); z++)
+    for (int y = 0; y < lattice.height(); y++)
+    for (int x = 0; x < lattice.width(); x++) {
+        if (!isOpen(x, y, z) || !onRim(x, y)) continue;
+        wayOut_[static_cast<std::size_t>(lattice.index(x, y, z))] = 0;
+        frontier.push_back(Cell{ x, y, z });
+    }
+
+    for (int step = 1; !frontier.empty(); step++) {
+        next.clear();
+
+        for (const Cell& current : frontier) {
+            for (Dir d : kAllDirs) {
+                /* The same test the flood uses, so "open" means one thing in
+                 * this file. Full cover seals, half cover does not, and a
+                 * window seals — you cannot walk out of a window, and a room
+                 * with a picture window is not thereby an outdoor space. */
+                if (!connectedHorizontally(current, d)) continue;
+
+                const int nx = current.x + dx(d);
+                const int ny = current.y + dy(d);
+                if (!lattice.isValid(nx, ny, current.z)) continue;
+                if (!isOpen(nx, ny, current.z)) continue;
+
+                int& best = wayOut_[static_cast<std::size_t>(
+                    lattice.index(nx, ny, current.z))];
+                if (best <= step) continue;
+
+                best = step;
+                next.push_back(Cell{ nx, ny, current.z });
+            }
+        }
+
+        frontier.swap(next);
+    }
+}
+
+int RoomPartition::stepsToOutside(int x, int y, int z) const
+{
+    const Lattice& lattice = world_.lattice();
+    if (!lattice.isValid(x, y, z)) return kUnreachable;
+    return wayOut_[static_cast<std::size_t>(lattice.index(x, y, z))];
+}
+
+std::optional<Dir> outwardWallDirection(const RoomPartition& rooms,
+                                        int x, int y, int z, Dir d)
+{
+    const int nx = x + dx(d);
+    const int ny = y + dy(d);
+
+    /* Solid mass, or off the board. A wall backing onto rock hides nothing
+     * worth seeing, and the edge of the world is not a space. */
+    if (rooms.roomOf(x, y, z) < 0 || rooms.roomOf(nx, ny, z) < 0) return std::nullopt;
+
+    const int here  = rooms.stepsToOutside(x, y, z);
+    const int there = rooms.stepsToOutside(nx, ny, z);
+
+    /* Neither side has any way out — a sealed vault. Nothing about removing
+     * one of its walls would be an improvement on the picture. */
+    if (here >= RoomPartition::kUnreachable && there >= RoomPartition::kUnreachable)
+        return std::nullopt;
+
+    if (there < here) return d;
+    if (here < there) return opposite(d);
+    return std::nullopt;   /* level: see the header */
 }
 
 bool RoomPartition::isOpen(int x, int y, int z) const

@@ -23,6 +23,24 @@
 
 namespace game {
 
+/* WHERE THE CUTAWAY'S STOREY COMES FROM.
+ *
+ * Dynamic is the playing mode and the default: the cut follows the selected
+ * unit's storey, so selecting a soldier on the first floor opens the first
+ * floor without the player asking. That is XCOM's behaviour, and it is right
+ * for playing because the storey you care about is always the one your unit
+ * is on.
+ *
+ * Manual is the INSPECTING mode, and it exists because Dynamic cannot express
+ * "show me the roof while my squad is in the basement". Pressing a storey key
+ * is an explicit statement that the automatic answer is not the one wanted, so
+ * it latches until the player hands control back.
+ *
+ * THE MODE DECIDES WHO WRITES isoLevel_, NOT WHAT IT MEANS. Everything
+ * downstream — picking, the overlays, the renderer — reads the same field
+ * whichever mode is live, so nothing outside Application has to know a mode
+ * exists. */
+enum class CutawayMode { Dynamic, Manual };
 
 class GameState {
 public:
@@ -48,6 +66,9 @@ public:
 
     int  isoLevel() const { return isoLevel_; }
     void setIsoLevel(int level) { isoLevel_ = level; }
+
+    CutawayMode cutawayMode() const { return cutawayMode_; }
+    void setCutawayMode(CutawayMode mode) { cutawayMode_ = mode; }
 
     bool losMode() const { return losMode_; }
     void setLosMode(bool on) { losMode_ = on; }
@@ -82,6 +103,7 @@ private:
     int   selectedIndex_ = 0;
     float moveBudget_ = 6.0f;
     int   isoLevel_ = kDefaultStoreyCount - 1;
+    CutawayMode cutawayMode_ = CutawayMode::Dynamic;
     bool  losMode_ = false;
 };
 

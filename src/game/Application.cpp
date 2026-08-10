@@ -4,6 +4,8 @@
 #include "game/entities/pawns/CameraPawn.hpp"
 #include "game/events/GameEvents.hpp"
 #include "game/ui/state/UIStateMachine.hpp"
+#include "cromwell/diag/Profile.hpp"
+#include "cromwell/gpu/GpuProfiler.hpp"
 #include "cromwell/services/Services.hpp"
 #include "cromwell/settings/SettingKeys.hpp"
 #include "cromwell/settings/Settings.hpp"
@@ -24,6 +26,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
+#include <system_error>
 
 namespace game {
 
@@ -87,6 +91,7 @@ FrameView Application::buildFrameView() const
     view.cursorOnSurface = controller_.cursorOnSurface();
     view.decalGhost      = controller_.decalPreview();
     view.ribbon          = controller_.ribbonSettings(view_.softCutaway);
+    view.cutaway         = controller_.cutawayView();
     view.settings        = view_;
 
     view.steam.running     = steam_.running();
@@ -103,6 +108,41 @@ FrameView Application::buildFrameView() const
     view.status          = controller_.status();
     view.cameraArgs      = controller_.cameraArguments();
     return view;
+}
+
+/* WHERE A CAPTURE LANDS, and it is not the working directory. This app is
+ * launched from the project root, from builds/win and from Explorer, so a bare
+ * "profile.json" goes to three different places depending on how you started
+ * it — the same reason the log is opened beside the executable rather than
+ * where the shell happened to be.
+ *
+ * NUMBERED, NOT OVERWRITTEN. A fixed name means the capture of the stutter you
+ * just reproduced is destroyed by the next press of F9, which is invariably how
+ * you find out. Probing for the first free number needs no clock and stays
+ * sorted in a file listing. */
+std::string Application::nextCapturePath() const
+{
+    namespace fs = std::filesystem;
+
+    fs::path directory = fs::path(GetApplicationDirectory()) / "profiles";
+
+    std::error_code error;
+    fs::create_directories(directory, error);
+    /* If the directory cannot be made — a read-only install — fall back beside
+     * the executable rather than failing the capture outright. */
+    if (error) directory = fs::path(GetApplicationDirectory());
+
+    for (int index = 1; index < 1000; index++) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "profile_%03d.json", index);
+
+        const fs::path candidate = directory / name;
+        if (!fs::exists(candidate, error)) return candidate.string();
+    }
+
+    /* A thousand captures in one directory is a housekeeping problem, not a
+     * reason to refuse. Reuse the last slot. */
+    return (directory / "profile_999.json").string();
 }
 
 void Application::rebuildDerivedState()
@@ -132,18 +172,68 @@ void Application::applyOutcome(const PlayerController::Outcome& outcome)
     if (outcome.derivedStateChanged) renderer_.rebuildRibbons(state_, view_.ribbon);
 }
 
+/* THE DYNAMIC CUTAWAY'S ONE RULE: show the storey the selected unit is on.
+ *
+ * Derived every frame rather than pushed on selection, because the storey a
+ * unit is ON changes without anything selecting it — walking up a ramp, being
+ * animated along a path, falling through a floor that was just blown out. A
+ * push would need every one of those to remember to update the cut; reading it
+ * where it is used cannot go stale.
+ *
+ * It writes isoLevel_ rather than living beside it, so that every existing
+ * reader — picking, the visibility overlay, the ribbon pass, the renderer —
+ * keeps working unchanged and none of them has to learn that a mode exists. */
+void Application::updateCutawayStorey()
+{
+    if (state_.cutawayMode() != CutawayMode::Dynamic) return;
+    state_.setIsoLevel(Lattice::storeyOfZ(state_.selectedUnit().position().z));
+}
+
 /* ---------------------------------------------------------------- input */
 void Application::applyInput(const FrameInput& input)
 {
-    if (input.setStoreyGround) state_.setIsoLevel(0);
-    if (input.setStoreyMiddle) state_.setIsoLevel(1);
-    if (input.setStoreyTop)    state_.setIsoLevel(state_.world().lattice().storeys() - 1);
+    /* A STOREY KEY IS A STATEMENT THAT THE AUTOMATIC ANSWER IS NOT WANTED, so
+     * it latches manual rather than being overwritten a frame later by the
+     * unit the player happens to have selected. 0 hands control back. */
+    if (input.setStoreyGround) { state_.setIsoLevel(0); state_.setCutawayMode(CutawayMode::Manual); }
+    if (input.setStoreyMiddle) { state_.setIsoLevel(1); state_.setCutawayMode(CutawayMode::Manual); }
+    if (input.setStoreyTop) {
+        state_.setIsoLevel(state_.world().lattice().storeys() - 1);
+        state_.setCutawayMode(CutawayMode::Manual);
+    }
+    if (input.setStoreyDynamic) state_.setCutawayMode(CutawayMode::Dynamic);
 
     if (input.cycleRing)     controller_.rings().cycleOverride();
     if (input.toggleCutaway) view_.softCutaway = !view_.softCutaway;
     if (input.toggleCover)   view_.showCover = !view_.showCover;
     if (input.toggleGrenade) controller_.toggleGrenade();
     if (input.toggleOcclusion) renderer_.ao().setEnabled(!renderer_.ao().enabled());
+
+    /* F9. Starting is silent; stopping writes the trace and says where, in the
+     * status line and in the log — a capture whose path you have to guess is a
+     * capture nobody opens. */
+    if (input.toggleCapture) {
+        Profiler& profiler = Profiler::instance();
+        const bool wasCapturing = profiler.capturing();
+        profiler.toggleCapture();
+
+        if (wasCapturing) {
+            const int  frames = profiler.capturedFrames();
+            const std::string path = profiler.writeCapture(nextCapturePath());
+
+            if (path.empty()) {
+                controller_.setStatus("capture failed - could not write the trace");
+                TraceLog(LOG_WARNING, "PROFILE: capture could not be written");
+            } else {
+                const std::string message =
+                    "captured " + std::to_string(frames) + " frames -> " + path;
+                controller_.setStatus(message + "  (open at ui.perfetto.dev)");
+                TraceLog(LOG_INFO, "PROFILE: %s", message.c_str());
+            }
+        } else {
+            controller_.setStatus("capturing - F9 again to stop and write");
+        }
+    }
     if (input.toggleBake) view_.useBakedSun = !view_.useBakedSun;
     if (input.toggleFlatView) view_.debugView = (view_.debugView + 1) % ViewSettings::kDebugViewCount;
 
@@ -205,6 +295,7 @@ FrameInput Application::arbitrate(FrameInput input)
 
     if (renderer_.devWantsKeyboard()) {
         input.setStoreyGround = input.setStoreyMiddle = input.setStoreyTop = false;
+        input.setStoreyDynamic = false;
         input.cycleRing = input.toggleCutaway = input.toggleLos = false;
         input.toggleCover = input.toggleGrenade = input.toggleOcclusion = false;
         input.toggleBake = input.toggleFlatView = input.resetWorld = false;
@@ -232,6 +323,7 @@ FrameInput Application::arbitrate(FrameInput input)
      * for as long as it is on screen. */
     if (renderer_.webPanel() && renderer_.webPanel()->wantsKeyboard()) {
         input.setStoreyGround = input.setStoreyMiddle = input.setStoreyTop = false;
+        input.setStoreyDynamic = false;
         input.cycleRing = input.toggleCutaway = input.toggleLos = false;
         input.toggleCover = input.toggleGrenade = input.toggleOcclusion = false;
         input.toggleBake = input.toggleFlatView = input.resetWorld = false;
@@ -253,7 +345,12 @@ FrameInput Application::arbitrate(FrameInput input)
     if (requests.cyclePreviewProbe && renderer_.probes().probeCount() > 0)
         renderer_.probes().setPreviewProbe((renderer_.probes().previewProbe() + 1) % renderer_.probes().probeCount());
 
-    if (requests.isoLevel)     state_.setIsoLevel(*requests.isoLevel);
+    /* Same reasoning as the storey keys: moving the slider is an explicit
+     * choice, so it latches manual rather than being overwritten next frame. */
+    if (requests.isoLevel) {
+        state_.setIsoLevel(*requests.isoLevel);
+        state_.setCutawayMode(CutawayMode::Manual);
+    }
     if (requests.sunAzimuth)   renderer_.sun().setAzimuth(*requests.sunAzimuth);
     if (requests.sunElevation) renderer_.sun().setElevation(*requests.sunElevation);
 
@@ -317,6 +414,12 @@ int Application::run()
                    (options_.screenshotPath ? 0 : FLAG_WINDOW_RESIZABLE));
     InitWindow(kWindowWidth, kWindowHeight, "xcom-c - XCOM 2 tile lattice");
     SetTargetFPS(60);
+
+    /* The GPU profiler's context, immediately after the GL one exists and on
+     * the thread that owns it — both are requirements, and both fail quietly
+     * rather than loudly. No-ops unless built with -DXC_TRACY=ON. */
+    CW_GPU_CONTEXT();
+    CW_PROFILE_THREAD("main");
 
     /* The only thing that currently PROVES Steam came up, and the reason the
      * persona name is fetched at all. Cheap to lose the day there is a real
@@ -418,18 +521,29 @@ int Application::run()
 
     int frames = 0;
     while (!WindowShouldClose()) {
+        /* THE WHOLE FRAME, and every system inside it as its own row. The
+         * panel is meant to answer the same question Unreal's stat breakdown
+         * does — which system is eating the frame — and it can only name the
+         * systems that carry a zone. */
+        CW_PROFILE_ZONE_N("frame");
 #if XC_HAVE_WEB
         /* Chromium's slice of the frame, first: nothing in the browser
          * advances without it, and everything below wants this frame's page
          * rather than the last one's. OnPaint lands inside this call, on this
          * thread — see WebSurface.hpp on why that matters. */
-        if (web_) web_->tick();
+        if (web_) {
+            CW_PROFILE_ZONE_N("web");
+            web_->tick();
+        }
 #endif
 
         /* Steam's slice. Nothing dispatches without it - the overlay stops
          * responding and nothing else visibly breaks, which is exactly how a
          * missing RunCallbacks survives review. */
-        steam_.tick();
+        {
+            CW_PROFILE_ZONE_N("steam");
+            steam_.tick();
+        }
 
         FrameInput input = input_.sample(options_.mouseX, options_.mouseY);
         if (input.toggleDevView) renderer_.toggleDevView();
@@ -449,6 +563,8 @@ int Application::run()
         if (input.windowResized) renderer_.resizeForWindow();
 
         if (ui_.state() == UIState::InGame) {
+            CW_PROFILE_ZONE_N("simulation");
+
             applyInput(input);
             controller_.sampleCameraIntent(input);
 
@@ -458,14 +574,31 @@ int Application::run()
 
             /* The entity update cycle: every unit ticks, and its components
              * tick or think from there. */
-            state_.roster().tick(input.deltaSeconds);
+            {
+                CW_PROFILE_ZONE_N("entity tick");
+                state_.roster().tick(input.deltaSeconds);
+            }
 
-            renderer_.updateEffects(input.deltaSeconds);
+            {
+                CW_PROFILE_ZONE_N("effects");
+                renderer_.updateEffects(input.deltaSeconds);
+            }
 
-            if (controller_.animator().isRunning())
+            /* Pointer picking casts a ray into the world every frame the
+             * cursor moves, so it is a genuine per-frame cost rather than
+             * bookkeeping — and the first thing to suspect when the frame
+             * time moves with the mouse. */
+            if (controller_.animator().isRunning()) {
+                CW_PROFILE_ZONE_N("move animation");
                 controller_.stepAnimation(input.deltaSeconds);
-            else if (!input.orbiting && !renderer_.devWantsMouse())
+            } else if (!input.orbiting && !renderer_.devWantsMouse()) {
+                CW_PROFILE_ZONE_N("pointer pick");
                 controller_.updatePointer(input);
+            }
+
+            /* Last, so it sees this frame's selection and this frame's step of
+             * a move animation rather than the previous one's. */
+            updateCutawayStorey();
         } else {
             /* The splash is timed rather than clicked through, so it needs the
              * clock even though it takes no input. */
@@ -480,6 +613,18 @@ int Application::run()
             renderer_.uploadSteamAvatar(steamAvatar_.bytes());
 
         renderer_.render(buildFrameView());
+
+        /* AFTER the swap that render() ends with, which is where the GPU
+         * timestamp queries issued this frame become readable. The results
+         * belong to a frame or two ago — that latency is inherent to asking
+         * the device what it did, not a bug in the reporting.
+         *
+         * CW_PROFILE_FRAME closes the frame while the "frame" zone above is
+         * still in scope; Profiler::endFrame charges open zones up to this
+         * point rather than dropping them, which is what makes the whole-frame
+         * row exist at all. See the note there. */
+        CW_GPU_COLLECT();
+        CW_PROFILE_FRAME();
 
         /* The reveal, once and only once. AFTER render(), because that call
          * ends with EndDrawing() and therefore with a presented frame: reveal

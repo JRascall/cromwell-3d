@@ -333,5 +333,23 @@ RibbonPassSettings PlayerController::ribbonSettings(bool softCutaway) const
     return settings;
 }
 
+CutawayView PlayerController::cutawayView() const
+{
+    CutawayView cutaway;
+    cutaway.maxStorey = state_.isoLevel();
+
+    /* THE FACING CUT IS OFF WHILE INSPECTING. Manual mode is for looking at a
+     * specific storey — usually to check what is on it — and walls that come
+     * and go as the camera turns are exactly the wrong behaviour for that.
+     * Dynamic is the playing mode, where seeing into the building beats seeing
+     * the building. */
+    if (state_.cutawayMode() == CutawayMode::Dynamic) {
+        const Camera3D camera = pawn_->camera();
+        cutaway.facings = facingsVisibleFrom(camera.target.x - camera.position.x,
+                                             camera.target.z - camera.position.z);
+    }
+    return cutaway;
+}
+
 
 }  // namespace game

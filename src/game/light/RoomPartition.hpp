@@ -46,6 +46,7 @@
 #include "game/lattice/Cell.hpp"
 #include "game/world/World.hpp"
 
+#include <optional>
 #include <vector>
 
 namespace game {
@@ -92,6 +93,45 @@ public:
      * (which no real map is, but a test fixture can be). */
     int outdoorRoom() const { return outdoor_; }
 
+    /* HOW FAR THIS CELL IS FROM BEING OUT — the fewest sideways steps to walk
+     * off the edge of the board without crossing full cover. Small on the
+     * street, large deep inside a building, kUnreachable for solid mass and for
+     * a sealed volume.
+     *
+     * THREE RULES WERE TRIED HERE AND THE FIRST TWO ARE WORTH RECORDING,
+     * because each failed on a feature this map actually has and the next map
+     * will have others.
+     *
+     *   "One side indoors, the other out" — killed by the balcony overhang.
+     *   It roofs the ground in front of the doorway, and `outdoor` is decided
+     *   by whether anything above a cell is solid, so the porch under it reads
+     *   as indoors. Half the south facade declined to face.
+     *
+     *   "Which side connects more openly to the outdoor room" — killed harder.
+     *   The porch and the room behind it are BOTH indoors, so the flood walks
+     *   the doorway between them and they are one room. No per-room measure can
+     *   separate two halves of the same room; every comparison tied.
+     *
+     *   "Which side is nearer daylight" — killed by the staircase. Its
+     *   stairwell is a hole in the upper floor with no roof over it, so the
+     *   ground-floor cells beneath are a lightwell standing at distance zero
+     *   from the sky. Interior cells beside it outscored the porch and two
+     *   facade segments faced backwards, into the building.
+     *
+     * What survives is the plan-view question, and it is the one a cutaway was
+     * always asking: which way is OUT. Sideways steps only, so a hole in a
+     * ceiling cannot short-circuit it; from the board's edge, so it needs no
+     * notion of what counts as a building; and through the same cover rules the
+     * flood uses, so a doorway is a way out and a window is not.
+     *
+     * IT LIVES HERE because it needs the rule for whether cover lets air past,
+     * and a second class with its own copy of that would be a second answer to
+     * "what counts as open" waiting to disagree with this one. */
+    static constexpr int kUnreachable = 1 << 24;
+
+    int stepsToOutside(int x, int y, int z) const;
+    int stepsToOutside(const Cell& c) const { return stepsToOutside(c.x, c.y, c.z); }
+
 private:
     /* Can air pass from `from` to its neighbour across `d`? Full cover of any
      * kind stops it, window included — see the header. */
@@ -110,12 +150,44 @@ private:
 
     void classifyEnclosure();
     void chooseCaptureCells();
+    void measureWayOut();
 
     const World&            world_;
     std::vector<int>        cellRoom_;   /* flat lattice index -> room, -1 solid */
     std::vector<char>       indoor_;     /* flat lattice index -> has a ceiling  */
     std::vector<RoomVolume> rooms_;
+    std::vector<int>        wayOut_;     /* flat lattice index -> steps off the board */
     int                     outdoor_ = -1;
 };
+
+/* WHICH WAY A WALL FACES AWAY FROM WHAT IT ENCLOSES, or nothing when the
+ * question has no answer.
+ *
+ * `d` names the face of cell (x, y, z) the wall sits on. The returned
+ * direction points from the enclosed side toward the open one, which is the
+ * side a camera has to be on for the wall to be worth removing.
+ *
+ * THE RULE IS A COMPARISON, NOT A CLASSIFICATION. Whichever side is nearer
+ * the way out is the outside; the wall faces that way. That handles the plain
+ * case (room against street) and the awkward one (room against a roofed porch)
+ * with the same line, and it needs no notion of what counts as a building —
+ * which is what the rules it replaced kept trying and failing to invent. See
+ * stepsToOutside.
+ *
+ * A TIE MEANS NO ANSWER, and that is the useful half of the rule. Two rooms
+ * equally deep inside a building tie and keep the partition between them, and
+ * so does a face in open ground with the same walk out on either side.
+ *
+ * WHAT IT DOES NOT PROMISE: that every interior partition survives. A wall
+ * between a hallway and a back room genuinely does have one side nearer the
+ * door, and it will face and cut. That is XCOM's behaviour and it is wanted;
+ * it is recorded here because "ties keep the wall" is easy to over-read as
+ * "interior walls are safe", and they are not.
+ *
+ * Lives beside RoomPartition rather than in the geometry emitter because it is
+ * a question about the world and not about triangles — which is also what lets
+ * the tile tests check it against the demo map directly. */
+std::optional<Dir> outwardWallDirection(const RoomPartition& rooms,
+                                        int x, int y, int z, Dir d);
 
 }  // namespace game

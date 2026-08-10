@@ -215,6 +215,11 @@ def build(library: Path, mats: Path, write_mtl: bool, patch_obj: bool):
             byrole: dict[str, str] = {}
             for t in texes:
                 byrole.setdefault(classify_texture(t.split('.')[-1]), t)
+            # Some graphs carry only normals/masks by the suffix rule. Rather
+            # than call the mesh unresolved, fall back to the first texture -
+            # a wrong-but-present base map beats an untextured mesh.
+            if 'diffuse' not in byrole and texes:
+                byrole['diffuse'] = texes[0]
             dif = resolve_png(byrole.get('diffuse', ''), library, pkg)
             nrm = resolve_png(byrole.get('normal', ''), library, pkg)
             msk = resolve_png(byrole.get('mask', ''), library, pkg)
@@ -228,6 +233,19 @@ def build(library: Path, mats: Path, write_mtl: bool, patch_obj: bool):
         dif = resolve_png(pick(d['textures'], 'diffuse'), library, home)
         nrm = resolve_png(pick(d['textures'], 'normal'), library, home)
         msk = resolve_png(pick(d['textures'], 'mask'), library, home)
+
+        # A MIC that overrides nothing declares no TextureParameterValues at
+        # all - it inherits them from its Parent. Follow that chain into the
+        # base Material's expression graph, which is where ~600 meshes' real
+        # textures actually live.
+        if not dif and d.get('parent'):
+            inherited = basemats.get(d['parent'].split('.')[-1].lower(), [])
+            byrole: dict[str, str] = {}
+            for t in inherited:
+                byrole.setdefault(classify_texture(t.split('.')[-1]), t)
+            dif = dif or resolve_png(byrole.get('diffuse', ''), library, home)
+            nrm = nrm or resolve_png(byrole.get('normal', ''), library, home)
+            msk = msk or resolve_png(byrole.get('mask', ''), library, home)
         rows.append({'package': pkg, 'mesh': mesh, 'material': ref, 'diffuse': dif,
                      'normal': nrm, 'mask': msk, 'parent': d['parent'],
                      'resolved': 'yes' if dif else ''})

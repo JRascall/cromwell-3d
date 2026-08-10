@@ -56,7 +56,5 @@ inline constexpr Color kRingMove   = { 45, 170, 170, 235 };
 inline constexpr Color kRingSprint = { 255, 177, 50, 235 };
 
 inline constexpr Color kBackground = { 0x17, 0x1a, 0x20, 255 };
-inline constexpr Color kHudPanel   = { 20, 23, 30, 220 };
-inline constexpr Color kHudStatus  = { 200, 190, 150, 255 };
 
 }  // namespace game::palette

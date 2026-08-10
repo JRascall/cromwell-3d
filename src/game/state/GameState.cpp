@@ -1,5 +1,6 @@
 #include "game/state/GameState.hpp"
 
+#include "cromwell/diag/Profile.hpp"
 #include "game/los/VisibilityComputer.hpp"
 #include "game/query/BlockedMass.hpp"
 #include "game/query/Terrain.hpp"
@@ -47,12 +48,21 @@ void GameState::selectUnit(const Unit* unit)
 
 void GameState::recompute()
 {
+    /* Zones on the SYSTEMS, not inside them. The visibility sweep casts tens of
+     * thousands of rays; a zone per ray would cost more than the rays and drown
+     * the capture. See cromwell/diag/Profile.hpp. */
+    CW_PROFILE_ZONE_N("recompute");
+
     Unit& unit = selectedUnit();
 
-    OccupancyMaskBuilder::build(roster_, &unit, world_.lattice(), blockedMask_);
-    pathfinder_.search(*moveGraph_, unit.position(), sprintBudget(), &blockedMask_, reach_);
+    {
+        CW_PROFILE_ZONE_N("reach");
+        OccupancyMaskBuilder::build(roster_, &unit, world_.lattice(), blockedMask_);
+        pathfinder_.search(*moveGraph_, unit.position(), sprintBudget(), &blockedMask_, reach_);
+    }
 
     if (losMode_) {
+        CW_PROFILE_ZONE_N("visibility");
         VisibilityComputer(world_, roster_, &unit).compute(unit.position(), visibility_);
     } else {
         visibility_.reset(world_.lattice().cellCount());

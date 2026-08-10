@@ -1,9 +1,45 @@
+# Code tools
+
+One script about this repository's own source, rather than about somebody else's
+assets. Everything below it is the asset toolchain.
+
+| script | job |
+|---|---|
+| `tidy.sh` | clang-tidy over the tree — the mechanical half of CLAUDE.md's performance rules |
+
+```bash
+./tools/tidy.sh                          # everything; "clean" when it finds nothing
+./tools/tidy.sh src/game/los/RayCaster.cpp
+./tools/tidy.sh --fix                    # apply what clang-tidy is confident about
+```
+
+Nothing to install: clang-tidy ships with Visual Studio 2022. It needs no
+compile database either — the simulation is portable C++20, so
+`-std=c++20 -Isrc` is the whole flag set, and raylib's include path is picked up
+from `builds/_cmake-win/_deps` when the project has been configured once.
+
+**What it cannot tell you.** clang-tidy sees *local* patterns — a needless copy,
+a vector that should have reserved. The expensive mistakes here were contextual:
+correct, idiomatic code that was ruinous only because a caller four levels up sat
+inside a per-ray-step loop. Nothing local sees that.
+
+**For where the time actually goes, use Tracy** — build with `-DXC_TRACY=ON` and
+see the profiling section in `CLAUDE.md`. It gives CPU and OpenGL GPU zones on
+one aligned timeline, which is the only way to tell a GPU-bound frame from a
+CPU-bound one.
+
+---
+
 > **Helldivers 2** has its own toolchain in this folder — `hd2_extract.ps1`,
 > `hd2_unpack.py`, `hd2_dsar.py`, `hd2_index.py`. Different game, different
 > engine (Stingray, not UE3), no shared code. See the end of this file.
 >
 > **UNIGINE 2** has a small one too — `unigine_extract.ps1`,
 > `unigine_texture.py`. Also unrelated to the above. See the end of this file.
+>
+> **Rainbow Six: Siege** has one as well — `r6_extract.ps1`, `r6_forge.py`,
+> `r6_index.py`. AnvilNext 2, unrelated to any of the above. See the end of this
+> file, and `study/rainbow_six_formats.md` for the container format.
 
 # XCOM 2 SDK asset toolchain
 
@@ -27,6 +63,8 @@ here, pass `-VgmStream <path>`.
 | `xcom_parcel.ps1` / `.py` | a parcel's layout → placement CSV |
 | `xcom_parcel_render.py` | **reference implementation: how to consume it all** |
 | `xcom_audio.ps1` / `.py` | Wwise `.wem`/`.bnk` → named WAVs |
+| `xcom_anim.ps1` / `.py` | skinned meshes + animations (needs umodel), notify events |
+| `xcom_fx.ps1` / `.py` | particle systems; also resolves base-Material textures |
 | `build_test_kit.ps1` | the curated, committed kit in `assets/models/` |
 | `xcom_publish.ps1` | verify/relocate a finished library |
 
@@ -177,6 +215,100 @@ Two traps, both of which silently lose most of the audio:
 * Bank IDs repeat across locales too, so a first-wins dedupe can drop English
   audio owned by a French bank. (It doesn't here — verified — but check if you
   change the ownership rule.)
+
+## Animations and skinned meshes
+
+The SDK **cannot** export these. Its FBX exporter writes 0-byte files (there is
+no FBX SDK DLL in `Binaries`) and PSK/PSA/ASE export nothing, so `SkeletalMesh`
+and `AnimSequence` are unreachable through BatchExport. umodel reads the `.upk`
+directly and does not care.
+
+```powershell
+.\tools\xcom_anim.ps1 -UModel C:\tools\umodel\umodel_64.exe
+.\tools\xcom_anim.ps1 -Notifies                     # second pass, no umodel needed
+```
+
+umodel is third party and NOT vendored: <https://www.gildor.org/en/projects/umodel>.
+The site blocks hotlinking, so a programmatic fetch needs a browser `Referer`
+header.
+
+**Three things that will waste hours if you do not know them:**
+
+1. **Use `umodel_64.exe`.** The 32-bit build in the same zip crashes on these
+   packages with exit 255 and no output.
+2. **`-nostat` is not optional.** umodel 1590 cannot deserialise XCOM's
+   StaticMesh variant - it dies with `RawArray item size mismatch` and takes
+   the whole package with it, animations included. Without it **128 of 473
+   packages fail**; with it, 2. Static geometry is already covered by
+   `xcom_bulk.ps1`, so nothing is lost. This is the default here.
+3. **`.psa` carries no notify events.** Clip names and lengths come from the
+   `.psa` ANIMINFO chunk (complete and authoritative); footstep, weapon-fire
+   and IK timings exist only in the SDK, via the separate `-Notifies` pass.
+
+Output: `xcom_extracted/anim/<Package>/{AnimSet/*.psa, SkeletalMesh/*.psk}`,
+plus `anim_clips.csv` (5273 clips, 758 minutes) and `anim_notifies_events.csv`
+(13,469 events - 6141 AkEvent sound triggers, 2785 footsteps, 648 IK blends).
+AkEvent payloads name Wwise events that cross-reference into the WAVs.
+
+Notify coverage is ~73% of clips, not 100%: BatchExport names each T3D after
+the object, and most AnimSequences are anonymous (`AnimSequence_0`, ...) with
+numbering restarting per AnimSet, so files overwrite each other. There is no
+BatchExport option to disambiguate.
+
+## Particle systems
+
+```powershell
+.\tools\xcom_fx.ps1 -PackageList workbench\fx_packages.txt -Slice 0 -Of 4
+```
+
+`batchexport <pkg> ParticleSystem T3D` dumps every emitter, LOD level and
+module with its baked distribution values. Yields `fx_systems.csv` (2844
+systems) and `fx_systems_emitters.csv` (17,293 emitters: type, material, spawn
+rate, lifetime, start size/velocity, module chain).
+
+**Filter the package list first.** Loading a package costs ~80s and most hold
+no particles, so a full 1759-package sweep is ~5 hours. Particles live almost
+entirely in `FX_*`. Grepping each `.upk` name table for `ParticleSystem` looks
+tempting and is *wrong* - it matches packages that merely reference one
+(`AbstractSculptures` matched and exports zero).
+
+Values are read from each property's baked `LookupTable`, not by chasing the
+Distribution object it names - those inner objects reuse names heavily (43
+copies of one name in a single file), so a flat name map collides.
+
+## Materials: how the 85% is reached
+
+`materials.csv` resolves 8586 of 10107 meshes to a diffuse. It took four
+passes, and each is a trap worth knowing:
+
+| pass | mechanism | running total |
+|---|---|---|
+| 1 | `pkginfo -all` DependsMap → MIC → `TextureParameterValues` | 6570 (65%) |
+| 2 | **case-insensitive** MIC lookup | 7369 (73%) |
+| 3 | base `Material` expression graphs | 8184 (81%) |
+| 4 | MIC → `Parent=` chain into the base graph | 8586 (85%) |
+
+* **Case sensitivity is the single biggest trap here.** XCOM's own references
+  disagree with its file names - `adventacunits.Materials.adventacunits` points
+  at a package stored as `AdventACUnits`. Exact-case matching silently loses
+  ~800 meshes, and made 197 packages look absent from the SDK elsewhere.
+  Lowercase both sides of every name comparison.
+* **A MIC that overrides nothing declares no textures at all** - it inherits
+  them from `Parent=`. Following that chain into the base Material's graph is
+  worth another 400 meshes.
+* **Base `Material` objects are not MICs.** Their textures live in
+  `MaterialExpressionTextureSample` nodes, exposed only by
+  `batchexport <pkg> Material T3D` (`xcom_fx.py basemats`, then
+  `buildmats` → `basematerials.csv`). Expensive: ~280s for a texture-heavy
+  package.
+* Graph textures carry no parameter names, so role is inferred from the suffix
+  (`_NRM`, `_MSK`, `_OPC`). Imperfect, but better than untextured.
+
+The remaining 539 are `EngineMaterials`, `jeremy_dev` and
+`Strat_Ship_Int_MasterMaterials` - engine defaults, dev scratch and master
+materials, mostly without a conventional diffuse. A further 982 meshes
+reference no material at all (collision proxies, LODs). 85% is close to the
+automated ceiling.
 
 ## Known limitations
 
@@ -494,3 +626,138 @@ to XCOM's `MovementBorder_Line` (see `study/README.md`).
 * **Volume slices are decoded eagerly.** A 256³ BC4 volume is a million blocks
   — vectorised, so about a second, but it holds the whole decoded volume in
   memory (~16 MB at 8-bit) before writing.
+
+---
+
+# Rainbow Six: Siege assets
+
+Separate again: AnvilNext 2, no shared code with anything above.
+
+| script | job |
+|---|---|
+| `r6_extract.ps1` | the driver — sweep archives into loose assets |
+| `r6_forge.py` | the `.forge` (scimitar) container reader |
+| `r6_index.py` | index/query what the archives contain |
+
+## You have to build the extractor first
+
+Unlike Helldivers, there is no working tool to point at. **All three public
+toolkits fail on the current build** — [RainbowForge](https://github.com/parzivail/RainbowForge)
+(archived March 2024), [RainbowForge3](https://github.com/hengtek/RainbowForge3),
+[Prism_V2](https://github.com/kazonix/Prism_V2). RainbowForge3 is the closest
+starting point; `workbench/r6/siege-v34-and-typing.patch` is the diff against it.
+
+```powershell
+# download RainbowForge3, apply the patch, build (needs the .NET 6 SDK)
+cd workbench\r6\RainbowForge3\RainbowForge3-master
+dotnet build DumpTool\DumpTool.csproj -c Release
+```
+
+Oodle is needed and the game does not ship it loose — it is statically linked
+into `RainbowSix.exe`. RainbowForge3 bundles a copy under `Testing files\`; any
+UE4/UE5 install has `oo2core_9_win64.dll`, which decodes `oo2core_8` streams if
+you rename it. It must sit beside `DumpTool.dll` **and** be named in
+`OODLE2_8_PATH` — the tool P/Invokes it by name and separately checks the
+variable points at a real file. `r6_extract.ps1` sets the variable for you.
+
+**What the patch fixes**, none of which any public tool does:
+
+1. **The v34 header layout.** v34 inserts a `u32` at `0x1E`, shifting every field
+   below it by four bytes. Read with the v33 layout it does not fail loudly — it
+   yields a plausible `numEntries`, a garbage table pointer, and dies later on a
+   wild seek. This silently blocked **215 of 307 archives**, including every
+   texture and sound archive.
+2. **Asset typing.** The FAT's metadata table is all zeros from v33 on, so
+   RainbowForge3 forces every asset to `AssetType.Texture` — correct only inside
+   a textures archive, corrupting everything else. The real type is in the
+   `FileMetaData` block at the head of the payload.
+3. **The encrypted v34 FAT**, bypassed by scanning for the container magic.
+4. **Both sound paths** — see below.
+
+## Sweeping
+
+```powershell
+.\tools\r6_extract.ps1 -List                  # archive table by kind, extracts nothing
+.\tools\r6_extract.ps1 -Kind mesh             # 2.8 GB of archives, start here
+.\tools\r6_extract.ps1 -Pilot 1 -Kind texture # time one archive before committing
+.\tools\r6_extract.ps1                        # everything
+```
+
+Archives are classified by filename, which is reliable because Ubisoft packs by
+type — a `*_mesh` archive holds meshes and nothing else. That is what makes
+`-Kind` worth having:
+
+| kind | archives | packed |
+|---|---|---|
+| `texture` | 65 | 28.7 GB |
+| `guitexture` | 21 | 2.8 GB |
+| `mesh` | 52 | 2.8 GB |
+| `gidata` | 57 | 2.3 GB |
+| `soundmedia` | 14 | 2.2 GB |
+| `meshshape` | 38 | 2.2 GB |
+| `soundbank` | 13 | 0.9 GB |
+| `world` | 34 | 0.4 GB |
+
+Resumable — an archive whose output directory carries a `.done` marker is
+skipped, so an interruption costs nothing. Sliceable the same way as
+`xcom_bulk.ps1`: `-Slice i -Of n` across n processes, disjoint by archive.
+
+Measured: a 127 MB mesh archive yields **16,876 OBJ in 40 s**. The texture pass
+is by far the largest and should be run on its own.
+
+## Querying
+
+```powershell
+py -3 tools\r6_index.py --list                                  # instant, headers only
+py -3 tools\r6_index.py --build --out r6_extracted\index.csv    # ~1 h, see below
+py -3 tools\r6_index.py --library r6_extracted --query "mesh"
+py -3 tools\r6_index.py --library r6_extracted --query "pvp04_clubhouse"
+```
+
+`--build` is slow for a reason: the v34 allocation table is encrypted, so entries
+are found by scanning the archive, and typing each asset means inflating the
+first chunk of its payload. Use `--slice/--of` to spread it over processes.
+
+**Query by property, because there are no names** (below). The archive name is
+the most useful axis — it encodes map, season or content drop
+(`pvp04_clubhouse`, `set01`, `mtx`, `evn12_rengoku`), which is most of the
+context a filename would have carried. `--list` alone answers "where is the bulk
+of the content" without extracting anything.
+
+## Five things that will waste your afternoon
+
+1. **Names do not exist.** Not "encrypted and awkward" — the FAT's name field is
+   zeroed in all 307 archives, and the in-payload blob resists every reconstruction
+   of the published key. Assets come out as `id1204224_typeDiffuse.dds`. The full
+   negative result is in `study/rainbow_six_formats.md` §6 so it is not re-derived.
+2. **There are no particle definitions and no FX archive.** The `FX` /
+   `EffectData` class IDs from 2021 appear nowhere in this build. FX *textures*
+   extract fine but land in the catch-all `Misc` category and, without names, have
+   to be found by eye. §7.
+3. **Sound is stored two incompatible ways.** `*_soundbank` are ordinary
+   containers; `*_soundmedia` hold bare `.wem` end to end with **zero** container
+   magics, so they enumerate as empty archives unless scanned for `RIFF`/`WAVE`.
+   That is 46,063 files — most of the game's audio — invisible to every other
+   tool.
+4. **`.wem` still needs vgmstream.** Not vendored, same as the XCOM toolchain;
+   extraction gives you `.wem`, conversion to WAV/OGG needs
+   [vgmstream](https://github.com/vgmstream/vgmstream/releases).
+5. **Mind the disk.** 43.7 GB packed. Textures are 28.7 GB of that before
+   decompression, and audio inflates hard — Helldivers went 28 GB → 122 GB for
+   the same reason. Run `-Kind` passes, not the lot, unless you have the room.
+
+## Known limitations
+
+* **No names, no particle definitions** (above).
+* **World/entity data is opaque.** The 40 map archives (`pvp01_house` …
+  `pvp29_privatecasino`, one per Siege map) hold ~80 assets each, nearly all of
+  the undecoded type `0x569859AA`. These are the analogue of XCOM's parcels and
+  decoding them is the highest-value unfinished work here.
+* **Soundbank extraction is ~96%**; soundmedia is 100%.
+* **No skinning.** Meshes export as OBJ with positions, normals, UVs and vertex
+  colours. Siege's rigged characters need more than the OBJ writer emits.
+* **Textures are DDS**, not PNG — DXT1/DXT5/BC5U with mips, which is the right
+  form for a renderer but wants a converter for eyeballing.
+* **Most type IDs are unknown.** RainbowForge's table is from 2021 and the two
+  commonest types in this build are not in it; `r6_index.py` records unknown IDs
+  as hex rather than guessing.

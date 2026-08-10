@@ -21,7 +21,9 @@
 #include "game/movement/search/Pathfinder.hpp"
 #include "game/query/BlockedMass.hpp"
 #include "game/query/cover/LedgeCover.hpp"
+#include "game/light/RoomPartition.hpp"
 #include "game/query/Terrain.hpp"
+#include "game/render/scene/CutawayView.hpp"
 #include "game/units/roster/DemoRosterFactory.hpp"
 #include "game/units/roster/OccupancyMaskBuilder.hpp"
 #include "game/units/roster/UnitRoster.hpp"
@@ -685,6 +687,143 @@ void testOcclusionGrid()
 
 }  // namespace
 
+/* THE CUTAWAY, AND SPECIFICALLY THE PART THAT PROTECTS THE LIGHTING.
+ *
+ * The bug this guards against has happened once already: the sun's depth pass
+ * read the player's storey cut, so hiding a floor deleted the roof from the
+ * shadow map and the room below jumped to full sunlight. The facing cut is a
+ * second, worse version of the same hazard because it re-decides every time
+ * the camera turns.
+ *
+ * The defence is that a DEFAULT CutawayView cuts nothing, so the sun and the
+ * probes are correct by construction rather than by a caller remembering to
+ * pass the right thing. That is a property worth a test, because it is exactly
+ * the kind of default somebody later "tidies" into a zero. */
+void testCutaway()
+{
+    std::printf("== cutaway ==\n");
+
+    /* 1. the default shows the entire world — the shadow pass's guarantee */
+    const CutawayView whole;
+    CHECK(whole.maxStorey >= kDefaultStoreyCount,
+          "default cutaway stops at storey %d, must reach past any lattice", whole.maxStorey);
+    for (int i = 0; i < kSurfaceFacingCount; i++)
+        CHECK(whole.shows(static_cast<SurfaceFacing>(i)),
+              "default cutaway hides facing %d", i);
+    CHECK(CutawayView::whole().facings == whole.facings, "whole() differs from the default");
+
+    /* 2. an unclassified surface can never be cut, from any angle. This is what
+     *    makes a miss in the emitter's classifier cost a wall that fails to
+     *    open rather than a hole in the world. */
+    for (int degrees = 0; degrees < 360; degrees += 15) {
+        const float radians = static_cast<float>(degrees) * 3.14159265f / 180.0f;
+        const unsigned mask = facingsVisibleFrom(std::cos(radians), std::sin(radians));
+        CHECK((mask & bitOf(SurfaceFacing::None)) != 0u,
+              "facing None was cut at %d degrees", degrees);
+    }
+
+    /* 3. the rule itself: a camera at the south-east looks north-west, so the
+     *    +X and -Z faces are the near ones and come off; the other two stay as
+     *    the building's backdrop. Getting this inverted removes the far walls
+     *    and every building reads as a floating floor. */
+    const unsigned fromSouthEast = facingsVisibleFrom(-1.0f, 1.0f);
+    CHECK(!(fromSouthEast & bitOf(SurfaceFacing::PlusX)),  "+X wall survived a camera east of it");
+    CHECK(!(fromSouthEast & bitOf(SurfaceFacing::MinusZ)), "-Z wall survived a camera south of it");
+    CHECK(fromSouthEast & bitOf(SurfaceFacing::MinusX),    "-X backdrop wall was cut");
+    CHECK(fromSouthEast & bitOf(SurfaceFacing::PlusZ),     "+Z backdrop wall was cut");
+
+    /* 4. rotating 90 degrees swaps which pair opens, which is the behaviour
+     *    that makes the cutaway feel like it follows the camera at all */
+    const unsigned fromNorthWest = facingsVisibleFrom(1.0f, -1.0f);
+    CHECK(fromNorthWest & bitOf(SurfaceFacing::PlusX),  "+X did not come back when the camera swung round");
+    CHECK(fromNorthWest & bitOf(SurfaceFacing::MinusZ), "-Z did not come back when the camera swung round");
+    CHECK(!(fromNorthWest & bitOf(SurfaceFacing::MinusX)), "-X survived a camera west of it");
+    CHECK(!(fromNorthWest & bitOf(SurfaceFacing::PlusZ)),  "+Z survived a camera north of it");
+
+    /* 5. straight down has no horizontal direction to be in front of, so it
+     *    cuts nothing and leaves the storey cut to do the work alone */
+    CHECK(facingsVisibleFrom(0.0f, 0.0f) == kAllFacings,
+          "a top-down camera cut a wall");
+
+    /* 6. a wall seen edge-on stays up. The dot product is near zero there and
+     *    without a deadband it would cut and uncut on camera noise while the
+     *    player merely held a rotation key. */
+    const unsigned dueNorth = facingsVisibleFrom(0.0f, 1.0f);
+    CHECK(dueNorth & bitOf(SurfaceFacing::PlusX),  "+X cut while edge-on");
+    CHECK(dueNorth & bitOf(SurfaceFacing::MinusX), "-X cut while edge-on");
+    CHECK(!(dueNorth & bitOf(SurfaceFacing::MinusZ)), "-Z not cut with the camera due south of it");
+}
+
+/* WHICH SIDE OF A WALL IS THE OUTSIDE, checked against the demo map itself
+ * rather than against a second implementation of the rule.
+ *
+ * THE CASE THAT DROVE THIS TEST. The building's south facade runs x = 4..11,
+ * with the doorway at x = 7. The balcony overhang roofs the ground in front of
+ * x = 4..9 — so by the enclosure test that decides RoomPartition's `outdoor`
+ * flag, the porch under it is INDOORS, exactly like the room behind the wall.
+ * A rule that asked "is one side indoors and the other out" therefore declined
+ * to face those six segments and the wall in front of the doorway would not
+ * open, while x = 10..11 past the overhang opened normally. Half a facade
+ * cutting is worse than none, because it looks like a rendering bug rather
+ * than a decision.
+ *
+ * The facade is checked end to end for that reason: the bug was a BAND, and a
+ * test that sampled one column would have passed straight through it. */
+void testWallFacing()
+{
+    std::printf("== wall facing ==\n");
+
+    const RoomPartition rooms(g_world);
+
+    /* the whole south facade faces south, overhang or no overhang */
+    int faced = 0;
+    for (int x = 4; x <= 11; x++) {
+        if (x == 7) continue;   /* the doorway itself — no wall to face */
+
+        const std::optional<Dir> outward = outwardWallDirection(rooms, x, 12, 0, Dir::South);
+        CHECK(outward.has_value(), "south facade x=%d has no outward direction", x);
+        if (outward) {
+            CHECK(*outward == Dir::South, "south facade x=%d faces %d, expected South",
+                  x, toIndex(*outward));
+            faced++;
+        }
+    }
+    std::printf("   south facade: %d/7 segments faced (x=4..9 sit under the balcony overhang)\n",
+                faced);
+
+    /* the north facade faces the other way — the rule is not simply agreeing
+     * with whichever direction it was asked about */
+    const std::optional<Dir> north = outwardWallDirection(rooms, 6, 19, 0, Dir::North);
+    CHECK(north.has_value() && *north == Dir::North, "north facade does not face north");
+
+    /* and the sides */
+    const std::optional<Dir> west = outwardWallDirection(rooms, 4, 15, 0, Dir::West);
+    const std::optional<Dir> east = outwardWallDirection(rooms, 11, 15, 0, Dir::East);
+    CHECK(west.has_value() && *west == Dir::West, "west facade does not face west");
+    CHECK(east.has_value() && *east == Dir::East, "east facade does not face east");
+
+    /* THE OTHER HALF OF THE RULE: open ground has no wall worth facing. Both
+     * sides are the same volume, so there is nothing behind it to reveal — and
+     * this is what stops the classifier from quietly facing everything. */
+    const std::optional<Dir> openField = outwardWallDirection(rooms, 20, 8, 0, Dir::North);
+    CHECK(!openField.has_value(), "a face in open ground was given an outward direction");
+
+    /* A wall's two sides must not both claim to be the outside. Asking from
+     * the far cell has to give the exact opposite answer, or a slab could land
+     * in two facing buckets depending on which neighbour emitted it. */
+    for (int x = 4; x <= 11; x++) {
+        if (x == 7) continue;
+        const std::optional<Dir> fromInside  = outwardWallDirection(rooms, x, 12, 0, Dir::South);
+        const std::optional<Dir> fromOutside = outwardWallDirection(rooms, x, 11, 0, Dir::North);
+        CHECK(fromInside.has_value() == fromOutside.has_value(),
+              "south facade x=%d disagrees about whether it faces at all", x);
+        if (fromInside && fromOutside)
+            CHECK(*fromInside == *fromOutside,
+                  "south facade x=%d faces %d from inside but %d from outside",
+                  x, toIndex(*fromInside), toIndex(*fromOutside));
+    }
+}
+
 int main()
 {
     testLattice();
@@ -697,6 +836,8 @@ int main()
     testUnits();
     testOccupancyIndex();
     testOcclusionGrid();
+    testCutaway();
+    testWallFacing();
 
     if (g_failures) std::printf("\n%d FAILURE(S)\n", g_failures);
     else            std::printf("\nall tile-core checks passed\n");

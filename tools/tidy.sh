@@ -100,27 +100,70 @@ if [ ${#FILES[@]} -eq 0 ]; then
     fi
 fi
 
-echo "clang-tidy over ${#FILES[@]} file(s)"
+FLAGS=(-std=c++20 -Isrc "${EXTRA_INCLUDES[@]}" -x c++)
+
+# ONE PROCESS PER FILE, RUN IN PARALLEL. clang-tidy has no incremental mode and
+# no shared header cache between runs, so each of the ~110 files re-parses the
+# whole include tree — raylib, imgui and the standard library included. Serially
+# that is minutes of wall time for a few seconds of actual analysis, and a check
+# nobody waits for is a check nobody runs.
+#
+# The work is embarrassingly parallel: no file's result depends on another's.
+# Default to the core count, which takes it from minutes to seconds.
+#
+# --fix is the exception and runs SERIALLY. Two processes rewriting files that
+# include each other's headers can interleave edits; the fixing path is rare and
+# not worth the risk.
+JOBS="${TIDY_JOBS:-$(nproc 2>/dev/null || echo 8)}"
+if [ -n "$FIX" ]; then JOBS=1; fi
+
+echo "clang-tidy over ${#FILES[@]} file(s), ${JOBS} at a time"
 echo
 
-FLAGS=(-std=c++20 -Isrc "${EXTRA_INCLUDES[@]}" -x c++)
-failed=0
+# Each job writes its own file, so parallel output cannot interleave mid-line.
+# Collected in the original order afterwards, so a run is reproducible rather
+# than ordered by whichever process happened to finish first.
+SCRATCH="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/tidy.$$")"
+mkdir -p "$SCRATCH"
+trap 'rm -rf "$SCRATCH"' EXIT
 
+index=0
 for f in "${FILES[@]}"; do
-    out="$("$TIDY" $FIX "$f" -- "${FLAGS[@]}" 2>&1)"
-    # The "N warnings generated / suppressed in non-user code" trailer is noise
-    # when there is nothing else; only print a file that actually said something.
-    if echo "$out" | grep -qE 'warning:|error:'; then
-        echo "--- $f"
-        echo "$out" | grep -vE '^\s*$' | grep -vE 'warnings? generated\.$' \
-                    | grep -vE 'Suppressed [0-9]+ warnings' \
-                    | grep -vE 'Use -header-filter|Use -system-headers'
-        echo
-        failed=1
-    fi
+    (
+        out="$("$TIDY" $FIX "$f" -- "${FLAGS[@]}" 2>&1)"
+        # The "N warnings generated / suppressed in non-user code" trailer is
+        # noise when there is nothing else; only report a file that had
+        # something to say.
+        if echo "$out" | grep -qE 'warning:|error:'; then
+            {
+                echo "--- $f"
+                echo "$out" | grep -vE '^\s*$' \
+                            | grep -vE 'warnings? generated\.$' \
+                            | grep -vE 'Suppressed [0-9]+ warnings' \
+                            | grep -vE 'Use -header-filter|Use -system-headers'
+                echo
+            } > "$SCRATCH/$(printf '%04d' "$index")"
+        fi
+    ) &
+
+    index=$((index + 1))
+
+    # Block until a slot frees. `wait -n` needs bash 4.3+, which Git Bash has;
+    # the fallback drains everything, which is slower but always correct.
+    while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do
+        wait -n 2>/dev/null || wait
+    done
+done
+wait
+
+reported=0
+for report in "$SCRATCH"/*; do
+    [ -e "$report" ] || continue
+    cat "$report"
+    reported=1
 done
 
-if [ $failed -eq 0 ]; then
+if [ $reported -eq 0 ]; then
     echo "clean - nothing to report"
 fi
 

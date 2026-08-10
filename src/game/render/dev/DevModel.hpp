@@ -1,29 +1,30 @@
-/* Hud.hpp — the on-screen text panel.
+/* DevModel.hpp — everything the dev UI reports, gathered once per frame.
  *
- * SINGLE RESPONSIBILITY: draw text. Everything it reports arrives in HudModel,
- * so it queries no game state and computes nothing.
+ * SINGLE RESPONSIBILITY: carry state to the F1 panels. FrameRenderer fills it
+ * from the frame it is about to draw; DevView reads it and never queries the
+ * game itself. That one-way flow is the reason the dev UI can be switched off
+ * without changing what the renderer does.
+ *
+ * IT WAS THE HUD'S MODEL. The on-screen text panel in the top-left corner is
+ * gone — the dev panel reports all of it, in a form that can be interacted with
+ * rather than only read — so the model moved to the only thing still reading
+ * it. The name HUD is now free for the real one.
  */
 #pragma once
 
-#include "raylib.h"
-
 #include "game/lattice/Cell.hpp"
-#include "cromwell/ribbon/Ring.hpp"
 
 #include <optional>
 #include <string>
 
 namespace game {
 
-using namespace cromwell;  /* the engine's names, unqualified. The game sits on top of
-                          * cromwell and never the other way round, so there is nothing
-                          * here for the engine to collide with. */
-
-struct HudModel {
+struct DevModel {
     std::string selectedName;
     Cell        selectedCell;
 
     int  isoLevel = 0;
+
     const char* ringOverrideName = "auto";
     bool softCutaway = true;
     bool losMode = false;
@@ -32,8 +33,6 @@ struct HudModel {
 
     int moveLoops = 0, moveEdges = 0;
     int sprintLoops = 0, sprintEdges = 0;
-    RingMask visibleRings;
-    Ring     solidRing = Ring::Move;
 
     std::optional<Cell>  hoverCell;
     std::optional<float> hoverCost;     /* absent when unreachable */
@@ -62,16 +61,6 @@ struct HudModel {
     std::string cameraArgs;
 
     std::string status;
-
-    /* Pushed down by whatever is occupying the top of the screen — the dev
-     * toolbar, when it is up. The panel cannot move, being anchored to the
-     * viewport, so the thing that can is this. */
-    int topOffset = 0;
-};
-
-class Hud {
-public:
-    void draw(const HudModel& model) const;
 };
 
 }  // namespace game

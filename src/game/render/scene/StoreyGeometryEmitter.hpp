@@ -12,6 +12,7 @@
  */
 #pragma once
 
+#include "game/light/RoomPartition.hpp"
 #include "game/query/BlockedMass.hpp"
 #include "game/query/LadderQuery.hpp"
 #include "game/world/World.hpp"
@@ -25,8 +26,11 @@ using namespace cromwell;  /* the engine's names, unqualified. The game sits on 
 
 class StoreyGeometryEmitter {
 public:
+    /* Floods the room partition up front. That is one pass over the lattice
+     * per rebuild, which happens on a grenade rather than on a frame — cold
+     * code, and the alternative is asking the same question per wall. */
     explicit StoreyGeometryEmitter(const World& world)
-        : world_(world), mass_(world), ladders_(world) {}
+        : world_(world), mass_(world), ladders_(world), rooms_(world) {}
 
     void emit(int storey, SurfaceBuffers& out) const;
 
@@ -52,9 +56,28 @@ private:
      * crate rather than four separate railings. */
     static bool isCrateLike(const Tile* tile);
 
-    const World& world_;
-    BlockedMass  mass_;
-    LadderQuery  ladders_;
+    /* WHICH WAY THIS WALL FACES AWAY FROM THE ROOM IT ENCLOSES, which is the
+     * one question a cutaway needs answered and the one the geometry cannot
+     * answer for itself.
+     *
+     * Walls are stored CANONICALLY — the slab between two cells lives on the
+     * northern or eastern one's edge (see emitEdges) — so a slab's Dir gives
+     * its axis and nothing more. Whether that north-edge slab is a room's
+     * north wall or the next room's south wall depends entirely on which side
+     * the enclosed air is, and answering that is outwardWallDirection's job:
+     * see RoomPartition.hpp, which also explains why the test is a comparison
+     * rather than a classification.
+     *
+     * All this adds is the lattice's compass to the engine's world axes. In
+     * every case the rule cannot decide, the wall stays up — which is the
+     * failure worth having, since a wall that fails to open is a nuisance and
+     * a wall that vanishes is a hole in the world. */
+    SurfaceFacing outwardFacing(int x, int y, int z, Dir d) const;
+
+    const World&  world_;
+    BlockedMass   mass_;
+    LadderQuery   ladders_;
+    RoomPartition rooms_;
 };
 
 }  // namespace game

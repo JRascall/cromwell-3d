@@ -47,6 +47,10 @@ hd2_extracted/
 # ocean studies. Licensed for use in UNIGINE projects, so it is read here and
 # reimplemented, never shipped - see study/unigine_clouds.md.
 unigine_extracted/
+# Rainbow Six: Siege, swept by tools/r6_extract.ps1. Same rule as the two above:
+# read for reference, never shipped. Note that the ~250 GB estimate is dominated
+# by the texture pass - see tools/README.md before running the lot.
+r6_extracted/
 
 # Scratch for the extraction tools (tools/xcom_bulk.ps1, xcom_audio.ps1,
 # xcom_extract.ps1, build_test_kit.ps1): raw package dumps, bank staging and

@@ -28,6 +28,7 @@
 #include "game/path/MoveAnimator.hpp"
 #include "game/picking/SurfacePicker.hpp"
 #include "game/render/dev/DevView.hpp"
+#include "game/render/scene/CutawayView.hpp"
 #include "game/state/GameState.hpp"
 #include "game/state/RingSelector.hpp"
 
@@ -126,6 +127,15 @@ public:
     std::string cameraArguments() const;
 
     RibbonPassSettings ribbonSettings(bool softCutaway) const;
+
+    /* HOW MUCH OF THE WORLD THE CAMERA SHOULD SHOW, this frame.
+     *
+     * The policy lives here and not in the renderer because both halves of it
+     * are the controller's: the storey comes from the mode and the selection,
+     * and the facings come from where the camera is pointing. The renderer is
+     * handed the answer, which is what stops a pass from deciding for itself —
+     * the fault that made the sun's shadows move with the iso level. */
+    CutawayView cutawayView() const;
 
     /* Whether the selected unit could legally END a move on this cell.
      * Public because the overlays and the HUD both ask it. */

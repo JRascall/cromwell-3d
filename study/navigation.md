@@ -12,6 +12,12 @@ third-person game rather than only this tile game.
 > [`map_scale.md`](map_scale.md) (R.U.S.E., Wargame — when it is *extent*).
 > Those three axes are independent, and a technique from one is often useless in
 > another.
+>
+> **A fourth goes deeper still**:
+> [`moving_frame_navigation.md`](moving_frame_navigation.md) — what happens when
+> the floor is *moving* (a walkable ship) or absent entirely (open space), both
+> of which this note quietly assumes away. It also holds the buy-versus-build
+> survey of open-source navigation libraries, and the parallelism pass.
 
 Everything marked **[EPIC]** is from Epic's own documentation or public roadmap.
 **[VALVE]** is from the Valve Developer Community wiki. **[RECAST]** is from the

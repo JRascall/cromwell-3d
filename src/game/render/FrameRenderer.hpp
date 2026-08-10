@@ -44,7 +44,6 @@
 #include "game/render/FrameView.hpp"
 #include "game/render/dev/DevView.hpp"
 #include "game/render/overlay/BlastFlashes.hpp"
-#include "game/render/overlay/Hud.hpp"
 #include "game/render/overlay/OverlayRenderer.hpp"
 #include "game/render/ribbon/GlowPass.hpp"
 #include "game/render/ribbon/RibbonMeshSet.hpp"
@@ -149,14 +148,15 @@ private:
      * for it silently — as the shadow map used to — makes the lighting change
      * when the player changes floor. The lit pass gets the cutaway; the sun
      * and the probes get the whole lattice. */
-    void drawGeometry(int maxStorey, const Material& material, bool castersOnly = false);
-    void drawGeometryLit(int maxStorey);
+    void drawGeometry(const CutawayView& cutaway, const Material& material,
+                      bool castersOnly = false);
+    void drawGeometryLit(const CutawayView& cutaway);
     void drawGeometryPrepass();
     void drawOverlays();
     void drawShadowMap();
     void captureEnvironmentProbes();
     void rebuildEnvironmentProbes(const GameState& state);
-    HudModel buildHudModel() const;
+    DevModel buildDevModel() const;
 
     /* The screens that are NOT the game. Drawn instead of the world, not over
      * it: outside InGame there is no camera worth pointing anywhere and every
@@ -190,7 +190,6 @@ private:
     DecalRenderer  decalRenderer_;
 
     BlastFlashes   flashes_;
-    Hud            hud_;
     DevView        devView_;
     DevRequests    devRequests_;
 

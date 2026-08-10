@@ -13,6 +13,7 @@ FrameInput InputHandler::sample(std::optional<int> forcedMouseX,
     input.setStoreyGround = IsKeyPressed(KEY_ONE);
     input.setStoreyMiddle = IsKeyPressed(KEY_TWO);
     input.setStoreyTop    = IsKeyPressed(KEY_THREE);
+    input.setStoreyDynamic = IsKeyPressed(KEY_ZERO);
     input.cycleRing       = IsKeyPressed(KEY_TAB);
     input.toggleCutaway   = IsKeyPressed(KEY_C);
     input.toggleLos       = IsKeyPressed(KEY_L);
@@ -22,6 +23,7 @@ FrameInput InputHandler::sample(std::optional<int> forcedMouseX,
     input.toggleBake      = IsKeyPressed(KEY_B);
     input.toggleFlatView  = IsKeyPressed(KEY_F);
     input.toggleDevView   = IsKeyPressed(KEY_F1);
+    input.toggleCapture   = IsKeyPressed(KEY_F9);
     input.copyCamera      = IsKeyPressed(KEY_F3);
     input.resetWorld      = IsKeyPressed(KEY_R);
 
