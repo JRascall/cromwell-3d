@@ -1,0 +1,43 @@
+# Line endings, decided once so the engine can be checked out on Linux or a
+# CI box without every file showing as modified.
+#
+# Normalise everything to LF IN THE REPOSITORY, and let git hand Windows
+# whatever its checkout wants. Without this, the first commit from a Windows
+# machine bakes CRLF into the blobs and every non-Windows checkout of the
+# engine reads as a whole-file diff.
+* text=auto eol=lf
+
+# GLSL is source and must stay LF: the shader strings are concatenated and
+# preprocessed at load time, and a stray CR at the end of a `#version` or
+# `#define` line is a compile error on some drivers rather than whitespace.
+*.glsl  text eol=lf
+*.vert  text eol=lf
+*.frag  text eol=lf
+*.comp  text eol=lf
+
+# PowerShell wants CRLF; some hosts choke on LF-only scripts.
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# Never touched, never diffed as text. Most of these are excluded by
+# .gitignore today, but the marker is what stops one slipping in as a
+# corrupted "text" blob if that ever changes.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.tga   binary
+*.bmp   binary
+*.dds   binary
+*.ktx   binary
+*.hdr   binary
+*.obj   binary
+*.fbx   binary
+*.glb   binary
+*.wav   binary
+*.ogg   binary
+*.mp3   binary
+*.pdb   binary
+*.lib   binary
+*.dll   binary
+*.exe   binary

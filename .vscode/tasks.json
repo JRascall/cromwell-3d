@@ -1,0 +1,158 @@
+{
+  "version": "2.0.0",
+  "options": {
+    "cwd": "${workspaceFolder}"
+  },
+  "tasks": [
+    {
+      "label": "Xcom - Configure (CMake)",
+      "detail": "Generate the Visual Studio build files in builds/_cmake-win. Runs automatically before builds; only needs a manual run to reconfigure. First run fetches raylib 5.5 / imgui / rlImGui (~1 min).",
+      "type": "process",
+      "command": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe",
+      "args": [
+        "-B", "builds/_cmake-win",
+        "-G", "Visual Studio 17 2022"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "clear": true,
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(gear) Configure",
+          "tooltip": "CMake configure (Visual Studio 17 2022) into builds/_cmake-win",
+          "color": "#dcdcaa"
+        }
+      }
+    },
+    {
+      "label": "Xcom - Build EXE (Release)",
+      "detail": "Configure + build Release. The linker writes xcom.exe, xcom_web_helper.exe and the CEF runtime straight into builds/win.",
+      "type": "process",
+      "command": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe",
+      "args": [
+        "--build", "builds/_cmake-win",
+        "--config", "Release"
+      ],
+      "dependsOn": "Xcom - Configure (CMake)",
+      "dependsOrder": "sequence",
+      "problemMatcher": "$msCompile",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "clear": true,
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(tools) Build EXE",
+          "tooltip": "Build Release into builds\\win",
+          "color": "#9cdcfe"
+        }
+      }
+    },
+    {
+      "label": "Xcom - Build (Debug)",
+      "detail": "Configure + build Debug. EXE lands at builds\\win-debug\\xcom.exe (console window enabled).",
+      "type": "process",
+      "command": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe",
+      "args": [
+        "--build", "builds/_cmake-win",
+        "--config", "Debug"
+      ],
+      "dependsOn": "Xcom - Configure (CMake)",
+      "dependsOrder": "sequence",
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "presentation": {
+        "clear": true,
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(bug) Build Dbg",
+          "tooltip": "Build Debug (builds\\win-debug\\xcom.exe)",
+          "color": "#ce9178"
+        }
+      }
+    },
+    {
+      "label": "Xcom - Run Game (Release)",
+      "detail": "Build Release + launch builds\\win\\xcom.exe from the project root (so assets/ resolves).",
+      "type": "process",
+      "command": "${workspaceFolder}\\builds\\win\\xcom.exe",
+      "dependsOn": "Xcom - Build EXE (Release)",
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "close": true
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(rocket) Run Game",
+          "tooltip": "Build Release + launch xcom.exe",
+          "color": "#c586c0"
+        }
+      }
+    },
+    {
+      "label": "Xcom - Screenshot",
+      "detail": "Build Release + render one frame to shot.png in the project root, then exit.",
+      "type": "process",
+      "command": "${workspaceFolder}\\builds\\win\\xcom.exe",
+      "args": [
+        "--shot", "shot.png"
+      ],
+      "dependsOn": "Xcom - Build EXE (Release)",
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "presentation": {
+        "clear": true,
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(device-camera) Shot",
+          "tooltip": "Build + render one frame to shot.png",
+          "color": "#4ec9b0"
+        }
+      }
+    },
+    {
+      "label": "Xcom - Run Tests",
+      "detail": "Build Release + run the headless tile and crier tests via ctest.",
+      "type": "process",
+      "command": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\ctest.exe",
+      "args": [
+        "--test-dir", "builds/_cmake-win",
+        "-C", "Release",
+        "--output-on-failure"
+      ],
+      "dependsOn": "Xcom - Build EXE (Release)",
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "group": "test",
+      "presentation": {
+        "clear": true,
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(beaker) Tests",
+          "tooltip": "Build + run tile/crier tests (ctest)",
+          "color": "#73c991"
+        }
+      }
+    }
+  ]
+}

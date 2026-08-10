@@ -1,69 +1,112 @@
-# Prerequisites
-*.d
+# What this repository is: source and the infrastructure that builds it.
+# Nothing here is generated, downloaded, or extracted — if a clean checkout on
+# a new machine can produce it by running cmake, it does not belong in git.
+#
+# The one deliberate exception is assets/shaders: GLSL is source, it is 215 KB
+# of text, and the app cannot draw a frame without it. Meshes and textures are
+# not, and are excluded below.
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
+# ---- build output -------------------------------------------------------
+# Everything the build produces lives under builds/: builds/win is the
+# runnable staging directory (exe + CEF runtime), builds/_cmake-win is the
+# cmake tree that produces it. Both are regenerable; neither is checked in.
+builds/
 
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-*.so.*
-
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app
-
-# Build directories
-build/
-Build/
-build-*/
-
-# CMake generated files
-CMakeFiles/
+# Loose cmake output, for the case where somebody configures in-tree.
 CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
 cmake_install.cmake
-Makefile
 install_manifest.txt
-compile_commands.json
 
-# Temporary files
-*.tmp
+# ---- downloaded dependencies --------------------------------------------
+# CEF, ~163 MB compressed and ~700 MB extracted, fetched by
+# src/render/web/CMakeLists.txt (FetchContent, pinned + SHA1-checked). It sits
+# outside the build tree so that deleting builds/ does not cost another
+# download — which is exactly why it needs naming here instead of being
+# covered by builds/. raylib and imgui are fetched into the build tree and are
+# already covered.
+third_party/
+
+# ---- extracted game content ---------------------------------------------
+# Not ours to redistribute, tens to hundreds of GB, and regenerable by the
+# scripts in tools/.
+xcom_extracted/
+hd2_extracted/
+
+# Scratch for the extraction tools (tools/xcom_bulk.ps1, xcom_audio.ps1,
+# xcom_extract.ps1, build_test_kit.ps1): raw package dumps, bank staging and
+# plan .tsv files. Deliberately NOT under builds/ - a clean wipes that, and
+# re-extracting these costs hours.
+workbench/
+
+# ---- assets: source form only -------------------------------------------
+# 205 MB of meshes and textures across 311 files. Git stores every revision of
+# a binary in full, so a repository that carries these is permanently the size
+# of every version of them ever committed. They are authored elsewhere and
+# belong in whatever holds large binaries later (LFS, or a separate content
+# drop) — not in the history of the code.
+# The READMEs stay: they document what is SUPPOSED to be in these directories,
+# which is what somebody with a fresh checkout and no content actually needs.
+# Excluding the contents rather than the directory itself is what lets them be
+# re-included — git does not descend into an excluded directory, so a negation
+# underneath one never fires.
+assets/models/*
+!assets/models/README.md
+assets/materials/decals/*
+!assets/materials/decals/README.md
+
+# Belt and braces, so a new binary asset cannot enter by landing in a
+# directory nobody thought to list. Unanchored on purpose: this holds for
+# src/cromwell/assets/ and any other assets tree the split creates, not just
+# the one at the root.
+**/assets/**/*.png
+**/assets/**/*.jpg
+**/assets/**/*.jpeg
+**/assets/**/*.tga
+**/assets/**/*.bmp
+**/assets/**/*.dds
+**/assets/**/*.ktx
+**/assets/**/*.hdr
+**/assets/**/*.obj
+**/assets/**/*.mtl
+**/assets/**/*.fbx
+**/assets/**/*.gltf
+**/assets/**/*.glb
+**/assets/**/*.wav
+**/assets/**/*.ogg
+**/assets/**/*.mp3
+
+# Reference art kept next to the code for convenience. Same reasoning as
+# above; delete this line if you want it versioned with the UI work.
+/ui_cover_sheet.png
+
+# ---- run-time scratch ----------------------------------------------------
 *.log
-*.bak
-*.swp
 
-# vcpkg
-vcpkg_installed/
+# --shot screenshots (see main.c: raylib resolves the path against the CWD,
+# so these land wherever you ran it from, often the project root)
+shot*.png
+s_*.png
 
-# debug information files
-*.dwo
+# Chromium's profile, created next to the exe by WebRuntime.cpp. It lands in
+# builds/ now, but an older root copy may still be lying around.
+webcache/
 
-# test output & cache
-Testing/
-.cache/
+# ---- toolchain scratch ---------------------------------------------------
+# MSVC / Visual Studio
+.vs/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.user
+
+# Python bytecode from the extraction tools in tools/
+__pycache__/
+*.py[cod]
+
+# OS
+Thumbs.db
+.DS_Store
