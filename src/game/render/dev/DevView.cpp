@@ -686,7 +686,7 @@ void DevView::drawDecalPanel(const DevDecalTool& tool, ViewLayers& layers,
     ImGui::End();
 }
 
-void DevView::drawSteamPanel(DevSteam steam)
+void DevView::drawSteamPanel(const DevSteam& steam)
 {
     /* Slot 10, where it used to have none at all: without a slot it fell back
      * to ImGui's own cascade, which counts every window ever opened and had it
