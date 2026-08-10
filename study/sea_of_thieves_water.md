@@ -810,6 +810,62 @@ stand-in for thin, aerated water (`subsurface_around_foam` keys off the foam
 channel). A third proxy for the same quantity, reinforcing §3's point that
 having one matters more than which.
 
+### 11.9 The texture set, decoded
+
+§11.5 could read the shaders because they ship as text. The *textures* ship as
+`.texture`, UNIGINE's own container, which nothing third-party opens — so this
+subsection was not previously writable. [`../tools/unigine_texture.py`](../tools/unigine_texture.py)
+decodes it now; format notes are in `../tools/README.md` and
+[`unigine_clouds.md`](unigine_clouds.md) §3. Five files, in
+`data/core/textures/water_global/`: **[UNIGINE-SRC]**
+
+| file | dims | format | min/mean/max |
+|---|---|---|---|
+| `water_detail_n` | 1024², 11 mips | BC5 | R 78/127/174, G 80/127/180 |
+| `distant_waves_n` | 1024², 11 mips | BC5 | R 99/127/161, G 108/127/147 |
+| `foam_n` | 1024², 11 mips | BC5 | R 0/127/255, G 0/127/255 |
+| `foam_d` | 1024², 11 mips | BC4 | 28/178/255 |
+| `caustics` | 512×512×**64** | R8, 10 mips | 0/**9.4**/255 |
+
+**Every normal map is two-channel BC5 with Z reconstructed**, and all three land
+on a mean of exactly 127/127 — which is also the cheapest correctness check on
+any BC5 decoder.
+
+**Normal strength is baked into the map's range, and the ordering is the
+finding.** The three normal maps are not equally strong:
+
+| map | half-range about 127 | reads as |
+|---|---|---|
+| `distant_waves_n` | ±28 / ±20 | almost flat |
+| `water_detail_n` | ±48 / ±53 | moderate |
+| `foam_n` | ±127 / ±127 | full strength |
+
+So the distant map is deliberately the gentlest — roughly **a fifth** of foam's
+perturbation. That is the specular-aliasing fix for grazing angles done in
+*authoring* rather than in the shader: at distance a strong normal map turns
+into shimmer no amount of mip biasing rescues, so the map itself is flattened.
+Worth copying as a principle — and it means `distant_waves_n` is carrying about
+5 bits of real signal in an 8-bit map, so it could be stored far smaller.
+
+**`caustics` is the odd one and the one most likely to mislead.** Its Z axis is
+**animation time, not depth** — `raytrace.frag:94` samples
+`float3(caustic_uv.xy, water_time * s_caustics_animation_speed)`, default speed
+0.3, so the 64 slices are a loop. It is also extremely sparse: mean 9.4/255,
+median **0**, thin blown-out filaments on black. That is deliberate, because it
+is *added* to already-lit ground and scaled only by `caustic_fade` (≤ 1) and
+`caustic_brightness` (**default 1.0**, max 2.0). Caustics tiles authored to
+carry the look on their own — an ambient floor, wide soft filaments, mean ~32 —
+wash the surface out when applied this way. See
+[`../assets/textures/README.md`](../assets/textures/README.md), which records
+both authorings side by side, since the choice between them decides how the
+texture must be drawn.
+
+Two consequences for §11.3's claim that Unigine's underwater treatment is the
+fullest of the three. It holds, and the caustics half of it is cheaper than it
+sounds: one `R8` volume, one fetch, a distance fade and a LOD bias
+(`caustic_lod` blurs with distance). What is *not* cheap is authoring 64
+coherent frames.
+
 ### 11.4 Read
 
 Three oceans, three positions on one axis: **[inferred]**

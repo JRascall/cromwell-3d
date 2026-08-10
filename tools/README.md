@@ -1,6 +1,9 @@
 > **Helldivers 2** has its own toolchain in this folder — `hd2_extract.ps1`,
 > `hd2_unpack.py`, `hd2_dsar.py`, `hd2_index.py`. Different game, different
 > engine (Stingray, not UE3), no shared code. See the end of this file.
+>
+> **UNIGINE 2** has a small one too — `unigine_extract.ps1`,
+> `unigine_texture.py`. Also unrelated to the above. See the end of this file.
 
 # XCOM 2 SDK asset toolchain
 
@@ -220,7 +223,29 @@ $gd = "E:\SteamLibrary\steamapps\common\Helldivers 2"
 & $fd -g $gd -o out -i "content/fac_helldivers/**" -T unit
 ```
 
-### Four things that will waste your afternoon
+### Use the patched binary in `workbench/hd2/`
+
+Stock filediver **cannot extract the unit set at all**. It panics in
+`geometry.LoadGLTF` on units whose `materialIndices` slice is empty — engine
+placeholders such as `fallback_resources/missing_unit`. A Go panic kills the
+process rather than skipping the file, so one bad asset costs all 7,487 units;
+it died at file 238 every single time, deterministically.
+
+The cause is a guard on the wrong slice. The comment above it says the author
+was defending against exactly this, but checks `header.Materials` while the
+thing that blows up is `materialIndices[0]`:
+
+```go
+if len(materialIndices) > 0 && int(group.MaterialIdx) < len(header.Materials) {
+```
+
+`workbench/hd2/` holds the built binary, `ffmpeg.exe` (needed for audio), and
+`materialIndices-bounds-check.patch`. To rebuild: clone the repo, apply the
+patch, `go build -o filediver-patched.exe ./cmd/filediver-cli`. Go 1.21 will
+auto-fetch the 1.25 toolchain the module wants; no cgo, ~90 s. Worth checking
+whether this has landed upstream before rebuilding.
+
+### Five things that will waste your afternoon
 
 1. **A selector is mandatory.** With no `-i`/`-a`/`-m` it prints usage and
    exits 1. Pass `-i "*"` for everything.
@@ -229,14 +254,51 @@ $gd = "E:\SteamLibrary\steamapps\common\Helldivers 2"
 3. **The `model` alias is broken.** `-T model` → 0, `-T unit` → 305. Use real
    type names: `unit`, `texture`, `material`, `shader_library`, `wwise_stream`,
    `wwise_bank`.
-4. **Only 31.6% of names are known**; the rest are hashes. 24,958 assets carry
-   real paths, 24,442 of them under `content/`.
+4. **`-i` and `-x` take one PATTERN — but it can be an alternation.** A second
+   `-i`/`-x` overrides the first rather than unioning, so `-x A -x B` excludes
+   only B. `-x "{A,B,C}"` excludes all three. This is what makes a skip list or
+   a resume-only-the-missing run possible at all; batch it under ~28k chars to
+   stay inside the Windows command-line limit.
+5. **Only 31.6% of names are known**; the rest are hashes. 24,958 assets carry
+   real paths, 24,442 of them under `content/`. Hash forms work as globs too
+   (`-i "0x0a7b*"`), which is how you shard a run.
+
+### Resuming
+
+filediver never skips existing output, so re-running redoes everything. To
+resume after an interruption, diff the extracted `.glb` files against
+`-l -i "*" -T unit` and feed the difference back as batched brace alternations.
+Recovering 1,623 missing models that way took ~30 min instead of the ~2 h a
+full re-run would have cost.
+
+Validate before trusting a file count: check each `.glb` for the `glTF` magic
+and that the header's declared length equals the actual file size.
 
 Output is genuine: `arc_shotgun.unit.glb` is glTF 2.0 with 11,231 triangles,
 26 materials, 46 embedded textures and a skin — it opens in Blender as-is.
 `shader_library` extracts as raw DXBC with reflection names intact
 (`exposure_dampening_up`, `atmosphere_enabled`), which is the rendering-study
 material, not something you import.
+
+### What a full extraction yields
+
+Run 2026-08-09/10 against the then-current build, into `hd2_extracted/`:
+
+| directory | files | size | format |
+|---|---|---|---|
+| `models/` | 7,487 | 55.7 GB | `.glb`, textures embedded |
+| `audio/` | 102,260 | 49.0 GB | `.wav` (pass `--audio-format ogg` for ~10x less) |
+| `textures/` | 16,434 | 11.8 GB | `.png` |
+| `materials/` | 5,587 | 5.6 GB | |
+| `shaders/` | 1,643 | 0.03 GB | DXBC |
+| **total** | **133,496** | **122.5 GB** | |
+
+All 7,487 models verified structurally valid. 85 contain zero meshes — the
+placeholder units that used to trigger the panic; they extract cleanly now and
+are simply empty.
+
+Budget most of a night: the model pass alone is ~2 h at ~58 units/min, and
+audio is far larger than it looks because it defaults to uncompressed WAV.
 
 ## The local toolchain (a fallback, not the main path)
 
@@ -317,3 +379,118 @@ units", not "where is mesh X".
   the type table.
 * **The layout will change again.** The DSAR invariants in the format doc are
   the cheapest way to check whether it has.
+
+---
+
+# UNIGINE 2 textures
+
+Separate again: an engine SDK rather than a shipped game, and read for the
+rendering studies rather than for assets.
+
+| script | job |
+|---|---|
+| `unigine_extract.ps1` | the driver — decode the cloud and water texture sets |
+| `unigine_texture.py` | the `.texture` (`tx10`) container reader and BC decoder |
+
+```powershell
+.\tools\unigine_extract.ps1 -Info              # header table, decodes nothing
+.\tools\unigine_extract.ps1                    # clouds + water -> unigine_extracted/
+.\tools\unigine_extract.ps1 -Set clouds -Slices
+```
+
+Needs Python 3 with `numpy`, `Pillow` and `lz4` — the same set the XCOM and
+Helldivers tools already want. Pass `-SdkRoot` if the SDK Browser put the SDK
+somewhere other than
+`%LOCALAPPDATA%\unigine\browser\sdks\community_windows_2.17.0.1_bin`; the
+authoritative list is in `%APPDATA%\unigine\browser.json` under `sdk.installed`.
+
+## Why this exists
+
+UNIGINE ships its whole core library **unpacked and readable** — shaders as
+source, textures as loose files — which makes it the best available reference
+for two systems this project cares about. The shaders need no tool. The
+textures do: `.texture` is UNIGINE's own container and nothing third-party
+opens it.
+
+`study/unigine_clouds.md` is the write-up that came out of it.
+
+## Reading the output
+
+24 files decode from the two sets, in five formats:
+
+| set | files | formats seen |
+|---|---|---|
+| `clouds` | 19 | RGBA8, DXT1, DXT5, ATI1 (BC4) — 2D and 3D |
+| `water` | 5 | R8, ATI1 (BC4), ATI2 (BC5) |
+
+2D textures write `<name>.png` plus one image per channel. Volume textures
+write a contact sheet of all Z slices (`<name>_sheet.png`), plus per-channel
+sheets, plus every slice individually under `--slices`. Per-channel output is
+the point — `cloud_noise` is four independent noise octaves packed into RGBA,
+and the coverage textures pack coverage, storm mask and cloud-type height into
+R, G and B.
+
+The tool prints per-channel min/mean/max as it goes, which is the fastest way
+to see what a channel actually holds. It is also the correctness check: BC5
+normal maps must land on a mean of ~127 in both channels, and the storm mask
+(G) is near-zero for `clouds_coverage_cumulus` but mean 174 for
+`clouds_coverage_nimbostratus`.
+
+### Two traps when looking at the output
+
+**Do not judge a sparse texture from a downsampled contact sheet.**
+`caustics.texture` is thin bright filaments on black (mean 9.4/255, median 0).
+Resampling a 512 px slice down to a thumbnail averages those 1–2 px lines away
+and it reads as a solid black square. View volume slices at 1:1, or boost them,
+before concluding a decode is broken. The cheap check that it is *not* broken:
+box-downsample mip 0 and correlate it against mip 1, which is a separate LZ4
+block — they agree to 0.9999 here.
+
+It is also genuinely darker than the caustics tiles you find on texture sites,
+and deliberately so. `raytrace.frag:94` multiplies it by `caustic_fade` (≤ 1)
+and `caustic_brightness` (**default 1**, max 2), then *adds* it to ground that
+is already lit. It is a highlight overlay, not an illumination map.
+
+**A volume's Z axis is not always depth.** For `caustics.texture` the 64 slices
+are **animation frames** — the shader samples
+`float3(uv.xy, water_time * s_caustics_animation_speed)`, default speed 0.3, and
+`caustic_uv_transform` of `[0.05 0.05 0 0]` tiles it every 20 world units. For
+`cloud_noise` and the `*_shape` volumes, Z *is* the third spatial axis. The
+contact sheet looks the same either way.
+
+## The container
+
+48-byte header — `'tx10'`, an is-3D flag, an `Image::FORMAT_*` enum, w/h/d, mip
+count — then per mip a `u64` size followed by either raw data or a **raw LZ4
+block** (no frame header; the uncompressed size is known from the format and
+dimensions). Compression is opportunistic per mip: `foam_d.texture` stores BC4
+byte for byte, while a mostly-empty BC4 shadow map packs 131072 → 17624.
+
+Volume textures are a stack of independently block-compressed **2D** slices,
+not 3D blocks.
+
+Only enum values 3 (RGBA8), 24 (ATI1) and 25 (ATI2) are confirmed byte-exact
+against the SDK's own files; the rest follow the enum's declaration order.
+A wrong guess fails a size assertion rather than silently decoding garbage,
+which is why `--info` across a whole SDK is a cheap way to validate the table.
+
+## Licensing — read, do not ship
+
+UNIGINE's art is licensed for use in UNIGINE projects. `unigine_extracted/` is
+gitignored and nothing from it is committed or shipped. The purpose is to read
+what each channel holds — which the shaders in the same SDK document precisely —
+and then generate our own equivalents, the same rule this repo already applies
+to XCOM's `MovementBorder_Line` (see `study/README.md`).
+
+## Known limitations
+
+* **Only 8-bit formats decode.** The 16- and 32-bit entries in `FORMATS` are
+  sized correctly, so headers and mip offsets are right, but `decode_slice`
+  rejects them. Nothing in the cloud or water sets needs them.
+* **No BC6H/BC7.** Not seen in either set; the enum values above 25 are not
+  mapped at all.
+* **Mip 0 only by default.** `--mip N` selects another; there is no
+  whole-chain export.
+* **Volume slices are decoded eagerly.** A 256³ BC4 volume is a million blocks
+  — vectorised, so about a second, but it holds the whole decoded volume in
+  memory (~16 MB at 8-bit) before writing.

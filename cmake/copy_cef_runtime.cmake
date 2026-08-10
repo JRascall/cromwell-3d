@@ -2,7 +2,7 @@
 #
 # libcef.dll is loaded by name from the directory of the running exe, and the
 # .pak resources are located relative to it, so the staging directory that
-# xcom.exe and xcom_web_helper.exe link into needs the full set.
+# xcom.exe and cromwell_web_helper.exe link into needs the full set.
 #
 # Best-effort per file: a locked DLL (the app is running) warns instead of
 # failing the build. Invoked with -DCEF_BINARY_DIR= -DCEF_RESOURCE_DIR=

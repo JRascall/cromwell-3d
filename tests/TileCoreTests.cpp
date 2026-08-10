@@ -10,31 +10,31 @@
  * directly — the only intended difference is the ramp rejection diagnostics,
  * which now name MapAuthor::setRamp instead of xcSetRamp.
  */
-#include "core/border/Band.hpp"
-#include "core/border/BandExtractor.hpp"
-#include "core/border/LoopPolyliner.hpp"
-#include "core/border/LoopSet.hpp"
-#include "core/los/RayCaster.hpp"
-#include "core/los/VisibilityComputer.hpp"
-#include "core/movement/InfantryMoveGraph.hpp"
-#include "core/movement/PathReconstructor.hpp"
-#include "core/movement/Pathfinder.hpp"
-#include "core/query/BlockedMass.hpp"
-#include "core/query/LedgeCover.hpp"
-#include "core/query/Terrain.hpp"
-#include "core/units/DemoRosterFactory.hpp"
-#include "core/units/OccupancyMaskBuilder.hpp"
-#include "core/units/UnitRoster.hpp"
-#include "core/units/Vehicle.hpp"
-#include "core/world/DemoMapFactory.hpp"
-#include "core/world/MapAuthor.hpp"
-#include "core/world/World.hpp"
+#include "game/border/band/Band.hpp"
+#include "game/border/band/BandExtractor.hpp"
+#include "game/border/loop/LoopPolyliner.hpp"
+#include "game/border/loop/LoopSet.hpp"
+#include "game/los/RayCaster.hpp"
+#include "game/los/VisibilityComputer.hpp"
+#include "game/movement/graph/InfantryMoveGraph.hpp"
+#include "game/movement/search/PathReconstructor.hpp"
+#include "game/movement/search/Pathfinder.hpp"
+#include "game/query/BlockedMass.hpp"
+#include "game/query/cover/LedgeCover.hpp"
+#include "game/query/Terrain.hpp"
+#include "game/units/roster/DemoRosterFactory.hpp"
+#include "game/units/roster/OccupancyMaskBuilder.hpp"
+#include "game/units/roster/UnitRoster.hpp"
+#include "game/units/UnitFactory.hpp"
+#include "game/world/authoring/DemoMapFactory.hpp"
+#include "game/world/authoring/MapAuthor.hpp"
+#include "game/world/World.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <vector>
 
-using namespace xcom;
+using namespace game;
 
 namespace {
 

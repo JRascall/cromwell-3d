@@ -29,7 +29,7 @@
     },
     {
       "label": "Xcom - Build EXE (Release)",
-      "detail": "Configure + build Release. The linker writes xcom.exe, xcom_web_helper.exe and the CEF runtime straight into builds/win.",
+      "detail": "Configure + build Release. The linker writes xcom.exe, cromwell_web_helper.exe and the CEF runtime straight into builds/win.",
       "type": "process",
       "command": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe",
       "args": [

@@ -10,14 +10,16 @@
  * Runs against a locally constructed Crier rather than crier(), so the tests
  * cannot leak state into each other.
  */
-#include "core/events/Crier.hpp"
-#include "core/events/EventValue.hpp"
+#include "cromwell/events/Crier.hpp"
+#include "cromwell/events/EventValue.hpp"
 
 #include <cstdio>
 #include <string>
 #include <vector>
 
-using namespace xcom;
+/* The event bus is cromwell's, not the game's — this binary links
+ * cromwell_base alone and never sees a game type. */
+using namespace cromwell;
 
 namespace {
 

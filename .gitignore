@@ -26,13 +26,27 @@ install_manifest.txt
 # download — which is exactly why it needs naming here instead of being
 # covered by builds/. raylib and imgui are fetched into the build tree and are
 # already covered.
-third_party/
+#
+# The Steamworks SDK is here too, and it is the one dependency NO build can
+# produce: it is behind a partner login, so a fresh checkout has to be told
+# where to get it by hand. That makes its README the only instructions anyone
+# gets, so it is the single file kept — same reasoning as the asset READMEs
+# below, and the same three-line shape, because git does not descend into an
+# excluded directory and a negation underneath one never fires.
+third_party/*
+!third_party/steamworks/
+third_party/steamworks/*
+!third_party/steamworks/README.md
 
 # ---- extracted game content ---------------------------------------------
 # Not ours to redistribute, tens to hundreds of GB, and regenerable by the
 # scripts in tools/.
 xcom_extracted/
 hd2_extracted/
+# UNIGINE's core art, decoded by tools/unigine_texture.py for the cloud and
+# ocean studies. Licensed for use in UNIGINE projects, so it is read here and
+# reimplemented, never shipped - see study/unigine_clouds.md.
+unigine_extracted/
 
 # Scratch for the extraction tools (tools/xcom_bulk.ps1, xcom_audio.ps1,
 # xcom_extract.ps1, build_test_kit.ps1): raw package dumps, bank staging and
