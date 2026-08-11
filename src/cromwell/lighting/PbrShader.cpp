@@ -304,7 +304,7 @@ void PbrShader::updateEnvironment(const SunLight& sun, const ShadowMap& shadows,
      * constant blur — the exact failure PCSS exists to remove. The shader
      * doubles its sample count past 8 texels to keep the wider disc covered.
      * A sun near the horizon can still exceed even this; see the note in
-     * study/source2_rendering.md. */
+     * study/games/valve/source2_rendering.md. */
     const float softness[2] = { std::tan(sun.angularRadius()), 48.0f };
     SetShaderValue(shader_, locShadowSoftness_, softness, SHADER_UNIFORM_VEC2);
 }

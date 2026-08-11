@@ -6,7 +6,7 @@
  * WHY BAKE AT ALL, WHEN THERE IS ALREADY A SHADOW MAP. Source 2's best-looking
  * shadows are not shadow maps: static geometry casting onto static geometry is
  * resolved offline by a path tracer, and only dynamic objects use a depth
- * buffer (see study/source2_rendering.md). A bake has no texel grid to
+ * buffer (see study/games/valve/source2_rendering.md). A bake has no texel grid to
  * staircase against, no depth bias to tune, and gets real area-light softness
  * with contact hardening for free, because "how much of the sun can I see" is
  * literally what it measures.

@@ -6,8 +6,29 @@ cmake ships with VS2022, not on PATH:
 
 ```
 CM="/c/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"
-"$CM" --build builds/_cmake-win --target <target> --config Release
+"$CM" --build builds/_cmake-win --target <target> --config Release --parallel
 ```
+
+`--parallel` is not decoration: it is MSBuild's project-level parallelism, and
+it composes with the /MP in CMakeLists that parallelises within each project.
+Without both, a 16-core machine builds serially.
+
+### xcb, the build cockpit
+
+`tools/xcb` (Go + Bubble Tea; build once with `go build` in that directory).
+Launched bare it stays open: a menu to build targets, run ctest, bake assets
+and trace builds, with live progress and a per-project time breakdown from
+MSBuild's own performance summary after every build. Every build is appended
+to `tools/xcb/history.jsonl` (gitignored, per-machine) and diffed against the
+previous comparable one — "builds are getting slower" is answered there, not
+by feel.
+
+`xcb build <target>` / `xcb history` are one-shot equivalents for scripts.
+`xcb trace` wraps **vcperf** (C++ Build Insights, ships with VS2022; needs an
+elevated shell) and exports Chrome Trace JSON to `builds/buildtraces/` —
+numbered, like the F9 captures — for ui.perfetto.dev. A breakdown says which
+project was slow; the trace says which header, template or function. Reach
+for it before any header-hygiene or PCH work.
 
 Build tree is `builds/_cmake-win`; the runnable product stages to `builds/win`.
 `ctest -C Release` from the build tree runs all suites. `game_core` and the test
@@ -259,14 +280,14 @@ Inside anything running per cell, per ray step, per agent or per frame:
   raycast. Testing every survivor is the mistake: you only need the *winner* to
   pass, so the common case costs one expensive test rather than one per
   candidate. Applies to target selection, cover scoring, ability placement —
-  anything that picks a best cell out of many. (`study/spatial_queries.md` §3.6,
+  anything that picks a best cell out of many. (`study/topics/agents/spatial_queries.md` §3.6,
   where this is CryEngine's stated rule and raycasts are "the dominant cost of
   the whole AI system".)
 - **Enumerate candidates in the shape of the question, not the shape of the
   grid.** A radius scored over a square lattice puts its best cells on the
   cardinal and diagonal axes, so units converge on eight headings and approach at
   a visible slant — real shipped bug, not a theoretical one. Walk a ring for a
-  radial query. Cheaper *and* unbiased. (`study/spatial_queries.md` §5.2.)
+  radial query. Cheaper *and* unbiased. (`study/topics/agents/spatial_queries.md` §5.2.)
 - **When a choice is re-made repeatedly, give the incumbent a small discount.**
   Scores are noisy and cost functions have plateaus, so two candidates at 0.71
   and 0.70 will swap on rounding and the unit oscillates — re-picking cover
@@ -276,7 +297,7 @@ Inside anything running per cell, per ray step, per agent or per frame:
   misdiagnosed as pathfinding or scoring. **Incumbency is information, and a
   scorer that ignores it thrashes.** Applies wherever the previous rule does.
   (Unreal's motion matching does exactly this with a `-0.01` continuing-pose
-  bias — `study/motion_matching.md` §3.2, §8.2.)
+  bias — `study/topics/animation/motion_matching.md` §3.2, §8.2.)
 
 ### Derived caches need the escape-hatch pattern
 
@@ -302,7 +323,7 @@ the occlusion grid, so there is no way to mutate geometry and forget.
 The engine targets GL 4.3 and has compute (`cromwell/gpu/compute/`). Before
 moving work there: the readback is usually the problem, not the dispatch. Keep
 state resident and avoid round-trips. Assume rendering becomes the limit before
-simulation does — see `study/navigation.md` §10–11.
+simulation does — see `study/topics/agents/navigation.md` §10–11.
 
 ## Research notes
 

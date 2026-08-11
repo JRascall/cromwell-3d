@@ -43,18 +43,18 @@ third_party/steamworks/*
 # scripts in tools/.
 xcom_extracted/
 hd2_extracted/
-# UNIGINE's core art, decoded by tools/unigine_texture.py for the cloud and
+# UNIGINE's core art, decoded by tools/unigine/unigine_texture.py for the cloud and
 # ocean studies. Licensed for use in UNIGINE projects, so it is read here and
-# reimplemented, never shipped - see study/unigine_clouds.md.
+# reimplemented, never shipped - see study/games/rendering/unigine_clouds.md.
 unigine_extracted/
-# Rainbow Six: Siege, swept by tools/r6_extract.ps1. Same rule as the two above:
+# Rainbow Six: Siege, swept by tools/r6/r6_extract.ps1. Same rule as the two above:
 # read for reference, never shipped. The measured sweep is 940,110 files and
 # 139.4 GB - 97.7 GB of that is textures - so the library actually lives on
 # D:\r6_extracted, passed via -Out. This entry stays because the script's default
 # is still a path inside the repo, and a sweep run without -Out would land here.
 r6_extracted/
 
-# Scratch for the extraction tools (tools/xcom_bulk.ps1, xcom_audio.ps1,
+# Scratch for the extraction tools (tools/xcom2/xcom_bulk.ps1, xcom_audio.ps1,
 # xcom_extract.ps1, build_test_kit.ps1): raw package dumps, bank staging and
 # plan .tsv files. Deliberately NOT under builds/ - a clean wipes that, and
 # re-extracting these costs hours.
@@ -105,20 +105,20 @@ assets/materials/decals/*
 # a fresh checkout with text and no icons, and the fallback in DevFonts.cpp is
 # written for "no pack at all", which is a state somebody actually looked at.
 # The licences and the cheatsheet beside them are text and do stay — the
-# cheatsheet is what tools/gen_fa_icons.py reads, and the licences are the
+# cheatsheet is what tools/fonts/gen_fa_icons.py reads, and the licences are the
 # terms, which are exactly what a fresh checkout needs to have been told.
 **/assets/**/*.ttf
 **/assets/**/*.otf
 
 # The web half of the same fonts, base64'd into a stylesheet by
-# tools/gen_fa_icons.py because Chromium will not fetch a font cross-origin
+# tools/fonts/gen_fa_icons.py because Chromium will not fetch a font cross-origin
 # from a file:// page. 3.9 MB, nearly all of it those same excluded binaries,
 # and one command away from existing again. The header the same script emits,
 # src/cromwell/ui/FontAwesomeIcons.hpp, is NOT here: it is text, it is the API
 # every call site spells, and a checkout without the pack still has to compile.
 src/cromwell/assets/web/cromwell_ui.css
 
-# The MSDF atlases, baked from those same excluded faces by tools/bake_msdf.py.
+# The MSDF atlases, baked from those same excluded faces by tools/fonts/bake_msdf.py.
 # The .bmp is already covered by the image rule above; the .cwfont table beside
 # it is text, but it is derived from the atlas it names and is meaningless
 # without it, so the pair is excluded together for the same reason the font
@@ -177,3 +177,9 @@ Thumbs.db
 # built-in bitmap font rather than failing.
 assets/fonts/*.ttf
 assets/fonts/*.otf
+
+# ---- xcb, the build cockpit ---------------------------------------------
+# The binary is `go build` away, and history is this machine's measurements
+# - build times from one box say nothing about another.
+tools/xcb/xcb.exe
+tools/xcb/history.jsonl

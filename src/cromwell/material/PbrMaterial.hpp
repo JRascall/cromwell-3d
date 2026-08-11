@@ -158,7 +158,7 @@ struct PbrMaterial {
      * side of it. Leaves glow, an ear glows, and a coloured pane glows.
      *
      * Zero by default, so every existing material is untouched and pays only a
-     * branch that is never taken. See study/source2_rendering.md 12.1. */
+     * branch that is never taken. See study/games/valve/source2_rendering.md 12.1. */
     float   transmissionAmount = 0.0f;
     Vector3 transmissionColour{ 1.0f, 1.0f, 1.0f };
 
@@ -177,7 +177,7 @@ struct PbrMaterial {
      * a flat pane has two parallel interfaces whose bends cancel, leaving a
      * displacement of about a pixel that is uniform across the surface — and
      * uniform displacement has no reference to be seen against. Curved or
-     * thick glass would need it; windows do not. See study/source2_rendering.md
+     * thick glass would need it; windows do not. See study/games/valve/source2_rendering.md
      * §12.1. */
     float   baseOpacity     = 0.08f;   /* head-on, before the Fresnel ramp   */
     float   edgeThickness   = 0.0f;    /* offsets N·V — opacity facing you   */
@@ -197,7 +197,7 @@ struct PbrMaterial {
      * make it locally ROUGH, which breaks the mirror reflection into a haze —
      * and a hazed reflection reads as a dirty window far more strongly than
      * any colour change does. It is also the cheap half: one mix, no extra
-     * texture fetch. See study/source2_rendering.md §12.1, "Grime as a layer,
+     * texture fetch. See study/games/valve/source2_rendering.md §12.1, "Grime as a layer,
      * not a texture". */
     float   grimeRoughness = 0.62f;
     Vector3 grimeColour{ 0.30f, 0.29f, 0.26f };   /* dulled road dust        */

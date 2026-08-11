@@ -98,7 +98,7 @@ private:
     bool visible_ = false;
 
     /* Loaded on first use rather than at setup: the atlas is baked from the
-     * licensed font pack (tools/bake_msdf.py) and is simply absent on a
+     * licensed font pack (tools/fonts/bake_msdf.py) and is simply absent on a
      * checkout without it, so this stays unready and draws nothing. */
     cromwell::sdf::WorldText worldText_;
     bool worldTextTried_ = false;

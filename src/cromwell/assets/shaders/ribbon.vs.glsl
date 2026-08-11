@@ -2,7 +2,7 @@
 /* ribbon.vs.glsl - movement-coverage ribbon, vertex stage.
  *
  * Port of UI_3D.Tile.MovementBorder's WorldPositionOffset input. See
- * ../../study/xcom2_movement_border.hlsl for the recovered material.
+ * ../../study/games/strategy/xcom2_movement_border.hlsl for the recovered material.
  *
  * XCOM's z is up and measured in unreal units; ours is y and measured in tiles
  * (1 tile = 96uu), so every recovered constant arrives here already divided by

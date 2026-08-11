@@ -56,7 +56,7 @@ public:
 
     /* file:// URL of the generated stylesheet that gives a CEF page the same
      * typeface and the same icon names, or empty if it has not been generated.
-     * Produced by tools/gen_fa_icons.py, which also emits FontAwesomeIcons.hpp
+     * Produced by tools/fonts/gen_fa_icons.py, which also emits FontAwesomeIcons.hpp
      * — one script, so the two UIs cannot drift onto different codepoints.
      *
      * A URL rather than a path because the only consumer is WebSurface, and a

@@ -17,9 +17,9 @@
  *   roughly 12 px on screen it is visibly worse than the other one.
  *
  * So: UI text goes through UiFontSet, world text comes here, and neither is a
- * fallback for the other. See study/distance_fields.md §9.
+ * fallback for the other. See study/topics/surfaces/distance_fields.md §9.
  *
- * THE ATLAS IS BAKED, NOT BUILT. tools/bake_msdf.py drives msdf-atlas-gen and
+ * THE ATLAS IS BAKED, NOT BUILT. tools/fonts/bake_msdf.py drives msdf-atlas-gen and
  * writes a .bmp beside a .cwfont table. Generating a multi-channel field needs
  * the edge-colouring pass from Chlumsky's thesis and is far too slow to do at
  * load time; drawing with the result is two triangles and a median. Those two

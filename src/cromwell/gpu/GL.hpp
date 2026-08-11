@@ -65,7 +65,7 @@ namespace cromwell::gl {
 /* Bind a SUB-RANGE of a buffer, where rlBindShaderBuffer binds the whole
  * thing. Wanted so that one large instance buffer can serve many batches at
  * different offsets — RE ENGINE's "mesh-specific offset + instance id" layout,
- * see study/re_engine_rendering.md §9.1 — instead of one buffer per batch. */
+ * see study/games/rendering/re_engine_rendering.md §9.1 — instead of one buffer per batch. */
 void bindBufferRange(unsigned int target, unsigned int index, unsigned int buffer,
                      std::ptrdiff_t offset, std::ptrdiff_t size);
 
@@ -90,7 +90,7 @@ void memoryBarrier(unsigned int bits);
 /* ---- GPU-driven drawing -------------------------------------------------
  *
  * Not used yet, and deliberately declared anyway: these are the calls the
- * instancing work in study/re_engine_rendering.md §9.1 tier 3 would need, and
+ * instancing work in study/games/rendering/re_engine_rendering.md §9.1 tier 3 would need, and
  * having them named here is what makes that a day of work rather than a
  * re-litigation of this header. A compute pass writes the draw arguments and
  * decrements InstanceCount for culled batches; a culled batch draws zero

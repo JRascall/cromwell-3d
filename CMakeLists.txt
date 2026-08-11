@@ -10,6 +10,17 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# ---- parallel compilation, and why it has to be said at all -------------
+# The Visual Studio generator compiles ONE FILE AT A TIME within each project
+# unless /MP is in the flags — MSBuild's own /m only parallelises across
+# projects, and this tree is a near-linear chain of five, so without /MP a
+# 16-core machine builds like a 1-core one. Measured on a Vec3.hpp touch:
+# 36s serial, and the whole difference is this flag. Set before the deps are
+# fetched so raylib, freetype and imgui compile in parallel too.
+if(MSVC)
+    add_compile_options(/MP)
+endif()
+
 # The app target is added once src/render exists; the tile core and its
 # headless tests build with no raylib dependency at all, same split as
 # FromDustPrototype's sim core.
@@ -471,14 +482,14 @@ if(XC_BUILD_APP)
 
     # ---- msdf-atlas-gen: the distance field baker -----------------------
     # A BUILD-TIME TOOL, NOT A RUNTIME DEPENDENCY. Nothing in the engine links
-    # this. It builds an executable that tools/bake_msdf.py drives to turn a
-    # font into an MSDF atlas, exactly the way tools/gen_fa_icons.py drives the
+    # this. It builds an executable that tools/fonts/bake_msdf.py drives to turn a
+    # font into an MSDF atlas, exactly the way tools/fonts/gen_fa_icons.py drives the
     # icon vocabulary — the output is generated, gitignored and one command
     # away, and the shipped binary carries only the PNG it produced.
     #
     # Generating a multi-channel field is not something to reimplement: it
     # needs the edge-colouring pass from Chlumsky's thesis (see
-    # study/distance_fields.md) and this is that thesis's own library.
+    # study/topics/surfaces/distance_fields.md) and this is that thesis's own library.
     #
     # Every option here is switched off something that is ON by default and
     # would otherwise want a package manager or a second graphics library:
@@ -682,7 +693,7 @@ if(XC_BUILD_APP)
         src/cromwell/ui/UiFontAssets.cpp
         # Distance fields: the MSDF font table and atlas. The BAKER is a
         # build-time tool and is not linked by anything here - see the
-        # msdf-atlas-gen block above and tools/bake_msdf.py.
+        # msdf-atlas-gen block above and tools/fonts/bake_msdf.py.
         src/cromwell/sdf/MsdfFont.cpp
         src/cromwell/sdf/WorldText.cpp
     )

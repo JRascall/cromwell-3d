@@ -109,7 +109,7 @@ bool MsdfFont::load(const std::string& cwfontPath)
         }
         /* "kerning" and its "k" records are parsed by nothing yet — the bake
          * emits none for Inter, whose pairs live in GPOS where FreeType cannot
-         * see them (see tools/bake_msdf.py). Falling through here rather than
+         * see them (see tools/fonts/bake_msdf.py). Falling through here rather than
          * erroring is what lets that change without touching this file. */
     }
 

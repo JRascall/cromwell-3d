@@ -3,7 +3,7 @@
  *
  * Port of UI_3D.Tile.MovementBorder, recovered node-for-node from the WotC SDK.
  * The material and every constant in it are written out in readable form in
- * ../../study/xcom2_movement_border.hlsl - read that first; this file is the
+ * ../../study/games/strategy/xcom2_movement_border.hlsl - read that first; this file is the
  * same maths with XCOM's z-up unreal units swapped for our y-up tiles.
  *
  * The material is MLM_Unlit: the emissive IS the output, and all the behaviour

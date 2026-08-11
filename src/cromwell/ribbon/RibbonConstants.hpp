@@ -2,7 +2,7 @@
  *
  * SINGLE RESPONSIBILITY: state the numbers. The shader is a port of
  * UI_3D.Tile.MovementBorder, recovered node-for-node from the WotC SDK package
- * and written out as readable HLSL in study/xcom2_movement_border.hlsl. The
+ * and written out as readable HLSL in study/games/strategy/xcom2_movement_border.hlsl. The
  * GLSL that actually runs lives in assets/shaders/ribbon.{vs,fs}.glsl.
  *
  * Three things carry the look:

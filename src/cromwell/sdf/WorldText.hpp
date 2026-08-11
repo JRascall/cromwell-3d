@@ -8,7 +8,7 @@
  * size blurs when magnified and shimmers when minified, and world text is
  * magnified and minified continuously. The atlas here stores DISTANCE to the
  * glyph edge instead of coverage, and the shader reconstructs a sharp edge from
- * it at whatever size the fragment happens to be — see study/distance_fields.md.
+ * it at whatever size the fragment happens to be — see study/topics/surfaces/distance_fields.md.
  *
  * BILLBOARDED, AND THAT IS A CHOICE THIS CLASS MAKES. Every quad faces the
  * camera, because the things wanting world text first — a name over a unit, a
@@ -28,7 +28,7 @@
  * THE COST. Two triangles per glyph and a fragment shader that is a median, a
  * derivative and two clamps. Two hundred five-digit numbers is four thousand
  * vertices against one bound texture. The expensive half of a distance field is
- * BAKING it, which happened at build time — see tools/bake_msdf.py.
+ * BAKING it, which happened at build time — see tools/fonts/bake_msdf.py.
  */
 #pragma once
 

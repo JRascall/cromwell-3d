@@ -1,11 +1,22 @@
 # Code tools
 
-One script about this repository's own source, rather than about somebody else's
-assets. Everything below it is the asset toolchain.
+One folder per toolchain, one script at the root about this repository's own
+source. The layout:
 
-| script | job |
+| entry | job |
 |---|---|
 | `tidy.sh` | clang-tidy over the tree — the mechanical half of CLAUDE.md's performance rules |
+| [`xcb/`](xcb/) | the project's cockpit (Go TUI) — build targets, run suites, per-project build timing and history; see the header comment in `xcb/main.go` |
+| [`xcom2/`](xcom2/) | the XCOM 2 SDK asset toolchain — extract, convert, materials, audio, FX, parcels, publish |
+| [`hd2/`](hd2/) | Helldivers 2 (Stingray) extraction |
+| [`r6/`](r6/) | Rainbow Six: Siege (AnvilNext 2) extraction |
+| [`ruse/`](ruse/) | R.U.S.E. (IRISZOOM) readers — the only Python 2 in the tree |
+| [`unigine/`](unigine/) | UNIGINE 2 texture decoding |
+| [`asset_browser/`](asset_browser/) | search, preview and channel-split across *every* extracted library |
+| [`fonts/`](fonts/) | icon header/CSS generation and MSDF atlas baking from the licensed font packs |
+
+The per-game toolchains share no code with each other — different games,
+different engines. Each is documented in its own section below.
 
 ```bash
 ./tools/tidy.sh                          # everything; "clean" when it finds nothing
@@ -30,24 +41,27 @@ CPU-bound one.
 
 ---
 
-> **Helldivers 2** has its own toolchain in this folder — `hd2_extract.ps1`,
+> **Helldivers 2** has its own toolchain in [`hd2/`](hd2/) — `hd2_extract.ps1`,
 > `hd2_unpack.py`, `hd2_dsar.py`, `hd2_index.py`. Different game, different
 > engine (Stingray, not UE3), no shared code. See the end of this file.
 >
-> **UNIGINE 2** has a small one too — `unigine_extract.ps1`,
-> `unigine_texture.py`. Also unrelated to the above. See the end of this file.
+> **UNIGINE 2** has a small one too, in [`unigine/`](unigine/) —
+> `unigine_extract.ps1`, `unigine_texture.py`. Also unrelated to the above. See
+> the end of this file.
 >
-> **Rainbow Six: Siege** has one as well — `r6_extract.ps1`, `r6_forge.py`,
-> `r6_index.py`. AnvilNext 2, unrelated to any of the above. See the end of this
-> file, and `study/rainbow_six_formats.md` for the container format.
+> **Rainbow Six: Siege** has one as well, in [`r6/`](r6/) — `r6_extract.ps1`,
+> `r6_forge.py`, `r6_index.py`. AnvilNext 2, unrelated to any of the above. See
+> the end of this file, and `study/games/shooters/rainbow_six_formats.md` for
+> the container format.
 >
-> **R.U.S.E. / IRISZOOM** has three small readers — `ruse_edat.py`,
-> `ruse_ndf.py`, `ruse_python.py`. Eugen Systems' own engine, unrelated to any
-> of the above, and **the only Python 2 scripts in this folder**. See the end of
-> this file, and `study/ruse.md` for what they were written to find out.
+> **R.U.S.E. / IRISZOOM** has three small readers in [`ruse/`](ruse/) —
+> `ruse_edat.py`, `ruse_ndf.py`, `ruse_python.py`. Eugen Systems' own engine,
+> unrelated to any of the above, and **the only Python 2 scripts in the tree**.
+> See the end of this file, and `study/games/strategy/ruse.md` for what they
+> were written to find out.
 >
-> **`asset_browser.py`** sits across all of them — search every extracted
-> library, preview meshes, split textures into channels. See below.
+> **[`asset_browser/`](asset_browser/)** sits across all of them — search every
+> extracted library, preview meshes, split textures into channels. See below.
 
 # XCOM 2 SDK asset toolchain
 
@@ -112,7 +126,7 @@ textures. Its header documents both, including the mirroring and alpha-cutout
 traps. Run it on any extracted parcel to see the result:
 
 ```powershell
-py -3 tools\xcom_parcel_render.py md_Forest_01  # -> workbench\parcel_<name>.png
+py -3 tools\xcom2\xcom_parcel_render.py md_Forest_01  # -> workbench\parcel_<name>.png
 ```
 
 Three rules that are easy to get wrong and expensive to debug:
@@ -129,10 +143,10 @@ Three rules that are easy to get wrong and expensive to debug:
 ## Rebuilding from scratch
 
 ```powershell
-.\tools\xcom_bulk.ps1 -AllContent                    # models + textures
-.\tools\xcom_materials.ps1 -WriteMtl -PatchObj       # pair them up
-.\tools\xcom_audio.ps1 -VgmStream <path>             # loose .wem (voice)
-.\tools\xcom_audio.ps1 -VgmStream <path> -Banks      # .bnk contents (all SFX)
+.\tools\xcom2\xcom_bulk.ps1 -AllContent                    # models + textures
+.\tools\xcom2\xcom_materials.ps1 -WriteMtl -PatchObj       # pair them up
+.\tools\xcom2\xcom_audio.ps1 -VgmStream <path>             # loose .wem (voice)
+.\tools\xcom2\xcom_audio.ps1 -VgmStream <path> -Banks      # .bnk contents (all SFX)
 ```
 
 Resumable — a package whose output folder exists is skipped, so an interrupted
@@ -158,8 +172,8 @@ XCOM's own naming** — reliable because Firaxis' environment art encodes all
 three.
 
 ```powershell
-py -3 tools\xcom_index.py --library xcom_extracted\models --query "high 1x1"
-py -3 tools\xcom_index.py --library xcom_extracted\models --query "ladder"
+py -3 tools\xcom2\xcom_index.py --library xcom_extracted\models --query "high 1x1"
+py -3 tools\xcom2\xcom_index.py --library xcom_extracted\models --query "ladder"
 ```
 
 Of 10107 meshes: 415 high cover, 711 low, 1153 deco; the rest carry no cover
@@ -170,9 +184,9 @@ z-cell multiples (64uu), so they drop straight onto the lattice.
 ## Parcels
 
 ```powershell
-.\tools\xcom_parcel.ps1 -List
-.\tools\xcom_parcel.ps1 -Parcel md_Advent_Security_03
-.\tools\xcom_parcel.ps1 -Parcel lg_Museum_01 -Summary
+.\tools\xcom2\xcom_parcel.ps1 -List
+.\tools\xcom2\xcom_parcel.ps1 -Parcel md_Advent_Security_03
+.\tools\xcom2\xcom_parcel.ps1 -Parcel lg_Museum_01 -Summary
 ```
 
 Every placed prop in a parcel is an `XComLevelActor` (destructibles derive from
@@ -234,8 +248,8 @@ and `AnimSequence` are unreachable through BatchExport. umodel reads the `.upk`
 directly and does not care.
 
 ```powershell
-.\tools\xcom_anim.ps1 -UModel C:\tools\umodel\umodel_64.exe
-.\tools\xcom_anim.ps1 -Notifies                     # second pass, no umodel needed
+.\tools\xcom2\xcom_anim.ps1 -UModel C:\tools\umodel\umodel_64.exe
+.\tools\xcom2\xcom_anim.ps1 -Notifies                     # second pass, no umodel needed
 ```
 
 umodel is third party and NOT vendored: <https://www.gildor.org/en/projects/umodel>.
@@ -268,7 +282,7 @@ BatchExport option to disambiguate.
 ## Particle systems
 
 ```powershell
-.\tools\xcom_fx.ps1 -PackageList workbench\fx_packages.txt -Slice 0 -Of 4
+.\tools\xcom2\xcom_fx.ps1 -PackageList workbench\fx_packages.txt -Slice 0 -Of 4
 ```
 
 `batchexport <pkg> ParticleSystem T3D` dumps every emitter, LOD level and
@@ -459,15 +473,15 @@ documented and verifiable, and it gives any *other* Stingray tool that only
 understands the old layout something to chew on.
 
 Format spec, with the checks used to verify it:
-[`study/helldivers2_formats.md`](../study/helldivers2_formats.md). Needs Python
+[`study/games/shooters/helldivers2/helldivers2_formats.md`](../study/games/shooters/helldivers2/helldivers2_formats.md). Needs Python
 3 and the `lz4` package (installed automatically).
 
 ```powershell
-.\tools\hd2_extract.ps1 -List                # table of contents, extracts nothing
-.\tools\hd2_extract.ps1 -Kind bundle         # 5.4 GB, start here
-.\tools\hd2_extract.ps1 -Pilot 50            # time a sample first
-.\tools\hd2_extract.ps1                      # everything, 127 GB
-.\tools\hd2_extract.ps1 -IndexOnly
+.\tools\hd2\hd2_extract.ps1 -List                # table of contents, extracts nothing
+.\tools\hd2\hd2_extract.ps1 -Kind bundle         # 5.4 GB, start here
+.\tools\hd2\hd2_extract.ps1 -Pilot 50            # time a sample first
+.\tools\hd2\hd2_extract.ps1                      # everything, 127 GB
+.\tools\hd2\hd2_extract.ps1 -IndexOnly
 ```
 
 Resumable — a file already present at its expected size is skipped, so an
@@ -498,8 +512,8 @@ Bundles are named by hash, so `index.csv` records what each one *contains*,
 read from its type table (one row per bundle, one column per resource type).
 
 ```powershell
-py -3 tools\hd2_index.py --library hd2_extracted\data --query "unit"
-py -3 tools\hd2_index.py --library hd2_extracted\data --query "texture>200"
+py -3 tools\hd2\hd2_index.py --library hd2_extracted\data --query "unit"
+py -3 tools\hd2\hd2_index.py --library hd2_extracted\data --query "texture>200"
 ```
 
 Type names are recovered by hashing candidates with murmur64a and matching, the
@@ -535,9 +549,9 @@ rendering studies rather than for assets.
 | `unigine_texture.py` | the `.texture` (`tx10`) container reader and BC decoder |
 
 ```powershell
-.\tools\unigine_extract.ps1 -Info              # header table, decodes nothing
-.\tools\unigine_extract.ps1                    # clouds + water -> unigine_extracted/
-.\tools\unigine_extract.ps1 -Set clouds -Slices
+.\tools\unigine\unigine_extract.ps1 -Info              # header table, decodes nothing
+.\tools\unigine\unigine_extract.ps1                    # clouds + water -> unigine_extracted/
+.\tools\unigine\unigine_extract.ps1 -Set clouds -Slices
 ```
 
 Needs Python 3 with `numpy`, `Pillow` and `lz4` — the same set the XCOM and
@@ -554,7 +568,7 @@ for two systems this project cares about. The shaders need no tool. The
 textures do: `.texture` is UNIGINE's own container and nothing third-party
 opens it.
 
-`study/unigine_clouds.md` is the write-up that came out of it.
+`study/games/rendering/unigine_clouds.md` is the write-up that came out of it.
 
 ## Reading the output
 
@@ -791,10 +805,10 @@ variable points at a real file. `r6_extract.ps1` sets the variable for you.
 ## Sweeping
 
 ```powershell
-.\tools\r6_extract.ps1 -List                  # archive table by kind, extracts nothing
-.\tools\r6_extract.ps1 -Kind mesh             # 2.8 GB of archives, start here
-.\tools\r6_extract.ps1 -Pilot 1 -Kind texture # time one archive before committing
-.\tools\r6_extract.ps1                        # everything
+.\tools\r6\r6_extract.ps1 -List                  # archive table by kind, extracts nothing
+.\tools\r6\r6_extract.ps1 -Kind mesh             # 2.8 GB of archives, start here
+.\tools\r6\r6_extract.ps1 -Pilot 1 -Kind texture # time one archive before committing
+.\tools\r6\r6_extract.ps1                        # everything
 ```
 
 Archives are classified by filename, which is reliable because Ubisoft packs by
@@ -835,10 +849,10 @@ Against 941,094 assets catalogued by `r6_index.py` that is a **0.13% loss**.
 ## Querying
 
 ```powershell
-py -3 tools\r6_index.py --list                                  # instant, headers only
-py -3 tools\r6_index.py --build --out r6_extracted\index.csv    # ~1 h, see below
-py -3 tools\r6_index.py --library r6_extracted --query "mesh"
-py -3 tools\r6_index.py --library r6_extracted --query "pvp04_clubhouse"
+py -3 tools\r6\r6_index.py --list                                  # instant, headers only
+py -3 tools\r6\r6_index.py --build --out r6_extracted\index.csv    # ~1 h, see below
+py -3 tools\r6\r6_index.py --library r6_extracted --query "mesh"
+py -3 tools\r6\r6_index.py --library r6_extracted --query "pvp04_clubhouse"
 ```
 
 `--build` is slow for a reason: the v34 allocation table is encrypted, so entries
@@ -856,7 +870,7 @@ of the content" without extracting anything.
 1. **Names do not exist.** Not "encrypted and awkward" — the FAT's name field is
    zeroed in all 307 archives, and the in-payload blob resists every reconstruction
    of the published key. Assets come out as `id1204224_typeDiffuse.dds`. The full
-   negative result is in `study/rainbow_six_formats.md` §6 so it is not re-derived.
+   negative result is in `study/games/shooters/rainbow_six_formats.md` §6 so it is not re-derived.
 2. **There are no particle definitions and no FX archive.** The `FX` /
    `EffectData` class IDs from 2021 appear nowhere in this build. FX *textures*
    extract fine but land in the catch-all `Misc` category and, without names, have
@@ -906,10 +920,10 @@ convert anything.
 | `ruse_python.py` | `.xyz` — zlib + `marshal`, then bytecode-walk module-level assignments |
 
 ```bash
-python tools/ruse_edat.py   ".../R.U.S.E/Data/PC/190852/ZZ_GladNotPatchableWin.dat"
-python tools/ruse_edat.py   ".../R.U.S.E/Maps/PC/DataMapM04_Cotentin_v09.dat"
-python tools/ruse_edat.py   ".../Wargame Red Dragon/Data/WarGame/PC/510064564/NDF_Win.dat"
-python tools/ruse_python.py eugen.ipk defines/front/bluff.xyz
+python tools/ruse/ruse_edat.py   ".../R.U.S.E/Data/PC/190852/ZZ_GladNotPatchableWin.dat"
+python tools/ruse/ruse_edat.py   ".../R.U.S.E/Maps/PC/DataMapM04_Cotentin_v09.dat"
+python tools/ruse/ruse_edat.py   ".../Wargame Red Dragon/Data/WarGame/PC/510064564/NDF_Win.dat"
+python tools/ruse/ruse_python.py eugen.ipk defines/front/bluff.xyz
 ```
 
 Both archive versions are exercised: R.U.S.E. is `edat` v1, Wargame: Red Dragon
@@ -944,7 +958,7 @@ so `ruse_ndf.py` opens them too; that is where the baked occlusion trees are.
 2. **Names are always safe, values sometimes are not.** `CLAS`, `PROP`, `STRG`
    and `TRAN` are plain length-prefixed string tables read directly, so class and
    property names never depend on the value decoder. Most of what
-   `study/ruse.md` concludes rests on those 1,091 class names and 4,309 property
+   `study/games/strategy/ruse.md` concludes rests on those 1,091 class names and 4,309 property
    names.
 3. **The dictionary is a prefix tree, and the padding rule differs between file
    and directory records *and* between archive versions.** v1 pads files on an

@@ -3,13 +3,13 @@
 Extracted from the XCOM 2 SDK. Rebuild the whole thing with:
 
 ```powershell
-.\tools\build_test_kit.ps1                 # extract + convert everything
-.\tools\build_test_kit.ps1 -SkipExtract    # reconvert from workbench\xcom_raw
-.\tools\build_test_kit.ps1 -Only cliff,rocks
+.\tools\xcom2\build_test_kit.ps1                 # extract + convert everything
+.\tools\xcom2\build_test_kit.ps1 -SkipExtract    # reconvert from workbench\xcom_raw
+.\tools\xcom2\build_test_kit.ps1 -Only cliff,rocks
 ```
 
 The manifest at the top of that script is the source of truth; add a block
-there to pull more. `tools/xcom_extract.ps1` and `tools/xcom_convert.py` do the
+there to pull more. `tools/xcom2/xcom_extract.ps1` and `tools/xcom2/xcom_convert.py` do the
 work and are documented in their headers.
 
 **One folder per asset, and every folder is self-contained** — its meshes, its

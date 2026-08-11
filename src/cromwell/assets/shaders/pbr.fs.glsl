@@ -85,7 +85,7 @@ uniform vec4 uMaterialFactors;
 
 /* ---- glass, only consulted when alphaMode is Blend -------------------------
  * CS2 has no separate glass shading model: it is this material with a Fresnel
- * opacity ramp on top. See study/source2_rendering.md 12.1. */
+ * opacity ramp on top. See study/games/valve/source2_rendering.md 12.1. */
 uniform vec4 uGlassParams;   /* edgeThickness, edgeFalloff, edgeMaxOpacity, opacityScale */
 uniform vec4 uGlassEdge;     /* edge tint rgb, base opacity                              */
 uniform vec2 uGlassRemap;    /* squeezes the translucency map into an authored range     */

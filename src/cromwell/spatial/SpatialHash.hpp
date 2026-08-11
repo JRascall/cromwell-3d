@@ -7,7 +7,7 @@
  * THIS IS NOT NAVIGATION, AND THE TWO GET CONFUSED CONSTANTLY. This answers
  * "what is near XYZ". It will never tell you a wall is in the way. Pathfinding
  * needs a different structure with a different update rate — see
- * study/navigation.md, which is the long version of why they must not be the
+ * study/topics/agents/navigation.md, which is the long version of why they must not be the
  * same object.
  *
  * WHY A HASH RATHER THAN A DENSE GRID. The game on top of this engine happens

@@ -225,7 +225,7 @@ void UiPainter::executeText(const TextRun& run, const UiFontSet& fonts)
      * The alternative is subpixel positioning, and it is not available: it
      * requires hinting to be off or light, and native hinting is what makes
      * these glyphs crisp in the first place. Uniform-but-0.4px-narrow beats
-     * accurate-but-ragged. See study/text_rendering.md section 3. */
+     * accurate-but-ragged. See study/topics/surfaces/text_rendering.md section 3. */
     const float tracking = std::round(run.style.letterSpacingPx * drawSize
                                       / std::max(run.style.sizePx, 0.001f));
 

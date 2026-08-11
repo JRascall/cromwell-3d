@@ -49,7 +49,7 @@ PO/Content/PlanetsOnline/UI/Fonts/FontAwesome/
 Copy the files named above across, then run the generator:
 
 ```
-python tools/gen_fa_icons.py
+python tools/fonts/gen_fa_icons.py
 ```
 
 That reads `CHEATSHEET_FULL.txt` and the two OTF cmap tables and writes both
