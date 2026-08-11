@@ -218,6 +218,16 @@ Inside anything running per cell, per ray step, per agent or per frame:
   cardinal and diagonal axes, so units converge on eight headings and approach at
   a visible slant — real shipped bug, not a theoretical one. Walk a ring for a
   radial query. Cheaper *and* unbiased. (`study/spatial_queries.md` §5.2.)
+- **When a choice is re-made repeatedly, give the incumbent a small discount.**
+  Scores are noisy and cost functions have plateaus, so two candidates at 0.71
+  and 0.70 will swap on rounding and the unit oscillates — re-picking cover
+  every turn, or re-targeting every frame. A bias of a percent or so on "what I
+  chose last time" is enough to break ties and invisible when it is not needed.
+  Costs one term; the bug it prevents reads as "the AI is indecisive" and gets
+  misdiagnosed as pathfinding or scoring. **Incumbency is information, and a
+  scorer that ignores it thrashes.** Applies wherever the previous rule does.
+  (Unreal's motion matching does exactly this with a `-0.01` continuing-pose
+  bias — `study/motion_matching.md` §3.2, §8.2.)
 
 ### Derived caches need the escape-hatch pattern
 

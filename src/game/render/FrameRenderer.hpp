@@ -43,11 +43,15 @@
 #include "game/light/SunBaker.hpp"
 #include "game/render/FrameView.hpp"
 #include "game/render/dev/DevView.hpp"
+#include "game/render/ui/GameUi.hpp"
+#include "game/render/ui/SplashOverlay.hpp"
+#include "game/render/ui/WidgetGallery.hpp"
 #include "game/render/overlay/BlastFlashes.hpp"
 #include "game/render/overlay/OverlayRenderer.hpp"
 #include "game/render/ribbon/GlowPass.hpp"
 #include "game/render/ribbon/RibbonMeshSet.hpp"
 #include "game/render/scene/PropSet.hpp"
+#include "game/render/splash/SplashPass.hpp"
 #include "game/render/scene/StaticsMesh.hpp"
 #include "game/render/scene/UnitRenderer.hpp"
 #include "game/state/GameState.hpp"
@@ -102,11 +106,21 @@ public:
     /* Time-based effects that are the renderer's, stepped once per frame. */
     void updateEffects(float deltaSeconds);
 
+    /* F5. Only the splash participates so far — it is the pass whose whole
+     * look lives in its shader, so it is the one where reloading buys the most.
+     * Anything else that wants in adds itself here. */
+    void reloadShaders() { splash_.reload(); }
+
     /* The dev panel is drawn by this class, so its lifetime is too. */
     void setupDevView(int storeys);
     void setDevViewVisible(bool visible);
     void toggleDevView();
     void shutdownDevView();
+
+    /* The engine's widget kit, on one screen, for looking at (F2). Drawn just
+     * under the dev panel: it is a full-screen scrim, and the ImGui panel has
+     * to stay reachable over the top of it. */
+    void toggleUiGallery();
 
     /* What a front-end screen asked for this frame. Drained by Application,
      * which owns the state machine and the settings — the renderer draws the
@@ -191,6 +205,12 @@ private:
 
     BlastFlashes   flashes_;
     DevView        devView_;
+
+    /* ONE UI surface for the whole game — the splash's loading bar and the
+     * widget gallery both draw into it. Two would mean two font atlas caches
+     * and, worse, two halves of the per-widget hover state. See GameUi.hpp. */
+    GameUi         gameUi_;
+    WidgetGallery  uiGallery_;
     DevRequests    devRequests_;
 
 #if XC_HAVE_WEB
@@ -233,6 +253,11 @@ private:
 
     /* The signed-in player's avatar, once fetched and decoded. */
     Texture2D steamAvatar_{};
+
+    /* The animated splash backdrop. Loads itself on first draw and reports
+     * whether there is an image at all — see SplashPass.hpp for why its
+     * absence is an ordinary outcome rather than a failure. */
+    SplashPass splash_;
 
     RibbonTuning ribbonBuilt_;
     RibbonStats  ribbonStats_;

@@ -48,8 +48,10 @@ hd2_extracted/
 # reimplemented, never shipped - see study/unigine_clouds.md.
 unigine_extracted/
 # Rainbow Six: Siege, swept by tools/r6_extract.ps1. Same rule as the two above:
-# read for reference, never shipped. Note that the ~250 GB estimate is dominated
-# by the texture pass - see tools/README.md before running the lot.
+# read for reference, never shipped. The measured sweep is 940,110 files and
+# 139.4 GB - 97.7 GB of that is textures - so the library actually lives on
+# D:\r6_extracted, passed via -Out. This entry stays because the script's default
+# is still a path inside the repo, and a sweep run without -Out would land here.
 r6_extracted/
 
 # Scratch for the extraction tools (tools/xcom_bulk.ps1, xcom_audio.ps1,
@@ -95,6 +97,37 @@ assets/materials/decals/*
 **/assets/**/*.ogg
 **/assets/**/*.mp3
 
+# Typefaces. Inter is under the OFL and could be committed on licence grounds;
+# Font Awesome Pro is a paid licence that permits embedding the faces in a
+# shipped build and forbids redistributing them on their own, and a public
+# clone of this repository is the second thing. They are excluded together
+# rather than separately on purpose: a rule that carries half the pack produces
+# a fresh checkout with text and no icons, and the fallback in DevFonts.cpp is
+# written for "no pack at all", which is a state somebody actually looked at.
+# The licences and the cheatsheet beside them are text and do stay — the
+# cheatsheet is what tools/gen_fa_icons.py reads, and the licences are the
+# terms, which are exactly what a fresh checkout needs to have been told.
+**/assets/**/*.ttf
+**/assets/**/*.otf
+
+# The web half of the same fonts, base64'd into a stylesheet by
+# tools/gen_fa_icons.py because Chromium will not fetch a font cross-origin
+# from a file:// page. 3.9 MB, nearly all of it those same excluded binaries,
+# and one command away from existing again. The header the same script emits,
+# src/cromwell/ui/FontAwesomeIcons.hpp, is NOT here: it is text, it is the API
+# every call site spells, and a checkout without the pack still has to compile.
+src/cromwell/assets/web/cromwell_ui.css
+
+# Layered art sources, which are bigger than what they export and change
+# wholesale on every save — the worst possible shape for git. Affinity, Krita,
+# Photoshop, GIMP. The lock files are editor scratch and are not even stable
+# between two opens of the same document.
+**/assets/**/*.af
+**/assets/**/*.kra
+**/assets/**/*.psd
+**/assets/**/*.xcf
+**/*~lock~
+
 # Reference art kept next to the code for convenience. Same reasoning as
 # above; delete this line if you want it versioned with the UI work.
 /ui_cover_sheet.png
@@ -128,3 +161,12 @@ __pycache__/
 # OS
 Thumbs.db
 .DS_Store
+
+# ---- licensed font binaries ---------------------------------------------
+# The UI kit's faces (Inter, and Font Awesome Pro when icons arrive) are
+# copied in from the PO project rather than committed - the same handling as
+# every other licensed pack here. assets/fonts/README.md says what belongs
+# there and where it comes from; without them the UI falls back to raylib's
+# built-in bitmap font rather than failing.
+assets/fonts/*.ttf
+assets/fonts/*.otf

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<!-- font_selftest.html — does the browser surface have the engine's typeface.
+
+     SINGLE RESPONSIBILITY: show, on one screen, every part of the CSS half
+     that can independently be wrong. There are four: the stylesheet did not
+     load, Inter did not load, the icon face did not load, or the codepoints
+     disagree with the C++ header. Each has a distinct look here, so a glance
+     names the failure instead of just reporting "the fonts are broken".
+
+     Load it in the browser panel:
+         file:///E:/Game%20Development/xcom-c/src/cromwell/assets/web/font_selftest.html
+
+     Nothing links this page into the build. It is a page you point the panel
+     at when something looks wrong, in the same spirit as the compute and web
+     self-tests — measurement you can run, not a thing that runs itself. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cromwell — font self-test</title>
+<link rel="stylesheet" href="cromwell_ui.css">
+<style>
+  /* Deliberately NOT setting a font-family anywhere below. Everything on this
+     page inherits from cromwell_ui.css, so if the stylesheet failed to load
+     the page falls back to the browser's default serif — which looks nothing
+     like Inter and is the point. A page that styled itself would hide exactly
+     the failure it exists to catch. */
+  body { background: #14161a; color: #e6e8ec; margin: 0; padding: 32px 40px; }
+  h1 { font-weight: 700; font-size: 28px; margin: 0 0 4px; }
+  h2 { font-weight: 600; font-size: 15px; margin: 32px 0 10px;
+       text-transform: uppercase; letter-spacing: .08em; color: #8b93a1; }
+  p  { margin: 0 0 6px; }
+  .sub { color: #8b93a1; margin-bottom: 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 22px; align-items: baseline; }
+  .cell { display: flex; align-items: baseline; gap: 8px; }
+  .cell .fa, .cell .fa-brand { font-size: 20px; color: #7aa2f7; }
+  .weights p { margin: 0 0 4px; font-size: 17px; }
+  code { color: #7aa2f7; }
+</style>
+</head>
+<body>
+
+<h1>cromwell — font self-test</h1>
+<p class="sub">Inter, with Font Awesome Pro 7 as inline text.</p>
+
+<h2>Stylesheet</h2>
+<!-- Serif here means the <link> failed: run tools/gen_fa_icons.py. -->
+<p>This paragraph is Inter. If it is a serif face, <code>cromwell_ui.css</code>
+   did not load — it is generated, not committed.</p>
+
+<h2>Weights</h2>
+<div class="weights">
+  <p style="font-weight:400">400 Regular — the quick brown fox jumps over the lazy dog</p>
+  <p style="font-weight:500">500 Medium — the quick brown fox jumps over the lazy dog</p>
+  <p style="font-weight:600">600 SemiBold — the quick brown fox jumps over the lazy dog</p>
+  <p style="font-weight:700">700 Bold — the quick brown fox jumps over the lazy dog</p>
+</div>
+<p class="sub">Four distinct thicknesses. If they step evenly the real faces
+   loaded; if two look identical the browser is synthesising one of them.</p>
+
+<h2>Icons — solid face</h2>
+<div class="row">
+  <span class="cell"><i class="fa fa-gear"></i> fa-gear</span>
+  <span class="cell"><i class="fa fa-house"></i> fa-house</span>
+  <span class="cell"><i class="fa fa-triangle-exclamation"></i> fa-triangle-exclamation</span>
+  <span class="cell"><i class="fa fa-xmark"></i> fa-xmark</span>
+  <span class="cell"><i class="fa fa-magnifying-glass"></i> fa-magnifying-glass</span>
+  <span class="cell"><i class="fa fa-crosshairs"></i> fa-crosshairs</span>
+  <span class="cell"><i class="fa fa-cube"></i> fa-cube</span>
+  <span class="cell"><i class="fa fa-lightbulb"></i> fa-lightbulb</span>
+</div>
+
+<h2>Icons — brands face</h2>
+<!-- A separate file, so it fails separately: these can be boxes while the
+     solid row above is perfect. -->
+<div class="row">
+  <span class="cell"><i class="fa-brand fa-steam"></i> fa-steam</span>
+  <span class="cell"><i class="fa-brand fa-discord"></i> fa-discord</span>
+  <span class="cell"><i class="fa-brand fa-github"></i> fa-github</span>
+  <span class="cell"><i class="fa-brand fa-windows"></i> fa-windows</span>
+</div>
+
+<h2>Against the C++ header</h2>
+<p class="sub">These are the same eight glyphs the dev panel draws through
+   <code>ICON_FA_GEAR</code> and friends. The two UIs share one generator, so
+   they must look identical — if a row here differs from the panel, the header
+   and the stylesheet were generated from different packs.</p>
+<div class="row" style="font-size:26px">
+  <i class="fa fa-gear"></i>
+  <i class="fa fa-house"></i>
+  <i class="fa fa-triangle-exclamation"></i>
+  <i class="fa fa-xmark"></i>
+  <i class="fa fa-magnifying-glass"></i>
+  <i class="fa fa-crosshairs"></i>
+  <i class="fa fa-cube"></i>
+  <i class="fa fa-lightbulb"></i>
+  <i class="fa-brand fa-steam"></i>
+</div>
+
+</body>
+</html>

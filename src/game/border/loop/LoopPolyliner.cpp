@@ -75,9 +75,28 @@ void LoopPolyliner::joinSegments(const LoopSet& loops, const Loop& loop)
     const Lattice& lattice = world_.lattice();
     const int count = static_cast<int>(segments_.size());
     joints_.clear();
-    joints_.reserve(segments_.size());
+    joints_.reserve(segments_.size() + 1);
 
     for (int i = 0; i < count; i++) {
+        /* AN OPEN RUN HAS NO SEGMENT BEFORE ITS FIRST. Joining segment 0 to
+         * the last one there would draw a chord straight across the gap the
+         * suppression opened, which is the whole thing we are avoiding. It
+         * starts on its own first corner instead, and the matching end joint
+         * is appended after the loop. */
+        if (!loop.closed && i == 0) {
+            const Segment& first = segments_[0];
+            Joint start;
+            start.previousOwner     = first.owner;
+            start.owner             = first.owner;
+            start.capHeight         = first.capHeight;
+            start.previousCapHeight = first.capHeight;
+            start.x = first.fromX;
+            start.y = first.fromY;
+            start.turns = false;
+            joints_.push_back(start);
+            continue;
+        }
+
         const Segment& previous = segments_[static_cast<std::size_t>((i - 1 + count) % count)];
         const Segment& current  = segments_[static_cast<std::size_t>(i)];
 
@@ -124,9 +143,24 @@ void LoopPolyliner::joinSegments(const LoopSet& loops, const Loop& loop)
         }
         joints_.push_back(joint);
     }
+
+    /* The far end of the last segment. Only an open run needs it: on a cycle
+     * that point IS joint 0. */
+    if (!loop.closed && count > 0) {
+        const Segment& last = segments_[static_cast<std::size_t>(count - 1)];
+        Joint end;
+        end.previousOwner     = last.owner;
+        end.owner             = last.owner;
+        end.capHeight         = last.capHeight;
+        end.previousCapHeight = last.capHeight;
+        end.x = last.toX;
+        end.y = last.toY;
+        end.turns = false;
+        joints_.push_back(end);
+    }
 }
 
-void LoopPolyliner::chamferJoints(float chamfer, bool rounded)
+void LoopPolyliner::chamferJoints(float chamfer, bool rounded, bool closed)
 {
     const int count = static_cast<int>(joints_.size());
     vertices_.clear();
@@ -140,8 +174,13 @@ void LoopPolyliner::chamferJoints(float chamfer, bool rounded)
             continue;
         }
 
-        const Joint& previous = joints_[static_cast<std::size_t>((i - 1 + count) % count)];
-        const Joint& next     = joints_[static_cast<std::size_t>((i + 1) % count)];
+        /* Both neighbours exist without wrapping on an open run: its first and
+         * last joints are the added end stops, which never turn, so a turning
+         * joint is always strictly interior. */
+        const int previousIndex = closed ? (i - 1 + count) % count : i - 1;
+        const int nextIndex     = closed ? (i + 1) % count         : i + 1;
+        const Joint& previous = joints_[static_cast<std::size_t>(previousIndex)];
+        const Joint& next     = joints_[static_cast<std::size_t>(nextIndex)];
 
         const float lengthIn  = std::hypot(joint.x - previous.x, joint.y - previous.y);
         const float lengthOut = std::hypot(next.x - joint.x, next.y - joint.y);
@@ -192,13 +231,12 @@ void LoopPolyliner::chamferJoints(float chamfer, bool rounded)
  *
  * Correct behaviour: hold the level right up to the lip, then drop vertically.
  * Ramps stay exempt — a chord across an inclined plane IS the plane. */
-void LoopPolyliner::emitWithRisers(std::vector<BorderPoint>& out) const
+void LoopPolyliner::emitWithRisers(bool closed, std::vector<BorderPoint>& out) const
 {
     const int count = static_cast<int>(vertices_.size());
 
     for (int i = 0; i < count; i++) {
         const Vertex& current = vertices_[static_cast<std::size_t>(i)];
-        const Vertex& next    = vertices_[static_cast<std::size_t>((i + 1) % count)];
 
         const float currentHeight = (current.capHeight > EdgeCapHeight::kNoCap)
             ? current.capHeight
@@ -206,6 +244,10 @@ void LoopPolyliner::emitWithRisers(std::vector<BorderPoint>& out) const
 
         out.push_back({ current.x, current.y, currentHeight, current.owner });
 
+        /* An open run's last vertex has nothing to rise TO. */
+        if (!closed && i == count - 1) break;
+
+        const Vertex& next = vertices_[static_cast<std::size_t>((i + 1) % count)];
         if (ownerIsRamp(current.owner) || ownerIsRamp(next.owner)) continue;
 
         const float nextHeight = (next.capHeight > EdgeCapHeight::kNoCap)
@@ -228,12 +270,14 @@ void LoopPolyliner::build(const LoopSet& loops, int loopIndex,
     if (loopIndex < 0 || loopIndex >= loops.loopCount()) return;
 
     const Loop& loop = loops.loop(loopIndex);
-    if (loop.count < 2) return;
+    /* Two edges is the smallest closed thing; a run of one is a legitimate
+     * single grid edge with a point at each end. */
+    if (loop.count < (loop.closed ? 2 : 1)) return;
 
     buildSegments(loops, loop, wallClearance);
     joinSegments(loops, loop);
-    chamferJoints(chamfer, rounded);
-    emitWithRisers(out);
+    chamferJoints(chamfer, rounded, loop.closed);
+    emitWithRisers(loop.closed, out);
 }
 
 }  // namespace game

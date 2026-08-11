@@ -15,6 +15,16 @@ the world is visible at once.
 > That is weaker than the other notes in this directory and is marked as such
 > throughout. It is still worth writing down, because the *problem shape* is
 > real and well-specified even where the solution is not.
+>
+> **Superseded for R.U.S.E. — see [`ruse.md`](ruse.md).** The warning above was
+> right about Eugen's *publications* and wrong about the *evidence*: R.U.S.E.
+> ships its whole content pipeline as readable data, and `ruse.md` is a
+> first-party read of the retail build. It corrects this note in two places
+> — §1.1's numbers are Wargame's and do not describe R.U.S.E. (largest shipped
+> map **10.3 km²**, unit cap **200**), and §2's inferred streaming and LOD
+> architecture is now measured rather than reasoned. Where the two disagree,
+> `ruse.md` wins. What survives here is the *Wargame* material and §3–4, whose
+> conclusions `ruse.md` confirms.
 
 Tags: **[SPEC]** published specification or documented mechanic.
 **[COMMUNITY]** player-derived, wikis and guides. **[inferred]** our reading.
@@ -56,6 +66,7 @@ Set against the other notes here:
 | **Total War** | ~1 km² battlefield | ~6,400 | very high |
 | **AC Unity** | a city district | 10,000 | high |
 | **Wargame** | **150 km²** | ~1,000 | **~1000x lower** |
+| **R.U.S.E.** ([`ruse.md`](ruse.md) §1.1) | **1.7–10.3 km²** | **≤200** | low, but nothing like Wargame's |
 
 **[inferred] This is the key structural fact and it changes which data structures
 are correct.** Total War's problem is *contention* — thousands of things in one
@@ -231,6 +242,23 @@ publish, this section should be rewritten rather than patched — the streaming 
 LOD architecture of a seamless-zoom engine is the part worth actually knowing,
 and it is precisely the part that is missing.
 
+**Update.** It got rewritten rather than patched, and not because Eugen
+published — because the build turned out to be readable. See
+[`ruse.md`](ruse.md) §3 and §4. The scorecard for §2's guesses, since it is worth
+knowing which kinds of inference held:
+
+| §2 said | The build says |
+|---|---|
+| continuous or heavily-tiered LOD, no popping | **two separately baked terrain meshes**, not a LOD chain — and `TransitionProportion 0.5` chains under each |
+| imposters at strategic altitude | correct, and more so: a whole impostor system with packed atlases, its own sun-view matrix and its own depth shadow |
+| terrain LOD with no cracks, streamed by distance | correct on streaming, wrong on *by distance* — priorities are in-view / nearly-in-view / near and they **cross over between levels** |
+| aggressive draw-call batching | correct — offline texture grouping per scenery set, with the LOD meshes atlased separately |
+| the strategic view is the performance worst case | **the strongest guess, and it holds**: it is why the coarse mesh is a separate resident asset and why coarse-but-near outranks fine-but-visible |
+
+The pattern is that reasoning from the constraint got the *shape* right almost
+every time and the *mechanism* wrong about half the time — which is roughly the
+value an inferred note should be assumed to have.
+
 ---
 
 ## Sources
@@ -249,6 +277,7 @@ and it is precisely the part that is missing.
 - [Sight Range and Cover — Eugen Systems Forums](https://forums.eugensystems.com/viewtopic.php?t=48795)
 
 **Related notes**
+- [`ruse.md`](ruse.md) — the first-party read of R.U.S.E.'s shipped build; supersedes §1.1 and §2 here
 - [`crowd_scale.md`](crowd_scale.md) — when the problem is agent count
 - [`battle_scale.md`](battle_scale.md) — when the problem is simulation depth
 - [`navigation.md`](navigation.md) — the spatial index and navigation layers, and why the hash suits extent-dominated worlds

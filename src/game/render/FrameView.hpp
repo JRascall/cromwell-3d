@@ -105,6 +105,18 @@ struct FrameView {
      * draw, and every pass below the UI is skipped. */
     UIState uiState = UIState::InGame;
 
+    /* Seconds since the splash appeared. Carried rather than read from
+     * GetTime() inside the renderer because the splash's effects RAMP from
+     * zero and the ramp has to start when the image does — Application owns
+     * that clock, and it is the same one that decides when the splash ends. */
+    float splashSeconds = 0.0f;
+
+    /* How far the splash is through, 0..1, for the loading bar drawn over it.
+     * Carried for the same reason the clock above is: Application owns both
+     * halves of the condition that ends the splash, so it is the only thing
+     * that can say. See Application::splashProgress. */
+    float splashProgress = 0.0f;
+
     const GameState* state = nullptr;
 
     Camera3D camera{};

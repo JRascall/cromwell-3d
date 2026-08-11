@@ -82,6 +82,8 @@ FrameView Application::buildFrameView() const
     view.state           = &state_;
     view.camera          = pawn_.camera();
     view.uiState         = ui_.state();
+    view.splashSeconds   = splashElapsed_;
+    view.splashProgress  = splashProgress();
     view.hovered         = controller_.hovered();
     view.preview         = &controller_.preview();
     view.animator        = &controller_.animator();
@@ -458,9 +460,21 @@ int Application::run()
     }
 #endif
 
-    /* `scripted` is decided at the top of run() — Steam needs the same answer
-     * before the window exists. */
-    ui_.setState(scripted ? UIState::InGame : UIState::SplashScreen);
+    /* WHERE THE GAME OPENS. Three inputs, and they are not symmetrical:
+     *
+     *   - `scripted`, decided at the top of run() because Steam needs the same
+     *     answer before the window exists. A screenshot or a self-test skips
+     *     the front end, since a capture of a splash instead of the board is a
+     *     silently useless artefact.
+     *   - --splash overrides that, and only for this decision: such a run still
+     *     skips Steam and still exits on its shot frame. It exists so the
+     *     splash can be captured at all.
+     *   - --no-splash skips it whatever else was asked, which is the developer
+     *     switch for not watching six seconds of it every build. */
+    const bool openOnSplash = !options_.skipSplash &&
+                              (!scripted || options_.forceSplash);
+
+    ui_.setState(openOnSplash ? UIState::SplashScreen : UIState::InGame);
 
     /* The panel stays closed until F1, or until --dev-view asks for it — which
      * is the only way a screenshot run can have it, having no F1 to press. */
@@ -547,6 +561,7 @@ int Application::run()
 
         FrameInput input = input_.sample(options_.mouseX, options_.mouseY);
         if (input.toggleDevView) renderer_.toggleDevView();
+        if (input.toggleUiGallery) renderer_.toggleUiGallery();
 
 #if XC_HAVE_WEB
         /* Before the frame that will draw it. The pointer and keyboard are
@@ -596,14 +611,48 @@ int Application::run()
                 controller_.updatePointer(input);
             }
 
+            /* THE DRAIN, and it has to be here rather than only at the call
+             * sites that ask for a rebuild.
+             *
+             * Everything above records into the Outcome instead of touching the
+             * renderer — a click that selects a unit, a click that throws a
+             * grenade, the frame a move animation lands on. None of those go
+             * through Application::rebuildDerivedState(), so without this the
+             * flags sat in the controller until the next LOS toggle or world
+             * reset happened to take them. The reach field was correct all
+             * along; the ribbon and border MESHES were built from the unit's
+             * old cell, which is exactly what a stale walkable area looks like.
+             *
+             * Cheap when nothing happened — three bool tests. */
+            applyOutcome(controller_.takeOutcome());
+
             /* Last, so it sees this frame's selection and this frame's step of
              * a move animation rather than the previous one's. */
             updateCutawayStorey();
         } else {
+            /* F5 re-reads the splash shader. Handled here rather than with the
+             * in-game keys because this branch is the only place the front end
+             * runs, and the splash is the only pass listening. */
+            if (input.reloadShaders) renderer_.reloadShaders();
+
             /* The splash is timed rather than clicked through, so it needs the
-             * clock even though it takes no input. */
+             * clock even though it takes no input. The clock keeps running
+             * under --splash too: the shader animates off it, so stopping it
+             * would freeze the thing that flag exists to show. */
             splashElapsed_ += input.deltaSeconds;
-            if (ui_.state() == UIState::SplashScreen && splashElapsed_ >= kSplashSeconds)
+
+            /* BOTH CONDITIONS, and in that order: the splash leaves once it has
+             * been up for its minimum AND the work behind it is done. Either
+             * one alone is a worse screen — a pure timer cuts away from
+             * loading that has not finished, and a pure "when ready" flashes
+             * past on a fast machine.
+             *
+             * --splash HOLDS IT REGARDLESS. Six seconds is the right length for
+             * a splash and the wrong length for looking at one, so the flag
+             * suppresses the exit entirely and it stays up until the window is
+             * closed, which is what makes it usable for tuning the shader. */
+            if (ui_.state() == UIState::SplashScreen && !options_.forceSplash &&
+                splashElapsed_ >= kSplashMinimumSeconds && splashLoadComplete())
                 ui_.setState(kAfterSplash);
         }
 

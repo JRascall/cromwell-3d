@@ -48,6 +48,11 @@ CliOptions CliOptions::parse(int argc, char** argv)
             options.bakeBenchmark = true;
         } else if (!std::strcmp(arg, "--dev-view")) {
             options.forceDevView = true;
+        } else if (!std::strcmp(arg, "--splash")) {
+            options.forceSplash = true;
+        } else if (!std::strcmp(arg, "--no-splash")) {
+            options.skipSplash = true;
+            options.forceSplash = false;   /* in case both were given */
         } else if (!std::strcmp(arg, "--budget") && hasValues(i, 1)) {
             options.moveBudget = static_cast<float>(std::atof(argv[++i]));
         } else if (!std::strcmp(arg, "--debug-view") && hasValues(i, 1)) {

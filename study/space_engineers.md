@@ -13,12 +13,21 @@ already has its own note — [`moving_frame_navigation.md`](moving_frame_navigat
 §4 reads SE1's two pathfinding systems from the released source, and §8 below
 only adds what has surfaced since.
 
-> **Read alongside:** [`elite_dangerous.md`](elite_dangerous.md) — the other
+> **Read alongside:** [`voxel_terrain.md`](voxel_terrain.md) — the layer below §4
+> of this note, and the deeper read of the same source: the two meshers, the
+> clipmap and its geomorph, editing and collision, triplanar materials, and the
+> two GPU Gems chapters this subject is usually approached through. §4 here is
+> the architecture; that note is the pipeline.
+> [`elite_dangerous.md`](elite_dangerous.md) — the other
 > solar-system-scale game in this folder, and the instructive contrast. SE
 > stores a **diff** against a procedural generator so the player can dig; ED
 > stores nothing at all and its terrain is therefore not editable. That one
 > difference explains almost everything else about both. Its §4.3 reads the two
 > large-world precision answers against each other directly.
+> [`rainbow_six_siege.md`](rainbow_six_siege.md) for the destruction comparison —
+> Siege cuts planar surfaces in 2D and fakes every fragment, SE fractures in 3D
+> with Havok and subtracts SDF spheres from a density field. Two very different
+> answers, and Siege's is the better-documented one by a distance.
 > [`re_engine_rendering.md`](re_engine_rendering.md) for the
 > caches-and-cheap-repair architecture, which SE's voxel storage independently
 > arrives at; [`source2_rendering.md`](source2_rendering.md) §13 for clustered
@@ -451,6 +460,12 @@ the regime where the physics is fine but the *damage* would be unfair.
 
 ## 4. Planets and voxels
 
+> This section is the **architecture** — what the representation is and why.
+> [`voxel_terrain.md`](voxel_terrain.md) is the **pipeline**: which mesher SE
+> actually renders with (dual contouring, not marching cubes), how the clipmap
+> hides its LOD switches, how a drill writes to the field, how the surface is
+> textured and occluded, and how the asteroid and planet generators are built.
+
 ### 4.1 SE1's voxel constants, from the source
 
 **[SRC]** `VRage/Voxels/MyVoxelConstants.cs`, which is the ground truth for
@@ -547,6 +562,13 @@ map type**, one per face of a cube, projected onto a sphere:
   **the heightfield is one sample per ~20–50 m, and the 1 m voxels between
   samples are interpolation plus noise.**
 
+**[inferred]** The arithmetic, since nobody states it: a cube-sphere face spans
+~90° of arc, so its edge is about `(π/2)·R`. At 2048² per face that is **~46 m
+per pixel on a 120 km planet** and **~7 m on a 19 km moon** —
+[`voxel_terrain.md`](voxel_terrain.md) §9.3 works it through and reads it against
+SE2's published figure, which is a different regime entirely (a coarse base map
+plus a tiled *detail* heightmap, claimed to reach 1 m effective).
+
 **[WIKI/COMMUNITY]** Planet diameters are **60–120 km** (Earthlike, Mars, Alien
 at 120 km), moons **19 km**.
 
@@ -582,6 +604,13 @@ discipline applied to a different derived structure.
 dithering (no popping)" — **[inferred]** dithered cross-fade between LOD levels,
 resolved by TAA. Cheap and standard now; it was less so in 2015.
 
+**[SRC]** The dither is only the outermost of *three* mechanisms, and the source
+shows the other two: every cell is meshed **twice** (its own LOD and the next
+coarser one) so each vertex carries a morph target, which the vertex shader lerps
+by camera distance; and a cell will not be shown until its siblings, or hidden
+until its children, have loaded. [`voxel_terrain.md`](voxel_terrain.md) §4.2–4.4
+has the whole recipe, and the reason SE therefore needs no Transvoxel.
+
 ### 4.5 SE2's planets — what actually changed
 
 **[KEEN]** SE2's planets shipped December 2025. The claims, and what each one
@@ -604,6 +633,12 @@ is height-like, and pays for real volume only where the world needs an overhang
 or a cave mouth. It also drops straight into §4.2's architecture — an overhang
 is just another storage, and the planet is a composition of a provider plus
 placed storages plus player edits.
+
+**[KEEN]** The August 2025 diary adds the other half, and it is the sharper
+detail: caves exist because "the game now also **subtracts from the surface** to
+generate them." **[inferred] So the generator uses the player's edit path.**
+Anything expressible as a cut is free to generate and costs storage only where it
+happens — [`voxel_terrain.md`](voxel_terrain.md) §9.4.
 
 **Dynamic voxel hardness.** **[KEEN]** "snow, sand and rock respond differently
 to impacts, collisions, mining, and landings." **[inferred]** This is a per-

@@ -51,7 +51,11 @@ function(_stage_file src dst)
     endif()
 endfunction()
 
+# locales/ needs creating explicitly now that the files go in one at a time:
+# copy_if_different will not make the destination directory for you, and the
+# old copy_directory did.
 file(MAKE_DIRECTORY "${STAGE}")
+file(MAKE_DIRECTORY "${STAGE}/locales")
 
 foreach(_f IN LISTS _binaries)
     _stage_file("${CEF_BINARY_DIR}/${_f}" "${STAGE}/${_f}")
@@ -61,17 +65,39 @@ foreach(_f IN LISTS _resources)
     _stage_file("${CEF_RESOURCE_DIR}/${_f}" "${STAGE}/${_f}")
 endforeach()
 
-# locales/ is a directory of ~60 .pak files. Only en-US is needed unless
-# CefSettings::locale changes, but copying the lot costs ~10 MB and avoids
-# a startup failure the day someone does change it.
-execute_process(
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CEF_RESOURCE_DIR}/locales" "${STAGE}/locales"
-    RESULT_VARIABLE _r OUTPUT_QUIET ERROR_QUIET
-)
-if(NOT _r EQUAL 0)
-    set(_failed 1)
-endif()
+# locales/ ships 220 .pak files and this game is English-only, so it stages
+# two of them.
+#
+# This used to copy the directory wholesale, on the reasoning that the lot
+# cost ~10 MB and that was cheaper than a startup failure the day somebody
+# set CefSettings::locale. That trade was priced against the wrong CEF: this
+# version added _FEMININE/_MASCULINE/_NEUTER variants per language, and the
+# directory measures 48 MB, not 10. Staging every language in the world into
+# a build directory to insure against a setting nobody has changed is not
+# worth 47 MB of copying on a clean build.
+#
+# WHICH TWO, and why not one: WebRuntime never sets CefSettings::locale, so
+# CEF resolves to en-US and that is the file actually loaded. en-GB is here
+# because it is the only other locale this project would credibly select,
+# and 0.5 MB is a fair price for making that a settings change rather than a
+# settings change plus a build-script change.
+#
+# The gender variants are 18-byte stubs. They cost nothing and CEF looks for
+# them beside their base locale, so they come along.
+#
+# THE FAILURE MODE THIS TRADES INTO, stated plainly because it is now
+# reachable: set CefSettings::locale to anything outside this list and CEF
+# fails at startup on a missing .pak. The fix is to add it here. That is a
+# one-line change with an error message that names the file, which is why it
+# is an acceptable trade and copying 48 MB forever is not.
+set(_locales en-US en-GB)
+
+foreach(_loc IN LISTS _locales)
+    foreach(_suffix "" _FEMININE _MASCULINE _NEUTER)
+        _stage_file("${CEF_RESOURCE_DIR}/locales/${_loc}${_suffix}.pak"
+                    "${STAGE}/locales/${_loc}${_suffix}.pak")
+    endforeach()
+endforeach()
 
 if(_failed)
     message(WARNING "Some CEF runtime files could not be staged - is xcom.exe still running? Build is still fine; rerun once it is closed.")

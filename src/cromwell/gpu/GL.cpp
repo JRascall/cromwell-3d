@@ -35,6 +35,35 @@ void dispatchComputeIndirect(std::ptrdiff_t indirectOffset)
     glDispatchComputeIndirect(static_cast<GLintptr>(indirectOffset));
 }
 
+void copyFramebufferToTexture(unsigned int textureId, int x, int y, int width, int height)
+{
+    if (textureId == 0 || width <= 0 || height <= 0) return;
+
+    /* Binds and leaves bound. Every caller here follows the copy with a mipmap
+     * generation on the same texture, and rlgl re-binds whatever it needs
+     * before its next draw, so restoring the previous binding would be a query
+     * round-trip for nothing. */
+    glBindTexture(GL_TEXTURE_2D, textureId);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, x, y, width, height);
+}
+
+void generateTextureMipmaps(unsigned int textureId)
+{
+    if (textureId == 0) return;
+
+    glBindTexture(GL_TEXTURE_2D, textureId);
+    glGenerateMipmap(GL_TEXTURE_2D);
+}
+
+void setTextureLodRange(unsigned int textureId, float minLod, float maxLod)
+{
+    if (textureId == 0) return;
+
+    glBindTexture(GL_TEXTURE_2D, textureId);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, minLod);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, maxLod);
+}
+
 unsigned int shaderStorageBlockIndex(unsigned int program, const char* name)
 {
     return glGetProgramResourceIndex(program, GL_SHADER_STORAGE_BLOCK, name);

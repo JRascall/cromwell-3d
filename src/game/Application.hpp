@@ -34,6 +34,11 @@
 #include "game/render/FrameView.hpp"
 #include "game/state/GameState.hpp"
 
+/* For the clamp in splashProgress. Named rather than relied on arriving through
+ * one of the headers above, which is how an include that everything depended on
+ * gets removed from somewhere unrelated and breaks this file. */
+#include <algorithm>
+
 #if XC_HAVE_WEB
 #include "cromwell/web/cef/WebRuntime.hpp"
 #include "cromwell/web/surface/WebSelfTest.hpp"
@@ -95,9 +100,61 @@ private:
      * there is a world to draw at all. */
     UIStateMachine ui_;
 
-    /* How long the splash holds, and how far through it we are. */
-    static constexpr float kSplashSeconds = 2.0f;
+    /* A MINIMUM, NOT A DURATION, and the distinction is the whole point of it.
+     *
+     * The splash exists to cover loading, and loading time is the one thing
+     * nobody can predict: it is a cold disk on one machine and a warm cache on
+     * the next, and it will grow as there is more to load. Timing the splash to
+     * the work makes its length a symptom of the hardware — a brand that
+     * flashes past on a fast machine and outstays its welcome on a slow one.
+     *
+     * So the splash holds for AT LEAST this long and longer if the work is not
+     * finished. Fast machines see the floor; slow ones see the work; nobody
+     * sees a flicker. The cost is up to six seconds of deliberate waiting on a
+     * machine that had nothing to wait for, which is what every studio that
+     * ships a logo screen has decided is worth paying.
+     *
+     * splashLoadComplete() is the other half of the condition and is where
+     * asynchronous loading reports in when there is any. */
+    static constexpr float kSplashMinimumSeconds = 6.0f;
     float splashElapsed_ = 0.0f;
+
+    /* Whether everything the splash is covering has finished.
+     *
+     * Nothing loads asynchronously yet: the world is built, the shaders
+     * compiled and the sun baked before the window is even revealed, all of it
+     * on this thread, so by the time a splash frame is drawn there is nothing
+     * outstanding and this is true from the first frame. The minimum above is
+     * therefore the only thing holding the splash today.
+     *
+     * WHEN THERE IS ASYNCHRONOUS LOADING, THIS IS WHERE IT REPORTS IN — return
+     * false while it runs and the splash will wait for it, with no other change
+     * anywhere. Written as a function rather than a flag so that the caller
+     * reads as the sentence it is meant to be. */
+    bool splashLoadComplete() const { return true; }
+
+    /* How far the splash is through, 0..1, for the loading bar drawn over it.
+     *
+     * THE SAME TWO CONDITIONS AS THE EXIT, and it has to be, or the bar
+     * disagrees with the screen it is drawn on: full while the splash sits
+     * there, or still climbing when it cuts away. So it is the minimum of the
+     * two — the time floor, and the work.
+     *
+     * Today the work half is instantly complete, so this is the timer and the
+     * bar fills smoothly over six seconds. When asynchronous loading arrives,
+     * splashLoadComplete() gains a fraction to report and this is the second of
+     * the two lines that change.
+     *
+     * UNDER --splash IT SITS AT FULL, which is honest: the exit is suppressed,
+     * not pending. A bar that looped to look busy would be lying about a screen
+     * that is deliberately parked. */
+    float splashProgress() const
+    {
+        const float byTime = kSplashMinimumSeconds > 0.0f
+            ? splashElapsed_ / kSplashMinimumSeconds
+            : 1.0f;
+        return std::clamp(std::min(byTime, splashLoadComplete() ? 1.0f : 0.99f), 0.0f, 1.0f);
+    }
 
     /* WHERE THE SPLASH GOES NEXT, and it is deliberately not MainMenu yet.
      * The board is what is being worked on, and a menu between every build and

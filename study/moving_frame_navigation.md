@@ -454,6 +454,10 @@ a coincidence — a library cannot know what owns your transforms.
 [`navigation.md`](navigation.md) §13 — it refines it with two things that note
 did not have.
 
+> **The full design lives in [`nav_architecture.md`](nav_architecture.md).** This
+> section is the research's conclusions; that file is what gets built from, and
+> it carries both additions below into an interface.
+
 **The two additions:**
 
 1. **`position(node)` is representation-local, not world.** §3.2. One line of

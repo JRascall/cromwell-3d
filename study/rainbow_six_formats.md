@@ -232,15 +232,64 @@ These are the analogue of XCOM's parcels, and the same prize — real level layo
 at a known scale. Decoding `0x569859AA` is the single highest-value piece of
 unfinished work here.
 
-## 9. Known limitations
+## 9. CompiledMeshShapeDataObject is not a flat archive
+
+`[MEASURED]` `MagicHelper` routes `CompiledMeshShapeDataObject` (0x9231EE0F) to
+`AssetType.FlatArchive`. On this build that is wrong, and expensively so: the
+payload is a **single object** behind one `FileMetaData` header, with no second
+record anywhere in it.
+
+The flat archive parser derives each record's length from `FileMetaData`'s
+`ContainerType`, which in the pre-v31 layout was the `u32` sitting after the name
+and genuinely was a length. In the v32+ layout that field is the `u16` before the
+name, and it is **always 2** — so the length comes out as `2 - 8 = -6`, the reader
+seeks *backwards*, and misparses until it overruns.
+
+The symptom is total: all 38 `*_meshshape` archives produced **zero files and
+18,878 exceptions each**. That matters more than it sounds, because
+`CompiledMeshShapeDataObject` is the **single largest asset class in the game** —
+268,265 objects, more than `CompiledMeshObject`'s 172,782.
+
+Leaving the type unmapped drops it to the raw dump, which recovers all 268,265.
+Worth pairing with a general rule: when a typed parser throws, rewind and write
+the decompressed payload rather than losing it. Several of these parsers walk
+layouts that have shifted since 2021.
+
+## 10. What a full extraction yields
+
+`[MEASURED]` Run against the then-current build, four workers, into
+`r6_extracted/`:
+
+| kind | files | size |
+|---|---|---|
+| `texture` | 238,350 | 97.7 GB |
+| `mesh` | 172,743 | 21.5 GB |
+| `guitexture` | 28,719 | 6.2 GB |
+| `other` | 129,315 | 3.9 GB |
+| `meshshape` | 268,265 | 3.4 GB |
+| `gidata` | 287 | 2.1 GB |
+| `soundmedia` | 46,063 | 2.1 GB |
+| `world` | 1,996 | 1.6 GB |
+| `soundbank` | 54,372 | 0.9 GB |
+| **total** | **940,110** | **139.4 GB** |
+
+Against 941,094 assets catalogued by `r6_index.py`, that is a **0.13% loss**
+(1,195 hard errors, mostly `EndOfStreamException` on unknown types). 43.7 GB of
+archives expands to 139.4 GB — a bit over 3x, and textures are 70% of it.
+
+Budget: about 100 minutes of wall time across four parallel workers, and the
+single 11.4 GB `merged_bnk_textures3` dominates one worker's slice regardless of
+how the rest is split.
+
+## 11. Known limitations
 
 * **No names** (§6), so the library is navigable by type, size, archive and
   dependency only.
 * **No particle definitions** (§7).
 * **World/entity data is opaque** (§8).
-* **Soundbank extraction is ~96%**, against 100% for soundmedia. The residue is
-  44 assets with no RIFF in the asset block — plausibly audio carried in the meta
-  block instead — and 55 that overrun the block. Not chased.
+* **A residual 0.13% is lost** (§10): 689 `EndOfStreamException`, 184 "container
+  is not asset", and a handful of unknown mesh vertex layouts. Concentrated in the
+  unmapped types, not in meshes, textures or sound.
 * **Meshes come out as OBJ**: positions, normals, UVs and vertex colours, no
   skinning. Siege's rigged characters need more than the OBJ writer emits.
 * **Texture output is DDS**, not PNG — DXT1/DXT5/BC5U with mips intact, which is

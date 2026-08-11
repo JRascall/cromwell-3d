@@ -714,6 +714,11 @@ because it is the thing that is expensive to change later, and `MoveGraph`
 already shows what it looks like: a representation that enumerates legal moves,
 and a planner that knows nothing else.
 
+> **That shape is now settled in full**, in
+> [`nav_architecture.md`](nav_architecture.md) — the representation catalogue,
+> the requirements matrix, the interfaces, the per-genre composition matrix and
+> the build order. The sketch below is the summary it expands.
+
 Four layers, swappable independently:
 
 1. **Representation** — an interface. `Lattice` implements it here; a navmesh

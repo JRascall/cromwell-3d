@@ -1,7 +1,15 @@
-/* LoopPolyliner.hpp — turn one boundary loop into a closed polyline.
+/* LoopPolyliner.hpp — turn one boundary loop into a polyline.
  *
  * SINGLE RESPONSIBILITY: geometry. Inset where a wall demands it, join the
  * segments, chamfer the turns, and insert the micro-relief risers.
+ *
+ * CLOSED AND OPEN. A boundary walk is a cycle, so a loop is normally closed and
+ * every join wraps. A loop with `closed` false is a RUN with two ends — the
+ * outer ring after the inner one's shared edges have been suppressed, see
+ * BandExtractor — and it gets one extra joint at each end instead of a wrap.
+ * Both ends are plain stops: a run is cut where another ribbon takes over, and
+ * a cap or a taper there would draw attention to a join that is meant to
+ * disappear under the line already occupying that grid edge.
  *
  * `wallClearance` is NOT a general inset — the line rides the tile boundary,
  * because in XCOM's model nothing lives there and XCOM's own border config has
@@ -69,8 +77,8 @@ private:
 
     void buildSegments(const LoopSet& loops, const Loop& loop, float wallClearance);
     void joinSegments(const LoopSet& loops, const Loop& loop);
-    void chamferJoints(float chamfer, bool rounded);
-    void emitWithRisers(std::vector<BorderPoint>& out) const;
+    void chamferJoints(float chamfer, bool rounded, bool closed);
+    void emitWithRisers(bool closed, std::vector<BorderPoint>& out) const;
 
     float ownerHeight(int owner, float x, float y) const;
     bool  ownerIsRamp(int owner) const;

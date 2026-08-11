@@ -69,15 +69,30 @@ fi
 if [ -f "$DEPS/imgui-src/imgui.h" ]; then
     EXTRA_INCLUDES+=("-I$DEPS/imgui-src" "-I$DEPS/imgui-src/backends" "-I$DEPS/rlimgui-src")
 fi
+# FreeType, which both text stacks rasterise through - the UI font set directly
+# and imgui through its own loader. Without this the font files land here as a
+# missing-header error rather than as anything about our code.
+if [ -f "$DEPS/freetype-src/include/ft2build.h" ]; then
+    EXTRA_INCLUDES+=("-I$DEPS/freetype-src/include")
+fi
 
 if [ ${#FILES[@]} -eq 0 ]; then
     # cromwell first, so an engine warning is not buried under game files.
-    SEARCH=(src/cromwell/entities src/cromwell/spatial src/cromwell/events src/game)
+    #
+    # THE UI KIT IS SPLIT ACROSS BOTH LISTS, the same way it is split across the
+    # two library targets: everything under ui/ except ui/paint is headless and
+    # parses without raylib, while ui/paint is the renderer half and does not.
+    # Listing ui/ wholesale would emit a page of missing-header noise on a tree
+    # that has not been configured yet.
+    SEARCH=(src/cromwell/entities src/cromwell/spatial src/cromwell/events
+            src/cromwell/ui/core src/cromwell/ui/shape src/cromwell/ui/loader
+            src/cromwell/ui/gauge src/cromwell/ui/control src/cromwell/ui/panel
+            src/game)
     if [ $HAVE_RAYLIB -eq 1 ]; then
         SEARCH+=(src/cromwell/camera src/cromwell/decal src/cromwell/geometry
                  src/cromwell/gpu src/cromwell/lighting src/cromwell/material
                  src/cromwell/model src/cromwell/overlay src/cromwell/post
-                 src/cromwell/ribbon src/cromwell/input)
+                 src/cromwell/ribbon src/cromwell/input src/cromwell/ui/paint)
     else
         echo "note: raylib not found under $DEPS - skipping render code."
         echo "      configure the project once to fetch it."

@@ -18,7 +18,8 @@ void RibbonMeshSet::append(const World& world, const LoopSet& loops, Color colou
         polyliner.build(loops, index, kRibbonWallClearance, kRibbonChamfer, false, polyline_);
         if (polyline_.size() < 2) continue;
 
-        Mesh mesh = stripBuilder_.build(polyline_, width * 0.5f, lift);
+        Mesh mesh = stripBuilder_.build(polyline_, width * 0.5f, lift,
+                                        loops.loop(index).closed);
         if (mesh.vertexCount == 0) continue;
 
         /* The lattice conversion happens HERE, once, rather than in the

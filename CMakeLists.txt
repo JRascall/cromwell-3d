@@ -104,6 +104,34 @@ add_library(cromwell_base STATIC
     src/cromwell/settings/Settings.cpp
     src/cromwell/net/WinHttpClient.cpp
     src/cromwell/steam/SteamAvatar.cpp
+
+    # ---- the UI widget kit, geometry half -----------------------------
+    # HERE RATHER THAN IN cromwell BECAUSE IT DRAWS NOTHING. Every widget
+    # below turns (rect, spec, state) into triangles and text runs in a
+    # draw list; the painter that uploads them lives with the renderer.
+    # That split is what makes "does the segment ring leave a gap between
+    # chips" an assertion about vertex positions rather than a screenshot
+    # somebody has to look at - see xcom_ui_tests, and the header comment
+    # in ui/core/UiDrawList.hpp.
+    src/cromwell/ui/core/UiContext.cpp
+    src/cromwell/ui/core/UiDrawList.cpp
+    src/cromwell/ui/core/UiText.cpp
+    src/cromwell/ui/shape/Glow.cpp
+    src/cromwell/ui/shape/Outline.cpp
+    src/cromwell/ui/shape/Shapes.cpp
+    src/cromwell/ui/loader/ActivitySpinner.cpp
+    src/cromwell/ui/loader/LoadingBar.cpp
+    src/cromwell/ui/loader/LoadingRing.cpp
+    src/cromwell/ui/gauge/SegmentBar.cpp
+    src/cromwell/ui/gauge/SegmentRing.cpp
+    src/cromwell/ui/control/BorderButton.cpp
+    src/cromwell/ui/control/Label.cpp
+    src/cromwell/ui/control/SettingSlider.cpp
+    src/cromwell/ui/control/SettingStepper.cpp
+    src/cromwell/ui/control/TextButton.cpp
+    src/cromwell/ui/control/WipeFill.cpp
+    src/cromwell/ui/panel/BlurPanel.cpp
+    src/cromwell/ui/panel/TipPanel.cpp
 )
 target_include_directories(cromwell_base PUBLIC src)
 
@@ -209,6 +237,14 @@ if(XC_BUILD_TESTS)
     add_executable(xcom_ui_tests tests/UIStateTests.cpp)
     target_link_libraries(xcom_ui_tests PRIVATE game_core)
 
+    # The UI widget kit. Its geometry half produces a draw list rather than
+    # pixels, which is the whole reason it can be tested at all - "does the
+    # segment ring's fill mirror its track" is an assertion about vertex
+    # counts. What it CANNOT answer is whether any of it looks right; that is
+    # the gallery on F2. See tests/WidgetTests.cpp.
+    add_executable(xcom_widget_tests tests/WidgetTests.cpp)
+    target_link_libraries(xcom_widget_tests PRIVATE cromwell_base)
+
     # The entity/component plumbing is cromwell's and needs no window. Its
     # think accumulator is invisible from outside, so it is tested rather than
     # eyeballed.
@@ -248,7 +284,7 @@ if(XC_BUILD_TESTS)
     # The test binaries stay in the build tree. builds/win is the runnable
     # product - what you would zip and hand to someone - and test exes are
     # not part of it.
-    set_target_properties(xcom_tests xcom_crier_tests xcom_ui_tests xcom_entity_tests xcom_services_tests xcom_steam_tests xcom_spatial_tests xcom_profiler_tests xcom_perf PROPERTIES
+    set_target_properties(xcom_tests xcom_crier_tests xcom_ui_tests xcom_widget_tests xcom_entity_tests xcom_services_tests xcom_steam_tests xcom_spatial_tests xcom_profiler_tests xcom_perf PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY                "${CMAKE_BINARY_DIR}/tests"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_BINARY_DIR}/tests"
         RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/tests"
@@ -259,6 +295,7 @@ if(XC_BUILD_TESTS)
     add_test(NAME tile  COMMAND xcom_tests)
     add_test(NAME crier COMMAND xcom_crier_tests)
     add_test(NAME ui     COMMAND xcom_ui_tests)
+    add_test(NAME widget COMMAND xcom_widget_tests)
     add_test(NAME entity   COMMAND xcom_entity_tests)
     add_test(NAME services COMMAND xcom_services_tests)
     add_test(NAME steam    COMMAND xcom_steam_tests)
@@ -298,6 +335,34 @@ if(XC_BUILD_APP)
     # an empty image and the only symptom is a blank avatar.
     target_compile_definitions(raylib PRIVATE SUPPORT_FILEFORMAT_JPG=1)
 
+    # ---- FreeType: the rasteriser both text stacks share ----------------
+    # WHY, when raylib and ImGui both already rasterise with stb_truetype.
+    # stb_truetype does not hint. At the sizes a UI actually uses — 10 to 16 px,
+    # where a stem is one or two pixels wide — an unhinted outline puts that
+    # stem wherever the curve happens to fall, so it lands as one dark pixel or
+    # two grey ones depending on nothing the reader can see. FreeType's light
+    # hinting snaps stems and baselines to the pixel grid VERTICALLY only,
+    # leaving horizontal metrics untouched, which is what keeps letter spacing
+    # even while making every stem the same weight. That is the difference
+    # between "smooth" and "crisp", and it is the half that rasterising at the
+    # right size does not fix on its own.
+    #
+    # Every optional dependency off. FreeType can pull in zlib, libpng, brotli
+    # and HarfBuzz; none of them matter for TrueType and OpenType outlines, and
+    # each is another thing to build on a fresh machine.
+    set(FT_DISABLE_ZLIB     ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_BZIP2    ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_PNG      ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_BROTLI   ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        freetype
+        GIT_REPOSITORY https://github.com/freetype/freetype.git
+        GIT_TAG        VER-2-13-3
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(freetype)
+
     # ---- Dear ImGui, on raylib's own backend ---------------------------
     # Neither repository ships a CMakeLists worth using — imgui has none at
     # all, and rlImGui's builds its examples — so both are fetched as plain
@@ -328,12 +393,32 @@ if(XC_BUILD_APP)
         ${imgui_SOURCE_DIR}/imgui_widgets.cpp
         ${imgui_SOURCE_DIR}/imgui_demo.cpp
         ${rlimgui_SOURCE_DIR}/rlImGui.cpp
+        # The FreeType loader is a source file in imgui's tree rather than a
+        # separate library, and IMGUI_ENABLE_FREETYPE below makes it the
+        # default rasteriser rather than something to select at runtime.
+        ${imgui_SOURCE_DIR}/misc/freetype/imgui_freetype.cpp
     )
     target_include_directories(imgui PUBLIC
         ${imgui_SOURCE_DIR}
         ${imgui_SOURCE_DIR}/backends
         ${rlimgui_SOURCE_DIR})
-    target_link_libraries(imgui PUBLIC raylib)
+    target_link_libraries(imgui PUBLIC raylib freetype)
+
+    # PUBLIC, not PRIVATE. This definition changes what ImFontAtlas uses as its
+    # default font loader, and a translation unit that disagreed with the one
+    # imgui.cpp was built with would be reasoning about a differently-shaped
+    # atlas. Same argument as XC_HAVE_STEAM further up.
+    target_compile_definitions(imgui PUBLIC IMGUI_ENABLE_FREETYPE)
+
+    # rlImGui bundles Font Awesome 6 Free, compiled in, and merges it into the
+    # default font during setup. We ship Font Awesome Pro 7 instead, whose
+    # codepoints the generated cromwell/ui/FontAwesomeIcons.hpp names — so its
+    # copy is switched off rather than left to merge underneath ours. Two
+    # reasons, and the second is the one that matters: two icon faces in one
+    # atlas means whichever loads first silently answers for the codepoints
+    # they share, and rlImGui's ICON_FA_* macros are FA6's, which would collide
+    # with our header at the preprocessor. The switch removes both.
+    target_compile_definitions(imgui PUBLIC NO_FONT_AWESOME)
 
     # ---- cromwell: the engine's renderer -------------------------------
     # NOTHING IN THIS LIST MAY NAME THE GAME. Everything here answers a
@@ -382,13 +467,28 @@ if(XC_BUILD_APP)
         src/cromwell/ribbon/RibbonRenderer.cpp
         src/cromwell/ribbon/RibbonShader.cpp
         src/cromwell/ribbon/StripSet.cpp
+        # The UI kit's renderer half. Everything else about the widgets is in
+        # cromwell_base; these two files are where a draw list becomes pixels
+        # and a weight becomes a rasterised font. See ui/paint/UiPainter.hpp.
+        src/cromwell/ui/paint/UiFontSet.cpp
+        src/cromwell/ui/paint/UiPainter.cpp
+        src/cromwell/ui/paint/WorldAnchor.cpp
         # UNCONDITIONAL, even with no SDK on the machine. The whole of the
         # Steamworks dependency is behind #if XC_HAVE_STEAM inside this one
         # file, so a build without the SDK compiles the same source into stubs
         # and no #if reaches main.cpp or Application. See SteamClient.hpp.
         src/cromwell/steam/SteamClient.cpp
+        # Font PATHS, not fonts: this resolves where Inter and Font Awesome
+        # live and names nothing that rasterises them, which is what keeps the
+        # engine's typeface engine-side while the ImGui binding stays with
+        # ImGui. See UiFontAssets.hpp.
+        src/cromwell/ui/UiFontAssets.cpp
     )
+    # freetype is PRIVATE: UiFontSet rasterises with it behind an interface that
+    # hands back a raylib Font, so no cromwell header names an FT_ type and
+    # nothing downstream needs its include path.
     target_link_libraries(cromwell PUBLIC cromwell_base raylib)
+    target_link_libraries(cromwell PRIVATE freetype)
 
     # ---- Steam ----------------------------------------------------------
     # NOT FetchContent, unlike everything above it: the SDK is behind a partner
@@ -440,16 +540,22 @@ if(XC_BUILD_APP)
         src/game/picking/UnitPicker.cpp
         src/game/render/overlay/BlastFlashes.cpp
         src/game/render/dev/DecalDemo.cpp
+        src/game/render/dev/DevFonts.cpp
         src/game/render/dev/DevView.cpp
         src/game/render/ribbon/GlowPass.cpp
         src/game/render/overlay/OverlayRenderer.cpp
         src/game/render/scene/ProbePlacement.cpp
         src/game/render/scene/PropSet.cpp
         src/game/render/ribbon/RibbonMeshSet.cpp
+        src/game/render/splash/SplashPass.cpp
+        src/game/render/splash/SplashMaps.cpp
         src/game/render/scene/StaticsMesh.cpp
         src/game/render/scene/StoreyGeometryEmitter.cpp
         src/game/render/ribbon/StripMeshBuilder.cpp
         src/game/render/scene/UnitRenderer.cpp
+        src/game/render/ui/GameUi.cpp
+        src/game/render/ui/SplashOverlay.cpp
+        src/game/render/ui/WidgetGallery.cpp
         src/game/rules/DestructionSystem.cpp
         src/game/rules/HullCrusher.cpp
         src/game/rules/RestPlacement.cpp

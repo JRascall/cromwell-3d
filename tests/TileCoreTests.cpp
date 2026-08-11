@@ -430,6 +430,81 @@ void testBorders()
     }
 }
 
+/* ---------------------------------------------------------- test 6b ----
+ * SUPPRESSION, checked against the unmasked walk rather than against a second
+ * implementation of it. The rings nest, so the outer band's boundary coincides
+ * with the inner one's wherever geometry rather than budget is what stops the
+ * unit — and two ribbons on one grid line is the amber one hiding the blue.
+ *
+ * Two invariants, and between them they pin it down: nothing survives that
+ * blue already draws, and nothing is lost that blue does not. The second is
+ * the one that catches a rotation or run-splitting mistake, which would
+ * otherwise show up as a ribbon quietly missing a few edges. */
+void testSuppressedBorders()
+{
+    std::printf("== border suppression ==\n");
+    const Lattice& lattice = g_world.lattice();
+
+    BandExtractor extractor(g_world);
+    LoopPolyliner polyliner(g_world);
+    Band inner(lattice.cellCount()), outer(lattice.cellCount());
+    std::vector<BorderPoint> polyline;
+
+    for (int i = 0; i < lattice.cellCount(); i++) {
+        if (g_reach.cost(i) <= 6.0f)  inner.mark(i);
+        if (g_reach.cost(i) <= 12.0f) outer.mark(i);
+    }
+
+    LoopSet full, masked;
+    extractor.extract(outer, full);
+    extractor.extract(outer, &inner, masked);
+
+    std::vector<unsigned char> inFull(
+        static_cast<std::size_t>(lattice.cellCount() * kDirCount), 0);
+    for (EdgeId edge : full.edges()) inFull[static_cast<std::size_t>(edge.raw())] = 1;
+
+    /* what survived: in the unmasked walk, and not on a cell blue covers */
+    int shared = 0, foreign = 0, duplicates = 0;
+    std::vector<unsigned char> seen(
+        static_cast<std::size_t>(lattice.cellCount() * kDirCount), 0);
+    for (EdgeId edge : masked.edges()) {
+        if (inner.contains(edge.cell())) shared++;
+        if (!inFull[static_cast<std::size_t>(edge.raw())]) foreign++;
+        if (seen[static_cast<std::size_t>(edge.raw())]) duplicates++;
+        else seen[static_cast<std::size_t>(edge.raw())] = 1;
+    }
+
+    /* what was dropped: every one of them, and only them, on a blue cell */
+    int lost = 0;
+    for (EdgeId edge : full.edges())
+        if (!inner.contains(edge.cell()) && !seen[static_cast<std::size_t>(edge.raw())]) lost++;
+
+    std::printf("   outer %d edges -> %d kept in %d runs (%d dropped as shared)\n",
+                full.edgeCount(), masked.edgeCount(), masked.loopCount(),
+                full.edgeCount() - masked.edgeCount());
+
+    CHECK(shared == 0, "%d suppressed edges survived - amber is still over blue", shared);
+    CHECK(foreign == 0, "%d edges appeared that the unmasked walk never found", foreign);
+    CHECK(duplicates == 0, "%d edges emitted twice", duplicates);
+    CHECK(lost == 0, "%d unshared edges were dropped - the amber ring has holes", lost);
+    CHECK(masked.edgeCount() > 0, "suppression removed the whole outer ring");
+
+    /* Every run must still make a polyline. An open run of a single edge is
+     * legitimate — one grid line of amber standing past the blue — and the
+     * count<2 guard used to throw it away. */
+    int runs = 0, closedRuns = 0;
+    for (int l = 0; l < masked.loopCount(); l++) {
+        const Loop& loop = masked.loop(l);
+        runs++;
+        if (loop.closed) closedRuns++;
+
+        polyliner.build(masked, l, 0.0f, 0.11f, false, polyline);
+        CHECK(polyline.size() >= 2, "run %d of %d edges produced %d points",
+              l, loop.count, (int)polyline.size());
+    }
+    std::printf("   %d runs (%d still closed - loops with nothing shared)\n", runs, closedRuns);
+}
+
 /* --------------------------------------------------------------- test 7 */
 void testLos()
 {
@@ -832,6 +907,7 @@ int main()
     testSurfacePlane();
     testReach();
     testBorders();
+    testSuppressedBorders();
     testLos();
     testUnits();
     testOccupancyIndex();

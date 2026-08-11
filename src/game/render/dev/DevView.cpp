@@ -3,7 +3,9 @@
 #include <cstdint>
 
 #include "game/lattice/Lattice.hpp"
+#include "game/render/dev/DevFonts.hpp"
 #include "cromwell/ribbon/RibbonConstants.hpp"
+#include "cromwell/ui/FontAwesomeIcons.hpp"
 
 #if XC_HAVE_WEB
 #include "cromwell/web/surface/WebInput.hpp"
@@ -93,7 +95,11 @@ bool DevView::setup(int storeys)
 {
     storeys_ = storeys > 0 ? storeys : 1;
 
-    rlImGuiSetup(true);
+    /* Not rlImGuiSetup: DevFonts is that call with the engine's typeface
+     * installed in the seam between context creation and backend setup. It
+     * falls back to rlImGuiSetup itself when the font pack is absent, so this
+     * is unconditional. */
+    DevFonts::setup(true);
     if (ImGui::GetCurrentContext() == nullptr) return false;
 
     /* No imgui.ini. Layout that persists between runs would mean a screenshot
@@ -271,18 +277,26 @@ void DevView::drawToolbar()
         ImGui::TextDisabled("dev view");
         ImGui::SameLine();
 
-        tab("layers", &open_.layers);
-        tab("rendering", &open_.rendering);
-        tab("view",   &open_.view);
-        tab("sun",    &open_.sun);
-        tab("ribbon", &open_.ribbon);
-        tab("post",   &open_.post);
-        tab("scene",  &open_.scene);
-        tab("textures", &open_.textures);
-        tab("decals", &open_.decals);
-        tab("browser", &open_.browser);
-        tab("steam", &open_.steam);
-        tab("profiler", &open_.profiler);
+        /* Icon AND word, not icon alone. A glyph is faster to find once you
+         * know which one you want and useless before that, and this strip is
+         * read by someone hunting for a control they have not opened before.
+         * The icon earns its place as something to aim at on the second visit;
+         * dropping the label to save width would trade that for a row of
+         * pictograms nobody can name. */
+        tab(ICON_FA_LAYER_GROUP " layers", &open_.layers);
+        tab(ICON_FA_CUBES " rendering", &open_.rendering);
+        tab(ICON_FA_EYE " view",   &open_.view);
+        tab(ICON_FA_SUN " sun",    &open_.sun);
+        tab(ICON_FA_WAVE_SQUARE " ribbon", &open_.ribbon);
+        tab(ICON_FA_WAND_MAGIC_SPARKLES " post",   &open_.post);
+        tab(ICON_FA_MAP " scene",  &open_.scene);
+        tab(ICON_FA_IMAGES " textures", &open_.textures);
+        tab(ICON_FA_SPRAY_CAN " decals", &open_.decals);
+        tab(ICON_FA_GLOBE " browser", &open_.browser);
+        /* From the brands face rather than the solid one, so this tab is also
+         * the standing check that the second icon file merged. */
+        tab(ICON_FA_STEAM " steam", &open_.steam);
+        tab(ICON_FA_GAUGE_HIGH " profiler", &open_.profiler);
 
         ImGui::TextDisabled("|  %.0f fps  %.2f ms",
                             static_cast<double>(ImGui::GetIO().Framerate),
@@ -848,17 +862,26 @@ void DevView::drawBrowserContents(WebSurface* browser)
     /* ---- the address bar ---- */
     const float buttonWidth = ImGui::GetFrameHeight();
 
+    /* Icon-only here, unlike the toolbar tabs, and the difference is not
+     * inconsistency: back, forward and reload are the three controls every
+     * browser on earth draws exactly this way, so the glyph IS the label. The
+     * ASCII stand-ins these replace ("<", ">", "r") were a font limitation,
+     * not a decision. */
     ImGui::BeginDisabled(!browser->canGoBack());
-    if (ImGui::Button("<", ImVec2(buttonWidth, 0.0f))) browser->goBack();
+    if (ImGui::Button(ICON_FA_CHEVRON_LEFT, ImVec2(buttonWidth, 0.0f))) browser->goBack();
     ImGui::EndDisabled();
     ImGui::SameLine();
 
     ImGui::BeginDisabled(!browser->canGoForward());
-    if (ImGui::Button(">", ImVec2(buttonWidth, 0.0f))) browser->goForward();
+    if (ImGui::Button(ICON_FA_CHEVRON_RIGHT, ImVec2(buttonWidth, 0.0f))) browser->goForward();
     ImGui::EndDisabled();
     ImGui::SameLine();
 
-    if (ImGui::Button(browser->loading() ? "x" : "r", ImVec2(buttonWidth, 0.0f)))
+    /* One button, two meanings, which is why it changes glyph rather than
+     * sitting beside a second one: while a page loads the only useful action
+     * is to stop it. */
+    if (ImGui::Button(browser->loading() ? ICON_FA_XMARK : ICON_FA_ARROW_ROTATE_RIGHT,
+                      ImVec2(buttonWidth, 0.0f)))
         browser->reload();
     ImGui::SameLine();
 
@@ -995,6 +1018,11 @@ void DevView::draw(const DevModel& model, ViewLayers& layers,
      * the mouse, and skipping it would leave WantCaptureMouse frozen at
      * whatever it was when the UI was last up. */
     rlImGuiBegin();
+
+    /* Before anything is drawn, and outside the !visible_ early-out below: the
+     * scale has to be current on the frame the panel is reopened, not one
+     * frame later. */
+    DevFonts::update();
 
     if (!visible_) {
         rlImGuiEnd();

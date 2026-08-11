@@ -25,6 +25,12 @@
  *   --cam px py pz tx ty tz free camera
  *   --dev-view              start with the F1 dev panel open; the only way to
  *                           get it in a --shot, which has no F1 to press
+ *   --splash                stay on the splash screen: it does not time out,
+ *                           and a scripted run opens on it rather than skipping
+ *                           straight to the board. How you sit and look at the
+ *                           thing while tuning its shader — F5 reloads it live
+ *   --no-splash             skip the splash and its six-second minimum, and go
+ *                           straight to the board
  *   --mouse <x> <y>         deterministic hover, for reproducible screenshots
  *   --boom <x> <y> <z>      detonate at startup, headless
  *   --log <file>            write the log here instead of xcom.log beside the
@@ -91,6 +97,41 @@ struct CliOptions {
 
     bool  bakeBenchmark = false;   /* headless; never opens a window */
     bool  forceDevView  = false;   /* open the dev panel at startup   */
+
+    /* Stay on the splash screen. Two separate effects, one intent — "I am
+     * looking at the splash, not at the game":
+     *
+     *   - it does not time out after Application::kSplashMinimumSeconds, so an
+     *     interactive run sits on it until the window is closed;
+     *   - a SCRIPTED run opens on it rather than going straight to the board.
+     *     Scripted runs skip the front end by default (see the `scripted` flag
+     *     in Application::run) because a screenshot of a splash instead of the
+     *     game is a silently useless artefact — which left the splash with no
+     *     way to be captured at all.
+     *
+     * Both exist because the splash became an animated shader rather than a
+     * line of text, and neither watching two seconds go past nor guessing from
+     * the source is a way to tune one.
+     *
+     *     xcom --splash --no-steam                     sit and look at it
+     *     xcom --shot s.png --shot-frame 40 --splash   capture one frame
+     *
+     * Frame 40 of 60 is two thirds of a second in, past the effect ramp.
+     *
+     * It was briefly defaulted ON while the splash was being art-directed, so
+     * that every launch held on it whatever it was started from. That is what
+     * `--no-splash` exists for, and why the pair reads oddly symmetrical for a
+     * flag that is off by default. */
+    bool  forceSplash   = false;
+
+    /* --no-splash: start on the board and never show the splash at all.
+     *
+     * The splash now holds for a six-second MINIMUM, which is right for anyone
+     * starting the game and wrong for the fiftieth build of an afternoon spent
+     * on something the splash is in front of. This skips it outright rather
+     * than shortening it — a developer switch, so the shipped timing is never
+     * quietly tuned to suit whoever is iterating. */
+    bool  skipSplash    = false;
 
     /* Which F-cycle debug view to start in — the only way to get one into a
      * --shot, which has no F to press. Same numbering as PbrShader::

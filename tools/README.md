@@ -40,6 +40,14 @@ CPU-bound one.
 > **Rainbow Six: Siege** has one as well — `r6_extract.ps1`, `r6_forge.py`,
 > `r6_index.py`. AnvilNext 2, unrelated to any of the above. See the end of this
 > file, and `study/rainbow_six_formats.md` for the container format.
+>
+> **R.U.S.E. / IRISZOOM** has three small readers — `ruse_edat.py`,
+> `ruse_ndf.py`, `ruse_python.py`. Eugen Systems' own engine, unrelated to any
+> of the above, and **the only Python 2 scripts in this folder**. See the end of
+> this file, and `study/ruse.md` for what they were written to find out.
+>
+> **`asset_browser.py`** sits across all of them — search every extracted
+> library, preview meshes, split textures into channels. See below.
 
 # XCOM 2 SDK asset toolchain
 
@@ -88,10 +96,12 @@ xcom_extracted/
     wem_names.csv                audio id -> name
 ```
 
-Current contents: **1759 packages, 10107 meshes, 976 packages with geometry,
-290,657 WAVs**. 6570 meshes resolve to a diffuse and have `mtllib`/`usemtl`
-patched into the OBJ. The unresolved remainder is mostly FX, UI and engine
-materials — for environment art the rate is ~97%.
+Current contents: **1760 packages, 10107 meshes, 976 packages with geometry,
+290,657 WAVs, 1005 maps with 114,642 prop placements, 5273 animation clips**.
+**8586 meshes (85%)** resolve to a diffuse and have `mtllib`/`usemtl` patched
+into the OBJ — see "Materials: how the 85% is reached" below for the four
+passes that took it there. The remainder is engine defaults, dev scratch and
+master materials; for environment art the rate is ~97%.
 
 ## Using the assets in the prototype
 
@@ -629,6 +639,110 @@ to XCOM's `MovementBorder_Line` (see `study/README.md`).
 
 ---
 
+# Asset browser — across every library at once
+
+| script | job |
+|---|---|
+| `asset_browser.py` | catalogue, search, software mesh render, texture channel split |
+| `asset_browser_ui.py` | the tkinter front end; import it from the above, not directly |
+
+```powershell
+py -3 toolssset_browser.py                       # the GUI
+py -3 toolssset_browser.py --list                # per-library counts
+py -3 toolssset_browser.py --find rifle --kind mesh
+py -3 toolssset_browser.py --render <mesh> --out preview.png --mode normals
+py -3 toolssset_browser.py --sheet siege:mesh --out sheet.png -n 24
+```
+
+Needs only numpy and Pillow; tkinter ships with Python. It reads XCOM 2,
+Helldivers 2, Siege and UNIGINE from wherever their extractors put them —
+Siege's path comes from `R6_LIBRARY`, default `D:
+6_extracted`. Measured:
+**494,611 assets catalogued in ~17 s**, cached to `workbench/asset_catalog.tsv`.
+
+**Meshes render without a GPU** - a numpy rasteriser, same approach as
+`xcom_parcel_render.py`, orthographic so two props are directly comparable.
+Flat, normal-shaded and textured modes. `.obj` (XCOM, Siege) and `.glb`
+(Helldivers) both load.
+
+**Orbit camera**: drag to orbit, right-drag or shift-drag to pan, wheel to zoom,
+double-click or `R` to reset.
+
+It swaps renderer during a gesture rather than turning one down, and the reason
+is worth knowing before touching it: the triangle rasteriser is a Python loop
+over *faces*, so its cost tracks triangle count and dropping the resolution buys
+almost nothing. Measured on an 18,009-triangle mesh - full shaded render
+**1,094 ms**, half-resolution barely better. While the camera moves it splats
+vertices instead, fully vectorised:
+
+| mesh | drag (points) | release (shaded) |
+|---|---|---|
+| 28,799 verts / 18,009 tris | **10.6 ms (94 fps)** | 1,094 ms |
+| 3,866 verts / 1,934 tris | **6.7 ms (149 fps)** | 151 ms |
+
+Zoom coalesces the same way - the wheel redraws coarse immediately and schedules
+one sharp redraw 180 ms later, so a fast scroll costs one full render rather than
+one per notch.
+
+**Textures split into channels, which is the point.** These engines pack
+unrelated data per channel, so the composite is often meaningless: XCOM's MSK
+carries alpha cutout in BLUE only, and Siege's specular map holds gloss,
+metalness and cavity. Siege normal maps come out with **B flat at zero and R/G
+averaging 127** — two-channel BC5, where Z belongs to the shader — so the viewer
+detects those and offers a `Z` view that rebuilds the third component.
+
+## Which maps a mesh has
+
+The `material` filter is the map set itself, not a yes/no, so "which meshes have
+a spec map" is a direct query. Measured over XCOM's 10,107 meshes:
+
+| map set | meshes | | map set | meshes |
+|---|---|---|---|---|
+| `dif+nrm+msk` | 5,415 | | `dif+msk` | 378 |
+| `dif+nrm+msk+spc` | 1,222 | | `dif+nrm+spc` | 60 |
+| `dif` | 840 | | `dif+msk+spc` | 12 |
+| `dif+nrm` | 659 | | `none` | 1,521 |
+
+Helldivers meshes read `embedded` (textures live inside the `.glb`) and every
+Siege mesh reads `none`. A mesh opens **textured** when it has a diffuse and flat
+when it does not, so an asset with materials no longer opens grey next to a row of
+its own thumbnails.
+
+**XCOM ships no roughness, emissive or AO maps.** That data is packed into the MSK
+channels and the diffuse alpha, and only ~148 `_SPC` files exist in the whole
+library. Measured over 40 files of each kind:
+
+| map | R | G | B | A |
+|---|---|---|---|---|
+| `_MSK` | mean 69, varies | mean 202 | mean 24, **flat in 60%** - alpha cutout, foliage only | mean 72, never flat |
+| `_DIF` | colour | colour | colour | mean 126, **never flat** - packed data, not opacity |
+
+The texture view prints that note under any map whose packing is known, so a
+false colour is not mistaken for the surface's colour.
+
+## What it cannot pair
+
+Only XCOM records mesh → material links, via `materials.csv` from
+`xcom_materials.py`, so only XCOM meshes show their diffuse/normal/mask beside
+them and only XCOM supports `--mode textured`. **Siege ships no asset names and
+no material links at all**, so its meshes and textures are both browsable but not
+pairable; Helldivers embeds textures inside each `.glb`, which the minimal glTF
+reader here ignores (it takes geometry only — no scene graph, no node transforms,
+no skinning).
+
+Two traps worth knowing, both found the hard way:
+
+1. **glTF vertex attributes are usually interleaved.** Reading them as
+   contiguous walks into the neighbouring attribute and yields geometry that
+   looks valid apart from a few absurd coordinates — it does not throw. Honour
+   `byteStride`.
+2. **Do not shell-glob these libraries.** `ls D:
+6_extracted\mesh\*\*.obj`
+   expands 172,743 paths and will outlast your patience; the catalogue walks the
+   tree once and caches.
+
+---
+
 # Rainbow Six: Siege assets
 
 Separate again: AnvilNext 2, no shared code with anything above.
@@ -702,8 +816,21 @@ Resumable — an archive whose output directory carries a `.done` marker is
 skipped, so an interruption costs nothing. Sliceable the same way as
 `xcom_bulk.ps1`: `-Slice i -Of n` across n processes, disjoint by archive.
 
-Measured: a 127 MB mesh archive yields **16,876 OBJ in 40 s**. The texture pass
-is by far the largest and should be run on its own.
+Measured on a full sweep: **940,110 files, 139.4 GB**, about 100 minutes across
+four parallel workers (`-Slice 0..3 -Of 4`). 43.7 GB of archives expands a bit
+over 3x, and textures are 70% of the result — 97.7 GB on their own. **Put the
+output somewhere with 150 GB free**; the single 11.4 GB `merged_bnk_textures3`
+will dominate one worker's slice however you split the rest.
+
+| kind | files | size | | kind | files | size |
+|---|---|---|---|---|---|---|
+| `texture` | 238,350 | 97.7 GB | | `meshshape` | 268,265 | 3.4 GB |
+| `mesh` | 172,743 | 21.5 GB | | `gidata` | 287 | 2.1 GB |
+| `guitexture` | 28,719 | 6.2 GB | | `soundmedia` | 46,063 | 2.1 GB |
+| `other` | 129,315 | 3.9 GB | | `world` | 1,996 | 1.6 GB |
+| | | | | `soundbank` | 54,372 | 0.9 GB |
+
+Against 941,094 assets catalogued by `r6_index.py` that is a **0.13% loss**.
 
 ## Querying
 
@@ -761,3 +888,81 @@ of the content" without extracting anything.
 * **Most type IDs are unknown.** RainbowForge's table is from 2021 and the two
   commonest types in this build are not in it; `r6_index.py` records unknown IDs
   as hex rather than guessing.
+
+---
+
+# R.U.S.E. — reading Eugen's object database
+
+Separate again, and different in kind from everything above: this toolchain is
+not for **assets**, it is for **structure**. R.U.S.E. ships its render graph, its
+shader database, its terrain streaming policy, its 214 game-design constants and
+its AI as *data*, and the point of these readers is to read them rather than to
+convert anything.
+
+| script | job |
+|---|---|
+| `ruse_edat.py` | the `edat` archive — header, prefix-tree dictionary, entry extraction |
+| `ruse_ndf.py` | `EUG0`/`CNDF` object files — section directory, string tables, object walk |
+| `ruse_python.py` | `.xyz` — zlib + `marshal`, then bytecode-walk module-level assignments |
+
+```bash
+python tools/ruse_edat.py   ".../R.U.S.E/Data/PC/190852/ZZ_GladNotPatchableWin.dat"
+python tools/ruse_edat.py   ".../R.U.S.E/Maps/PC/DataMapM04_Cotentin_v09.dat"
+python tools/ruse_edat.py   ".../Wargame Red Dragon/Data/WarGame/PC/510064564/NDF_Win.dat"
+python tools/ruse_python.py eugen.ipk defines/front/bluff.xyz
+```
+
+Both archive versions are exercised: R.U.S.E. is `edat` v1, Wargame: Red Dragon
+is v2 (2,640 files, all parsing).
+
+**Python 2.7, and it is not negotiable.** The game's scripts are marshalled
+Python 2.5 code objects; Python 2.7's `marshal` reads them unchanged and Python
+3's cannot read them at all. The archive and NDF readers would port fine, but
+splitting the three across two interpreters buys nothing.
+
+## Where to point them
+
+Six packages under `Data\PC\<version>\`, plus one archive per map under
+`Maps\PC\`. The two worth opening first:
+
+| file | holds |
+|---|---|
+| `ZZ_GladNotPatchableWin.dat` | `system3d\shaders.cpp` (the whole material system), `system3d\scene.cpp` (98 render layers), `visualdebuginfohandler.cpp` |
+| `ZZ_GladPatchableWin.dat` | `gfx\everything.cpp` (2,772 gameplay objects), `gfx\gdconstanteoriginal.cpp` (one object, 214 tuning constants), `map\<name>\mapterrain.cpp` |
+
+`.ipk` files inside `ZZ_Win.dat` are themselves `edat` archives — pull them out
+with `ruse_edat.py`, then open them directly. `.kdt` files are uncompressed NDF,
+so `ruse_ndf.py` opens them too; that is where the baked occlusion trees are.
+
+## Three things worth knowing before you start
+
+1. **The NDF value decoder is incomplete and says so.** Several type codes
+   (notably `0x14`) are unresolved. `Ndf.objects()` stops decoding an object when
+   it meets one and resyncs on the next `0xABABABAB` marker rather than returning
+   plausible garbage — so a `<stopped>` entry in the output is the reader being
+   honest, not a crash.
+2. **Names are always safe, values sometimes are not.** `CLAS`, `PROP`, `STRG`
+   and `TRAN` are plain length-prefixed string tables read directly, so class and
+   property names never depend on the value decoder. Most of what
+   `study/ruse.md` concludes rests on those 1,091 class names and 4,309 property
+   names.
+3. **The dictionary is a prefix tree, and the padding rule differs between file
+   and directory records *and* between archive versions.** v1 pads files on an
+   odd name length and directories on an even one; v2 pads both on even. Get it
+   wrong and the walk **desyncs rather than fails** — R.U.S.E. reported exactly
+   one file and Wargame reported 33 of 2,640 with garbage sizes, both of which
+   read as a small archive rather than as a bug. `_pad()` is the whole fix and
+   carries the rule in its docstring.
+
+## Known limitations
+
+* **No asset conversion at all.** `.tgv` textures, `.ess` audio, `.baf`
+  animation and the `.tms` terrain chunk payloads are located and sized but not
+  decoded. Nothing here needed them.
+* **The `IMPR`/`EXPR` name trees are not walked**, so objects are identified by
+  class and index rather than by their qualified names.
+* **Only the gameplay half of a modern build needs these at all.** From Steel
+  Division on, Eugen's own mod pipeline exports the gameplay database as
+  **plain-text NDF** — run `GenerateMod.bat` in a `Mods\<name>\` folder and read
+  the result with `grep`. These readers are for the engine-side data that the mod
+  pipeline does not export, and for R.U.S.E. and Wargame, which predate it.

@@ -20,8 +20,15 @@ namespace game {
 
 class StripMeshBuilder {
 public:
-    /* Returns a Mesh with vertexCount 0 for a degenerate polyline. */
-    Mesh build(const std::vector<BorderPoint>& points, float halfWidth, float lift);
+    /* Returns a Mesh with vertexCount 0 for a degenerate polyline.
+     *
+     * `closed` joins the last point back to the first and snaps the UV run to a
+     * whole number of tile repeats, so the scrolling dashes meet themselves at
+     * the seam. An OPEN polyline — a ribbon cut short where another one takes
+     * over the same grid edge — has no seam to meet at, and closing it would
+     * draw a chord straight across the gap that cut it. */
+    Mesh build(const std::vector<BorderPoint>& points, float halfWidth, float lift,
+               bool closed = true);
 
 private:
     /* per-vertex scratch, reused across loops */

@@ -107,6 +107,36 @@ void multiDrawElementsIndirect(unsigned int mode, unsigned int type,
 /* Dispatch sized by a buffer a previous pass wrote, rather than by the CPU. */
 void dispatchComputeIndirect(std::ptrdiff_t indirectOffset);
 
+/* ---- reading back what has already been drawn ---------------------------
+ *
+ * The UI's frosted-glass panels (cromwell/ui/panel/BlurPanel.hpp) need the
+ * pixels BEHIND them, which is the one thing no amount of vertex geometry can
+ * produce. rlgl can create and configure a texture but has no way to fill one
+ * from the framebuffer, and no way to pin the mip level a sample comes from —
+ * which together are the whole of the blur.
+ *
+ * WHY MIP LEVELS RATHER THAN A GAUSSIAN PASS. Copy the region, generate its
+ * mip chain, and sample it at a fractional level: the hardware's own box
+ * filter does the blurring, trilinear interpolation makes the strength
+ * continuous, and it costs one copy and one glGenerateMipmap instead of a
+ * downsample chain, two shader passes and a pair of render targets. It is
+ * boxier than a true gaussian, which is invisible under a tinted panel and is
+ * the trade being made knowingly. */
+
+/* Copies a region of the READ framebuffer into `textureId`'s level 0, which
+ * must already be at least that size. Coordinates are GL's — origin at the
+ * BOTTOM left — so a caller working in screen space has to flip y. */
+void copyFramebufferToTexture(unsigned int textureId, int x, int y, int width, int height);
+
+/* Regenerates `textureId`'s mip chain from its level 0. */
+void generateTextureMipmaps(unsigned int textureId);
+
+/* Pins the LOD range a texture may be sampled at. With both bounds equal, every
+ * sample comes from that level regardless of what the derivatives say — which
+ * is what lets a full-size quad sample a small mip. Fractional levels are
+ * interpolated when the min filter is trilinear. */
+void setTextureLodRange(unsigned int textureId, float minLod, float maxLod);
+
 /* ---- introspection ------------------------------------------------------ */
 
 /* Look up an SSBO block's index by name, so shader storage bindings can be

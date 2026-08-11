@@ -164,6 +164,13 @@ bool FrameRenderer::initialise(int width, int height, const CliOptions& options,
     statics_->rebuild(state.world());
     probesDirty_ = true;  /* the world the probes captured no longer exists */
 
+    /* The UI's font atlases, HERE rather than on first use. First use is the
+     * splash's opening frame, and rasterising five faces there would stall the
+     * one screen whose entire job is to look composed while something else is
+     * slow. This runs before the window is revealed, with everything else that
+     * loads. */
+    gameUi_.setup();
+
 
     return true;
 }
@@ -284,25 +291,41 @@ void FrameRenderer::rebuildRibbons(const GameState& state, const RibbonTuning& t
     ribbonMeshes_->clear();
 
     BandExtractor extractor(state.world());
-    Band    band;
+    Band    moveBand, sprintBand;
     LoopSet loops;
-
-    struct RingSpec { float cap; Color colour; Ring ring; int* loopCount; int* edgeCount; };
-    const RingSpec specs[2] = {
-        { state.moveBudget(),   tuning.moveColour,   Ring::Move,   &ribbonStats_.moveLoops,   &ribbonStats_.moveEdges   },
-        { state.sprintBudget(), tuning.sprintColour, Ring::Sprint, &ribbonStats_.sprintLoops, &ribbonStats_.sprintEdges },
-    };
 
     /* BOTH rings are built here; which one displays is a hover decision, not
      * a rebuild — see RingSelector. */
-    for (const RingSpec& spec : specs) {
-        state.buildBand(spec.cap, band);
-        extractor.extract(band, loops);
-        *spec.loopCount = loops.loopCount();
-        *spec.edgeCount = loops.edgeCount();
-        ribbonMeshes_->append(state.world(), loops, spec.colour, spec.ring,
-                              tuning.width, tuning.lift);
-    }
+    state.buildBand(state.moveBudget(), moveBand);
+    extractor.extract(moveBand, loops);
+    ribbonStats_.moveLoops = loops.loopCount();
+    ribbonStats_.moveEdges = loops.edgeCount();
+    ribbonMeshes_->append(state.world(), loops, tuning.moveColour, Ring::Move,
+                          tuning.width, tuning.lift);
+
+    /* AMBER MINUS BLUE, and the move band is kept alive for exactly that.
+     *
+     * The sprint band CONTAINS the move band, so the two frontiers coincide
+     * wherever what stops you is the ground running out rather than the
+     * budget — the lip of an upper storey's floor plate being the case that
+     * shows it, where a whole room's perimeter is shared and neither budget is
+     * the reason you cannot walk off the edge. Both ribbons then land on the
+     * same grid line, amber is drawn second and wins, and the blue ring
+     * disappears under it.
+     *
+     * Suppressing amber there is not a tie-break, it is the meaning: amber
+     * says "sprinting takes you PAST walking", and on a shared edge it does
+     * not. The suppressed edges come back as gaps, so the amber loops arrive
+     * cut into open runs. (The TAB debug cycle's sprint-only view inherits
+     * those gaps — with blue hidden they read as holes, which is the honest
+     * picture of a frontier the two rings share.) */
+    state.buildBand(state.sprintBudget(), sprintBand);
+    extractor.extract(sprintBand, &moveBand, loops);
+    ribbonStats_.sprintLoops = loops.loopCount();
+    ribbonStats_.sprintEdges = loops.edgeCount();
+    ribbonMeshes_->append(state.world(), loops, tuning.sprintColour, Ring::Sprint,
+                          tuning.width, tuning.lift);
+
     ribbonBuilt_ = tuning;
 }
 
@@ -1109,6 +1132,11 @@ void FrameRenderer::render(const FrameView& view)
     steamPanel.avatarUrl   = view_.steam.avatarUrl;
     steamPanel.avatar      = steamAvatar_;
 
+    /* Under the dev panel, over everything else — it is a full-screen scrim and
+     * the ImGui panel has to stay usable on top of it. Costs nothing when
+     * hidden. */
+    uiGallery_.draw(gameUi_, settings.camera);
+
 #if XC_HAVE_WEB
     devView_.draw(model, view_.settings.layers, tunables, textures, decalTool,
                   steamPanel, devRequests_, webPanel_.get());
@@ -1150,6 +1178,7 @@ void FrameRenderer::setupDevView(int storeys) { devView_.setup(storeys); }
 void FrameRenderer::setDevViewVisible(bool visible) { devView_.setVisible(visible); }
 void FrameRenderer::toggleDevView() { devView_.toggleVisible(); }
 void FrameRenderer::shutdownDevView() { devView_.shutdown(); }
+void FrameRenderer::toggleUiGallery() { uiGallery_.toggleVisible(); }
 void FrameRenderer::updateEffects(float deltaSeconds) { flashes_.update(deltaSeconds); }
 
 FrameRenderer::UIRequest FrameRenderer::takeUIRequest()
@@ -1163,6 +1192,29 @@ void FrameRenderer::drawFrontEnd()
 {
     BeginDrawing();
     ClearBackground(palette::kBackground);
+
+    /* Behind ImGui, and through raylib rather than ImGui::Image, because this
+     * is a fullscreen blit under its own shader and going through the UI layer
+     * to do it would mean a borderless window sized to the viewport for no
+     * gain.
+     *
+     * ZONED like any other per-frame system, and this one is not free — it is
+     * a sixteen-tap radial blur over every pixel of the window. It only runs
+     * for two seconds, but an unzoned pass is invisible rather than zero, and
+     * an unexplained spike at startup is exactly the hunt the panel exists to
+     * prevent. */
+    if (view_.uiState == UIState::SplashScreen) {
+        CW_PROFILE_ZONE_N("splash");
+        CW_GPU_ZONE("splash");
+        splash_.draw(view_.splashSeconds);
+
+        /* The loading bar, over the image and under ImGui. Drawn with the
+         * engine's own widget kit rather than with ImGui because this is
+         * PRODUCT UI — the first thing anyone sees — and the dev panel's
+         * toolkit has no business in it. */
+        drawSplashOverlay(gameUi_.begin(), view_.splashSeconds, view_.splashProgress);
+        gameUi_.end();
+    }
 
     rlImGuiBegin();
 
@@ -1179,17 +1231,24 @@ void FrameRenderer::drawFrontEnd()
 
     switch (view_.uiState) {
         case UIState::SplashScreen:
-            /* No titlebar and no input: the splash is a thing you watch, and
-             * Application decides when it is over. */
-            ImGui::Begin("##splash", nullptr, kFlags | ImGuiWindowFlags_NoTitleBar |
-                                              ImGuiWindowFlags_NoInputs);
-            ImGui::Dummy(ImVec2{ 0.0f, 24.0f });
-            ImGui::SetWindowFontScale(2.0f);
-            ImGui::TextUnformatted("cromwell");
-            ImGui::SetWindowFontScale(1.0f);
-            ImGui::TextDisabled("an XCOM 2-style tactical prototype");
-            ImGui::Dummy(ImVec2{ 0.0f, 24.0f });
-            ImGui::End();
+            /* The image carries the wordmark itself, so with it there is
+             * nothing left for ImGui to draw. Without it, the text below IS
+             * the splash — see splash_ in the header for why that case is
+             * ordinary rather than an error.
+             *
+             * No titlebar and no input either way: the splash is a thing you
+             * watch, and Application decides when it is over. */
+            if (!splash_.available()) {
+                ImGui::Begin("##splash", nullptr, kFlags | ImGuiWindowFlags_NoTitleBar |
+                                                  ImGuiWindowFlags_NoInputs);
+                ImGui::Dummy(ImVec2{ 0.0f, 24.0f });
+                ImGui::SetWindowFontScale(2.0f);
+                ImGui::TextUnformatted("cromwell");
+                ImGui::SetWindowFontScale(1.0f);
+                ImGui::TextDisabled("an XCOM 2-style tactical prototype");
+                ImGui::Dummy(ImVec2{ 0.0f, 24.0f });
+                ImGui::End();
+            }
             break;
 
         case UIState::MainMenu:

@@ -23,8 +23,10 @@ FrameInput InputHandler::sample(std::optional<int> forcedMouseX,
     input.toggleBake      = IsKeyPressed(KEY_B);
     input.toggleFlatView  = IsKeyPressed(KEY_F);
     input.toggleDevView   = IsKeyPressed(KEY_F1);
+    input.toggleUiGallery = IsKeyPressed(KEY_F2);
     input.toggleCapture   = IsKeyPressed(KEY_F9);
     input.copyCamera      = IsKeyPressed(KEY_F3);
+    input.reloadShaders   = IsKeyPressed(KEY_F5);
     input.resetWorld      = IsKeyPressed(KEY_R);
 
     input.orbiting = IsMouseButtonDown(MOUSE_BUTTON_MIDDLE) || IsKeyDown(KEY_LEFT_ALT);
