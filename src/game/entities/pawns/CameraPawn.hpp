@@ -39,8 +39,14 @@ public:
     const OrbitCamera& rig() const { return rig_; }
     OrbitCamera&       rig()       { return rig_; }
 
-    /* What the renderer draws through. */
-    const Camera3D& camera() const { return rig_.camera(); }
+    /* THE PLAYER'S CAMERA — the same cromwell::Camera type every other
+     * viewpoint uses, layers included. A render pass takes toRaylib() at its
+     * boundary, exactly as it does for a capture's camera. Non-const because
+     * the dev panel edits its layers in place, through FrameView. Spelled with
+     * the namespace: raylib declares a global `Camera` alias and the
+     * using-directive above would otherwise make the name ambiguous here. */
+    const cromwell::Camera& camera() const { return rig_.camera(); }
+    cromwell::Camera&       camera()       { return rig_.camera(); }
 
 private:
     OrbitCamera rig_;

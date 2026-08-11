@@ -53,9 +53,21 @@ inline constexpr float kFadeOutSeconds = 0.20f;
 /* Fade curve exponent. 1 is linear; 2 is the kit's default ease-in-out. */
 inline constexpr float kFadeEase = 2.0f;
 
-/* Glow defaults, matching the PO widgets: a halo strong enough to read as
- * emissive without the shape looking blurred, spreading eight pixels. */
-inline constexpr float kGlowStrength = 1.5f;
+/* Glow defaults. OFF BY DEFAULT: strength zero, so no widget in the kit wears a
+ * halo unless its spec asks for one. The halo is an effect, and an effect that
+ * arrives without being asked for is one that has to be switched off at every
+ * call site — SplashOverlay was already doing exactly that. Opt-in puts the
+ * decision where the look is being designed rather than in a header nobody
+ * reading a menu's code is looking at.
+ *
+ * THE RADIUS KEEPS ITS TUNED VALUE. Strength is the on/off dial — every draw
+ * site no-ops when it is zero — so leaving the radius at the eight pixels the PO
+ * widgets were tuned against means raising the strength alone restores the
+ * original look, rather than requiring both numbers to be rediscovered.
+ *
+ * The PO value was 1.5: a halo strong enough to read as emissive without the
+ * shape looking blurred. Set `spec.glowStrength = 1.5f` to get it back. */
+inline constexpr float kGlowStrength = 0.0f;
 inline constexpr float kGlowRadiusPx = 8.0f;
 
 /* ---- easing ------------------------------------------------------------ */

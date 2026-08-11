@@ -41,29 +41,52 @@ float highestFloorUnder(const World& world, const Cell& anchor, const Footprint&
 
 class BodyComponent : public Component {
 public:
+    /* ---- fluent setters --------------------------------------------------
+     * A body is described once, at the point it is added, and the description
+     * is one thought: this is a 2x2 hull, it blocks sight, it stands this
+     * tall. Chaining lets it read as one — see the API style note in
+     * CLAUDE.md. */
+
     const Footprint& footprint() const { return footprint_; }
-    void setFootprint(Footprint footprint) { footprint_ = std::move(footprint); }
+    BodyComponent& withFootprint(Footprint footprint)
+    {
+        footprint_ = std::move(footprint);
+        return *this;
+    }
 
     /* Only BIG bodies block sight — 1x1 bodies are transparent, so you shoot
      * past squadmates as in XCOM. */
     bool blocksLineOfSight() const { return blocksLineOfSight_; }
-    void setBlocksLineOfSight(bool blocks) { blocksLineOfSight_ = blocks; }
+    BodyComponent& withBlocksLineOfSight(bool blocks)
+    {
+        blocksLineOfSight_ = blocks;
+        return *this;
+    }
 
     /* How tall the hull stands, for LOS. Meaningless when transparent. */
     float hullHeight() const { return hullHeight_; }
-    void  setHullHeight(float height) { hullHeight_ = height; }
+    BodyComponent& withHullHeight(float height)
+    {
+        hullHeight_ = height;
+        return *this;
+    }
 
     BaseHeightMode baseHeightMode() const { return baseHeightMode_; }
-    void setBaseHeightMode(BaseHeightMode mode) { baseHeightMode_ = mode; }
+    BodyComponent& withBaseHeightMode(BaseHeightMode mode)
+    {
+        baseHeightMode_ = mode;
+        return *this;
+    }
 
     /* The vertical slab the cursor is tested against, as a fraction of a cell.
      * Was two visitor overrides that each called testBox with two literals. */
     float pickMinHeight() const { return pickMinHeight_; }
     float pickMaxHeight() const { return pickMaxHeight_; }
-    void setPickHeights(float minHeight, float maxHeight)
+    BodyComponent& withPickHeights(float minHeight, float maxHeight)
     {
         pickMinHeight_ = minHeight;
         pickMaxHeight_ = maxHeight;
+        return *this;
     }
 
     /* Resolves the base height against the world for a body anchored at

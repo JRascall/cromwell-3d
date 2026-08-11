@@ -25,6 +25,8 @@
  *   --cam px py pz tx ty tz free camera
  *   --dev-view              start with the F1 dev panel open; the only way to
  *                           get it in a --shot, which has no F1 to press
+ *   --minimap-realtime      capture the minimap every frame instead of five
+ *                           times a second. A test switch — see the field
  *   --splash                stay on the splash screen: it does not time out,
  *                           and a scripted run opens on it rather than skipping
  *                           straight to the board. How you sit and look at the
@@ -43,7 +45,6 @@
  */
 #pragma once
 
-#include "cromwell/camera/OrbitCamera.hpp"   /* CameraPreset */
 #include "game/lattice/Cell.hpp"
 #include "game/lattice/Constants.hpp"
 
@@ -53,9 +54,18 @@
 
 namespace game {
 
-using namespace cromwell;  /* the engine's names, unqualified. The game sits on top of
-                          * cromwell and never the other way round, so there is nothing
-                          * here for the engine to collide with. */
+/* No `using namespace cromwell` here any more — nothing in this header names
+ * the engine. That is worth keeping true: the command line describes a GAME
+ * run, and the day it needs an engine type is the day to ask why. */
+
+/* Which viewpoint the camera starts on. THIS GAME'S vocabulary — Staircase is
+ * a framing of the demo map's stairwell — so it is declared here, where
+ * --stairs and --cam are parsed, and Application translates it into
+ * camera().at().lookingAt() calls. It lived in the engine's OrbitCamera for a
+ * while, which put one game's demo-map coordinates in an engine header; the
+ * engine's rig now knows nothing about presets, the same eviction ViewLayers
+ * went through when it shipped a `units` switch. */
+enum class CameraPreset : int { Default = 0, Staircase, Free };
 
 struct CliOptions {
     std::optional<std::string> screenshotPath;
@@ -97,6 +107,19 @@ struct CliOptions {
 
     bool  bakeBenchmark = false;   /* headless; never opens a window */
     bool  forceDevView  = false;   /* open the dev panel at startup   */
+
+    /* --minimap-realtime: run the plan-view capture every frame instead of on
+     * its 0.2 s interval. The interval is the shipped answer — see
+     * CaptureSchedule.hpp for why — and this exists so a test can rule the
+     * schedule out (is the marker lagging, or is the picture just a fifth of a
+     * second old?) without editing the schedule and forgetting to put it
+     * back. */
+    bool  minimapRealtime = false;
+    /* Open the widget gallery at startup, the same way --dev-view opens the
+     * panel. Exists so the --shot path can capture it: the gallery is the only
+     * place several widgets are drawn at all, so without this they can only be
+     * looked at by hand and never in a scripted frame. */
+    bool  forceUiGallery = false;
 
     /* Stay on the splash screen. Two separate effects, one intent — "I am
      * looking at the splash, not at the game":

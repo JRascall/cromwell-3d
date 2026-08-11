@@ -1,5 +1,7 @@
 #include "game/picking/UnitPicker.hpp"
 
+#include "cromwell/math/RaylibInterop.hpp"
+
 #include "game/units/roster/UnitRoster.hpp"
 
 namespace game {
@@ -15,12 +17,15 @@ void UnitPicker::testBox(float minInset, float maxInset)
                        pendingBase_ + 0.95f,
                        static_cast<float>(pendingCell_.y) + maxInset };
 
-    const RayCollision collision = GetRayCollisionBox(pendingRay_, box);
+    /* raylib's box test, so the ray crosses back at this one call — see
+     * math/RaylibInterop.hpp on why the engine owns the value type and the
+     * conversion is free. */
+    const RayCollision collision = GetRayCollisionBox(cromwell::toRaylib(pendingRay_), box);
     pendingHit_      = collision.hit;
     pendingDistance_ = collision.distance;
 }
 
-Unit* UnitPicker::pick(UnitRoster& roster, const Ray& ray, int maxStorey)
+Unit* UnitPicker::pick(UnitRoster& roster, const cromwell::Ray& ray, int maxStorey)
 {
     Unit* best = nullptr;
     float bestDistance = 1e30f;

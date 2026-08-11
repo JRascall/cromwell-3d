@@ -34,21 +34,39 @@ enum class PathStyle {
 
 class MobilityComponent : public Component {
 public:
+    /* ---- fluent setters — see the note in BodyComponent.hpp -------------- */
+
     MoveGraphKind graph() const { return graph_; }
-    void setGraph(MoveGraphKind graph) { graph_ = graph; }
+    MobilityComponent& withGraph(MoveGraphKind graph)
+    {
+        graph_ = graph;
+        return *this;
+    }
 
     PathStyle pathStyle() const { return pathStyle_; }
-    void setPathStyle(PathStyle style) { pathStyle_ = style; }
+    MobilityComponent& withPathStyle(PathStyle style)
+    {
+        pathStyle_ = style;
+        return *this;
+    }
 
     /* Infantry may not STOP on stairs (pass-through only); vehicles cannot use
      * them at all. Both answer false today, and it stays a field rather than a
      * constant because the first flying body will want true. */
     bool canRestOnRamp() const { return canRestOnRamp_; }
-    void setCanRestOnRamp(bool canRest) { canRestOnRamp_ = canRest; }
+    MobilityComponent& withCanRestOnRamp(bool canRest)
+    {
+        canRestOnRamp_ = canRest;
+        return *this;
+    }
 
     /* Does driving over destructible half cover flatten it? */
     bool crushesHalfCover() const { return crushesHalfCover_; }
-    void setCrushesHalfCover(bool crushes) { crushesHalfCover_ = crushes; }
+    MobilityComponent& withCrushesHalfCover(bool crushes)
+    {
+        crushesHalfCover_ = crushes;
+        return *this;
+    }
 
     std::unique_ptr<MoveGraph> createGraph(const World& world) const;
 

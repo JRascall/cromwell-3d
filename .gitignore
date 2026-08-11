@@ -118,6 +118,13 @@ assets/materials/decals/*
 # every call site spells, and a checkout without the pack still has to compile.
 src/cromwell/assets/web/cromwell_ui.css
 
+# The MSDF atlases, baked from those same excluded faces by tools/bake_msdf.py.
+# The .bmp is already covered by the image rule above; the .cwfont table beside
+# it is text, but it is derived from the atlas it names and is meaningless
+# without it, so the pair is excluded together for the same reason the font
+# pack is - half of it is worse than none.
+src/cromwell/assets/fonts/msdf/*.cwfont
+
 # Layered art sources, which are bigger than what they export and change
 # wholesale on every save — the worst possible shape for git. Affinity, Krita,
 # Photoshop, GIMP. The lock files are editor scratch and are not even stable

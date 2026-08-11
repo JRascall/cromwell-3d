@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "game/lattice/Lattice.hpp"
+#include "game/render/DrawLayers.hpp"
 #include "game/render/dev/DevFonts.hpp"
 #include "cromwell/ribbon/RibbonConstants.hpp"
 #include "cromwell/ui/FontAwesomeIcons.hpp"
@@ -311,22 +312,48 @@ void DevView::drawToolbar()
 void DevView::drawLayersPanel(ViewLayers& layers)
 {
     if (beginPanel("layers", &open_.layers, 0, kPanelWidth)) {
-        layerPair("sky",      &layers.sky,      "world",    &layers.statics);
-        layerPair("props",    &layers.props,    "units",    &layers.units);
-        layerPair("shadows",  &layers.shadows,  "overlays", &layers.overlays);
-        layerPair("rings",    &layers.ribbons,  "glow",     &layers.glow);
-        layerPair("reflections", &layers.reflections, "custom depth", &layers.customDepth);
+        /* THE GAME'S LAYERS, ENUMERATED — not a hard-coded checkbox each.
+         * The engine owns thirty-two anonymous slots and this project names six
+         * of them (see game/render/DrawLayers.hpp); walking the registry means a
+         * project that adds a layer gets a switch for it without this panel
+         * being edited, and one that deletes a layer leaves no dead checkbox
+         * behind. */
+        ImGui::SeparatorText("draw layers");
+        {
+            bool first = true;
+            const float column = ImGui::GetCursorPosX()
+                                 + ImGui::GetContentRegionAvail().x * 0.5f;
+            drawLayerNames_.forEach([&](DrawLayerId id, const std::string& name) {
+                if (!first) ImGui::SameLine(column);
+                bool on = layers.drawing(id);
+                if (ImGui::Checkbox(name.c_str(), &on)) layers.draw = layers.draw.set(id, on);
+                first = !first;
+            });
+            if (!first) ImGui::NewLine();
+        }
+
+        /* THE ENGINE'S FEATURES, which ARE a fixed named set — cromwell knows
+         * what each of these means because it implements the pass. A field with
+         * a name beats a bit with a registered label when the set cannot grow
+         * without the engine growing too. */
+        ImGui::SeparatorText("engine features");
+        layerPair("sky",          &layers.features.sky,     "shadows",     &layers.features.shadows);
+        layerPair("reflections",  &layers.features.reflections, "ssao",    &layers.features.ambientOcclusion);
+        layerPair("decals",       &layers.features.decals,  "custom depth", &layers.features.customDepth);
+        layerPair("debug draw",   &layers.features.debugDraw, "tone map", &layers.features.toneMap);
 
         ImGui::Separator();
         if (ImGui::Button("all on")) layers = ViewLayers{};
         ImGui::SameLine();
         if (ImGui::Button("clean")) {
-            /* The world and nothing else — how a render is judged. The dev UI
-             * itself is not a layer and stays up; F1 hides it. */
-            layers.overlays = false;
-            layers.ribbons  = false;
-            layers.glow     = false;
+            /* The world and nothing else — how a render is judged. One mask
+             * operation, because the game declares which of its layers are
+             * interface rather than world. */
+            layers.draw = layers.draw & ~drawLayer::kAnnotations;
+            layers.features.debugDraw = false;
         }
+        ImGui::TextDisabled("ssao and decals are screen space: a second camera\n"
+                            "gets its own depth prepass by asking for them");
         ImGui::TextDisabled("a layer off is off in every pass,\nthe shadow map included");
     }
     ImGui::End();
@@ -348,7 +375,7 @@ void DevView::drawRenderingPanel(const DevModel& model, ViewLayers& layers,
         ImGui::SeparatorText("direct");
         ImGui::Checkbox("sun", &effects.directSun);
         ImGui::SameLine();
-        ImGui::Checkbox("shadow map", &layers.shadows);
+        ImGui::Checkbox("shadow map", &layers.features.shadows);
         if (toggled("baked sun (B)", model.bakedSun)) requests.toggleBake = true;
         ImGui::SameLine();
         ImGui::TextDisabled("lightmap, replaces the shadow map");
@@ -357,7 +384,7 @@ void DevView::drawRenderingPanel(const DevModel& model, ViewLayers& layers,
         ImGui::Checkbox("sky diffuse", &effects.ambientDiffuse);
         ImGui::SameLine();
         ImGui::Checkbox("sky specular", &effects.ambientSpecular);
-        ImGui::Checkbox("reflection probes", &layers.reflections);
+        ImGui::Checkbox("reflection probes", &layers.features.reflections);
         ImGui::TextDisabled("probes ride INSIDE sky specular:\n"
                             "specular off hides them too");
 
@@ -548,7 +575,7 @@ void DevView::drawPostPanel(const DevModel& model, ViewLayers& layers,
         ImGui::TextDisabled("bias above ~0.05 rejects every tap and\nturns the effect off silently");
 
         ImGui::SeparatorText("shadows");
-        ImGui::Checkbox("shadow map", &layers.shadows);
+        ImGui::Checkbox("shadow map", &layers.features.shadows);
         ImGui::TextDisabled("%s", model.shadowsActive ? "loaded" : "unavailable");
 
         ImGui::Separator();
@@ -636,7 +663,7 @@ void DevView::drawDecalPanel(const DevDecalTool& tool, ViewLayers& layers,
             return;
         }
 
-        ImGui::Checkbox("decals on", &layers.decals);
+        ImGui::Checkbox("decals on", &layers.features.decals);
         ImGui::SameLine();
         ImGui::TextDisabled("| %d placed", tool.placedCount);
 

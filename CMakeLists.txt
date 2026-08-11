@@ -101,9 +101,38 @@ add_library(cromwell_base STATIC
     src/cromwell/entities/EntityProps.cpp
     src/cromwell/diag/Profiler.cpp
     src/cromwell/spatial/SpatialHash.cpp
+    # Easing curves and the two things that drive a value along one. Pure
+    # arithmetic over a float and a clock, wanted by the UI, by the camera and
+    # by anything that moves - so it sits with the vector types rather than
+    # behind the renderer. See math/Easing.hpp.
+    src/cromwell/math/Easing.cpp
+    src/cromwell/math/Tween.cpp
     src/cromwell/settings/Settings.cpp
     src/cromwell/net/WinHttpClient.cpp
     src/cromwell/steam/SteamAvatar.cpp
+    # Pointer arbitration and gestures. HERE RATHER THAN IN cromwell because
+    # neither reads a device: one collects claims about who owns the cursor,
+    # the other separates a click from a drag given three booleans. That is
+    # what makes both testable without a window - see xcom_pointer_tests. The
+    # projection helpers they pair with DO need the camera's matrices and so
+    # live with the renderer; see camera/Viewport.hpp.
+    src/cromwell/input/PointerDrag.cpp
+    src/cromwell/input/PointerFocus.cpp
+    # ---- collision queries ---------------------------------------------
+    # Layers, swept-shape contacts and the grid traversal that walks them.
+    # HEADLESS ON PURPOSE, and it is the whole reason the trace layer is
+    # worth having: "does a box sweeping this way stop at that cell, and
+    # exactly where" is arithmetic, so it is a test rather than something
+    # somebody has to see go wrong in the game. The traversal and the hit
+    # buffer are header-only templates; only these two have code that is not
+    # inlined into a caller. See collision/GridTrace.hpp.
+    src/cromwell/collision/Intersect.cpp
+    src/cromwell/collision/LayerMatrix.cpp
+    # Debug geometry, the QUEUE half. Here rather than with the renderer for
+    # the reason that makes the whole facility worth having: the code that
+    # most needs to draw - a pathfinder, a trace, a steering behaviour - is
+    # headless and has no renderer to ask. See debug/DebugDraw.hpp.
+    src/cromwell/debug/DebugDraw.cpp
 
     # ---- the UI widget kit, geometry half -----------------------------
     # HERE RATHER THAN IN cromwell BECAUSE IT DRAWS NOTHING. Every widget
@@ -181,6 +210,11 @@ set(GAME_CORE_SOURCES
     src/game/world/ramp/RampSupport.cpp
     src/game/world/authoring/DemoMapFactory.cpp
     src/game/query/Terrain.cpp
+    # The trace against the tile world. HEADLESS, and worth being: it names no
+    # raylib type, so "does a sweep stop where it should in a real world" is a
+    # test rather than something to notice in the game. The pickers that wrap it
+    # take a raylib Ray and stay with the app. See game/picking/WorldTrace.hpp.
+    src/game/picking/WorldTrace.cpp
     src/game/query/Standability.cpp
     src/game/query/BlockedMass.cpp
     src/game/query/cover/LedgeCover.cpp
@@ -237,6 +271,14 @@ if(XC_BUILD_TESTS)
     add_executable(xcom_ui_tests tests/UIStateTests.cpp)
     target_link_libraries(xcom_ui_tests PRIVATE game_core)
 
+    # The easing curves and the two things that drive a value along one. Their
+    # shape is a judgement and is checked by looking; what is tested here is
+    # the set of properties that make them usable at all - endpoints landing
+    # exactly, no extrapolation past the ends, and a tween that arrives rather
+    # than settling a fraction short. See tests/EasingTests.cpp.
+    add_executable(xcom_easing_tests tests/EasingTests.cpp)
+    target_link_libraries(xcom_easing_tests PRIVATE cromwell_base)
+
     # The UI widget kit. Its geometry half produces a draw list rather than
     # pixels, which is the whole reason it can be tested at all - "does the
     # segment ring's fill mirror its track" is an assertion about vertex
@@ -262,6 +304,49 @@ if(XC_BUILD_TESTS)
     add_executable(xcom_spatial_tests tests/SpatialHashTests.cpp)
     target_link_libraries(xcom_spatial_tests PRIVATE cromwell_base)
 
+    # When a second camera actually redraws. The only headless part of scene
+    # capture and the part most worth pinning: capturing every frame instead
+    # of five times a second is a performance bug with no visual symptom at
+    # all. See tests/CaptureTests.cpp.
+    add_executable(xcom_capture_tests tests/CaptureTests.cpp)
+    target_link_libraries(xcom_capture_tests PRIVATE cromwell_base)
+
+    # Debug drawing, minus the drawing. Most of this subsystem is judged by
+    # looking at it; what is tested is the part with no visible symptom - the
+    # one-frame default lifetime, the overflow report, and the capsule's cap
+    # centres agreeing with TraceShape so the picture cannot lie about the
+    # shape that was swept. See tests/DebugDrawTests.cpp.
+    add_executable(xcom_debug_tests tests/DebugDrawTests.cpp)
+    target_link_libraries(xcom_debug_tests PRIVATE cromwell_base)
+
+    # The direction and rotation vocabulary. Header-only, so this links the
+    # engine base only to get the include path. What it pins down is the
+    # degenerate cases - a zero-length forward, an exactly-opposed pair, acos
+    # of 1.0000001 - every one of which produces NaN or a plausibly-wrong
+    # orientation rather than a crash. See tests/MathTests.cpp.
+    add_executable(xcom_math_tests tests/MathTests.cpp)
+    target_link_libraries(xcom_math_tests PRIVATE cromwell_base)
+
+    # The trace against a real tile world - the half of the trace layer that
+    # only exists once there are tiles. Links game_core rather than the engine,
+    # because a floor, a wall and a ramp are this game's shapes.
+    add_executable(xcom_trace_tests tests/TraceTests.cpp)
+    target_link_libraries(xcom_trace_tests PRIVATE game_core)
+
+    # The trace layer: layers and responses, swept-shape contacts, the grid
+    # traversal, and the multi-hit buffer. Every number in it is exactly
+    # knowable, and every failure it catches ("off by a half-extent", "off by
+    # a cell") shows up in play as something vague. See tests/CollisionTests.cpp.
+    add_executable(xcom_collision_tests tests/CollisionTests.cpp)
+    target_link_libraries(xcom_collision_tests PRIVATE cromwell_base)
+
+    # The pointer helpers - who owns the cursor, what it is hovering, and
+    # whether that gesture was a click or a drag. All three are state machines
+    # over booleans and a screen position, which is what lets the cases nobody
+    # can see happening be pinned down here. See tests/PointerTests.cpp.
+    add_executable(xcom_pointer_tests tests/PointerTests.cpp)
+    target_link_libraries(xcom_pointer_tests PRIVATE cromwell_base)
+
     # The profiler's capture file. Checked for STRUCTURE, not for timings: the
     # failure that matters is a trace Perfetto refuses to open, and it is
     # otherwise discovered at the end of a profiling session.
@@ -284,7 +369,7 @@ if(XC_BUILD_TESTS)
     # The test binaries stay in the build tree. builds/win is the runnable
     # product - what you would zip and hand to someone - and test exes are
     # not part of it.
-    set_target_properties(xcom_tests xcom_crier_tests xcom_ui_tests xcom_widget_tests xcom_entity_tests xcom_services_tests xcom_steam_tests xcom_spatial_tests xcom_profiler_tests xcom_perf PROPERTIES
+    set_target_properties(xcom_tests xcom_crier_tests xcom_ui_tests xcom_widget_tests xcom_easing_tests xcom_entity_tests xcom_services_tests xcom_steam_tests xcom_spatial_tests xcom_pointer_tests xcom_collision_tests xcom_trace_tests xcom_math_tests xcom_debug_tests xcom_capture_tests xcom_profiler_tests xcom_perf PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY                "${CMAKE_BINARY_DIR}/tests"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_BINARY_DIR}/tests"
         RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/tests"
@@ -296,10 +381,17 @@ if(XC_BUILD_TESTS)
     add_test(NAME crier COMMAND xcom_crier_tests)
     add_test(NAME ui     COMMAND xcom_ui_tests)
     add_test(NAME widget COMMAND xcom_widget_tests)
+    add_test(NAME easing COMMAND xcom_easing_tests)
     add_test(NAME entity   COMMAND xcom_entity_tests)
     add_test(NAME services COMMAND xcom_services_tests)
     add_test(NAME steam    COMMAND xcom_steam_tests)
     add_test(NAME spatial  COMMAND xcom_spatial_tests)
+    add_test(NAME pointer  COMMAND xcom_pointer_tests)
+    add_test(NAME collision COMMAND xcom_collision_tests)
+    add_test(NAME trace     COMMAND xcom_trace_tests)
+    add_test(NAME math      COMMAND xcom_math_tests)
+    add_test(NAME debugdraw COMMAND xcom_debug_tests)
+    add_test(NAME capture   COMMAND xcom_capture_tests)
     add_test(NAME profiler COMMAND xcom_profiler_tests)
 endif()
 
@@ -362,6 +454,81 @@ if(XC_BUILD_APP)
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(freetype)
+
+    # The name CMake's own FindFreetype module hands out, which is what other
+    # vendored projects look for. msdfgen asks `if(NOT TARGET
+    # Freetype::Freetype)` before falling back to `find_package(Freetype
+    # REQUIRED)` — and that fallback cannot succeed here, because our FreeType
+    # was fetched and built rather than installed, so there is no package on
+    # disk to find. Declaring the alias makes the question answer itself.
+    #
+    # FreeType does create a `freetype-interface` target carrying this as its
+    # EXPORT_NAME, but an export name only exists for consumers of an installed
+    # package; inside this build the target is still called `freetype`.
+    if(NOT TARGET Freetype::Freetype)
+        add_library(Freetype::Freetype ALIAS freetype)
+    endif()
+
+    # ---- msdf-atlas-gen: the distance field baker -----------------------
+    # A BUILD-TIME TOOL, NOT A RUNTIME DEPENDENCY. Nothing in the engine links
+    # this. It builds an executable that tools/bake_msdf.py drives to turn a
+    # font into an MSDF atlas, exactly the way tools/gen_fa_icons.py drives the
+    # icon vocabulary — the output is generated, gitignored and one command
+    # away, and the shipped binary carries only the PNG it produced.
+    #
+    # Generating a multi-channel field is not something to reimplement: it
+    # needs the edge-colouring pass from Chlumsky's thesis (see
+    # study/distance_fields.md) and this is that thesis's own library.
+    #
+    # Every option here is switched off something that is ON by default and
+    # would otherwise want a package manager or a second graphics library:
+    # vcpkg on both projects, and Skia, which msdfgen uses only for a geometry
+    # preprocessing pass that TrueType outlines do not need.
+    set(MSDF_ATLAS_USE_VCPKG      OFF CACHE BOOL "" FORCE)
+    set(MSDF_ATLAS_USE_SKIA       OFF CACHE BOOL "" FORCE)
+    set(MSDF_ATLAS_BUILD_STANDALONE ON CACHE BOOL "" FORCE)
+    set(MSDF_ATLAS_INSTALL        OFF CACHE BOOL "" FORCE)
+    # DYNAMIC, matching everything else in this build. Both projects default to
+    # linking the static CRT, and mixing the two is not a warning — it is
+    # `unresolved external symbol __imp_getenv` out of FreeType at link time,
+    # because a /MD object expects the import-library form of the CRT and a /MT
+    # link does not provide it. Anything sharing our FreeType has to share our
+    # runtime.
+    set(MSDF_ATLAS_DYNAMIC_RUNTIME ON CACHE BOOL "" FORCE)
+    set(MSDFGEN_DYNAMIC_RUNTIME    ON CACHE BOOL "" FORCE)
+    set(MSDFGEN_USE_VCPKG         OFF CACHE BOOL "" FORCE)
+    set(MSDFGEN_USE_SKIA          OFF CACHE BOOL "" FORCE)
+    set(MSDFGEN_BUILD_STANDALONE  OFF CACHE BOOL "" FORCE)
+    set(MSDFGEN_INSTALL           OFF CACHE BOOL "" FORCE)
+    set(MSDFGEN_DISABLE_SVG       ON  CACHE BOOL "" FORCE)
+
+    # No libpng, and therefore no zlib either. msdf-atlas-gen writes BMP with
+    # its own code, raylib loads BMP natively, and the atlas is a generated
+    # intermediate that nothing ships compressed — so the only thing PNG would
+    # buy is a smaller file in a directory that is already gitignored, at the
+    # cost of two more libraries to build on a fresh machine. BMP also stays
+    # openable in any image viewer, which matters the first time a bake looks
+    # wrong and the question is whether the atlas or the shader is at fault.
+    set(MSDFGEN_DISABLE_PNG       ON  CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        msdf_atlas_gen
+        GIT_REPOSITORY https://github.com/Chlumsky/msdf-atlas-gen.git
+        GIT_TAG        v1.3
+        GIT_SHALLOW    TRUE
+        GIT_SUBMODULES_RECURSE TRUE
+    )
+    FetchContent_MakeAvailable(msdf_atlas_gen)
+
+    # Keep the baker OUT of the staging directory. Every runtime output in this
+    # build goes to builds/win, which is the shipping product — and a build-time
+    # tool is not part of it. Left alone it lands beside xcom.exe and looks for
+    # all the world like something the game needs.
+    if(TARGET msdf-atlas-gen-standalone)
+        set_target_properties(msdf-atlas-gen-standalone PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY         "${CMAKE_BINARY_DIR}/tools"
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/tools"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_BINARY_DIR}/tools")
+    endif()
 
     # ---- Dear ImGui, on raylib's own backend ---------------------------
     # Neither repository ships a CMakeLists worth using — imgui has none at
@@ -433,6 +600,15 @@ if(XC_BUILD_APP)
     # project that embeds it has made a choice on that project's behalf.
     add_library(cromwell STATIC
         src/cromwell/camera/OrbitCamera.cpp
+        # Screen space to world space and back. With the renderer rather than
+        # in cromwell_base because it has to agree with the matrices the
+        # renderer actually draws through - a projection re-derived without
+        # raylib's near plane would put picks fractionally out of step with
+        # pixels. See the note at the top of Viewport.cpp.
+        src/cromwell/camera/Viewport.cpp
+        # ...and the half that needs a GPU. One loop over line segments; the
+        # shapes were tessellated when they were added.
+        src/cromwell/debug/DebugRenderer.cpp
         src/cromwell/decal/Decal.cpp
         src/cromwell/decal/DecalBuffer.cpp
         src/cromwell/decal/DecalRenderer.cpp
@@ -448,6 +624,22 @@ if(XC_BUILD_APP)
         src/cromwell/gpu/GL.cpp
         src/cromwell/gpu/GpuProfiler.cpp
         src/cromwell/gpu/target/HdrTarget.cpp
+        # A second camera into a texture - minimaps, scope optics, security
+        # feeds. It owns the target, the camera and the resolve; WHAT to draw
+        # is a callback, because a scene pass is the game's. Its schedule half
+        # is header-only and headless. See gpu/target/SceneCapture.hpp.
+        # The three screen-space buffers a full-quality view needs beyond its
+        # colour target. Sized together because a prepass, its occlusion and
+        # its DBuffer at different sizes is the same bug with more steps -
+        # and per view, because all three are reconstructed from one camera's
+        # depth. See gpu/target/ScenePassBuffers.hpp.
+        src/cromwell/gpu/target/ScenePassBuffers.cpp
+        # Several cameras, made from a descriptor and driven as one. What it
+        # removes is the per-camera wiring - the forwarding lambda, the phase,
+        # the profiler name, the four ordered construction steps - so adding
+        # the tenth camera costs what the first did. See SceneCaptureSet.hpp.
+        src/cromwell/camera/Camera.cpp
+        src/cromwell/camera/CameraSet.cpp
         src/cromwell/gpu/ShaderLibrary.cpp
         src/cromwell/input/InputHandler.cpp
         src/cromwell/lighting/PbrShader.cpp
@@ -460,6 +652,11 @@ if(XC_BUILD_APP)
         src/cromwell/model/ModelPreview.cpp
         src/cromwell/overlay/OverlayShader.cpp
         src/cromwell/overlay/TexturePreviews.cpp
+        # Frames keep presenting while the OS owns the thread — the window
+        # drag / live resize fix. Engine-side because "the window does not
+        # freeze while dragged" is true of any project; what a frame IS stays
+        # the app's, handed in as a callable. See platform/ModalLoopPump.hpp.
+        src/cromwell/platform/ModalLoopPump.cpp
         src/cromwell/post/AmbientOcclusion.cpp
         src/cromwell/post/PrepassShader.cpp
         src/cromwell/post/SkyPass.cpp
@@ -483,12 +680,36 @@ if(XC_BUILD_APP)
         # engine's typeface engine-side while the ImGui binding stays with
         # ImGui. See UiFontAssets.hpp.
         src/cromwell/ui/UiFontAssets.cpp
+        # Distance fields: the MSDF font table and atlas. The BAKER is a
+        # build-time tool and is not linked by anything here - see the
+        # msdf-atlas-gen block above and tools/bake_msdf.py.
+        src/cromwell/sdf/MsdfFont.cpp
+        src/cromwell/sdf/WorldText.cpp
     )
     # freetype is PRIVATE: UiFontSet rasterises with it behind an interface that
     # hands back a raylib Font, so no cromwell header names an FT_ type and
     # nothing downstream needs its include path.
     target_link_libraries(cromwell PUBLIC cromwell_base raylib)
     target_link_libraries(cromwell PRIVATE freetype)
+
+    # ---- the one test that needs raylib's headers ----------------------
+    # HERE RATHER THAN WITH THE OTHER TEST TARGETS, because `cromwell` does not
+    # exist until this block. Camera construction is arithmetic over a struct
+    # whose definition arrives with raylib.h, so this binary links the renderer
+    # and still opens no window - it calls no raylib function at all. What it
+    # pins is the fovy field meaning two different things depending on the
+    # projection, which is a camera that is silently wrong and still renders.
+    if(XC_BUILD_TESTS)
+        add_executable(xcom_projection_tests tests/ProjectionTests.cpp)
+        target_link_libraries(xcom_projection_tests PRIVATE cromwell)
+        set_target_properties(xcom_projection_tests PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY                "${CMAKE_BINARY_DIR}/tests"
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_BINARY_DIR}/tests"
+            RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/tests"
+            RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL     "${CMAKE_BINARY_DIR}/tests"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_BINARY_DIR}/tests")
+        add_test(NAME projection COMMAND xcom_projection_tests)
+    endif()
 
     # ---- Steam ----------------------------------------------------------
     # NOT FetchContent, unlike everything above it: the SDK is behind a partner
@@ -531,6 +752,7 @@ if(XC_BUILD_APP)
         src/game/Application.cpp
         src/game/controllers/PlayerController.cpp
         src/game/entities/pawns/CameraPawn.cpp
+        src/game/render/DrawLayers.cpp
         src/game/render/FrameRenderer.cpp
         src/game/cli/CliOptions.cpp
         src/game/path/MoveAnimator.cpp
@@ -622,6 +844,14 @@ if(XC_BUILD_APP)
     # PUBLIC, because GL.hpp is a cromwell header and the door has to be open
     # to whoever walks through it.
     target_include_directories(cromwell PUBLIC ${raylib_SOURCE_DIR}/src/external)
+
+    # GLFW's headers, for exactly one file: platform/ModalLoopPump.cpp needs
+    # the refresh callback and the native window handle, neither of which
+    # raylib re-exports. PRIVATE, unlike the external/ path above — no cromwell
+    # HEADER names a GLFW type, so nothing downstream needs this, and keeping
+    # it private is what stops GLFW quietly becoming part of the engine's
+    # interface. The symbols themselves are already in raylib's static lib.
+    target_include_directories(cromwell PRIVATE ${raylib_SOURCE_DIR}/src/external/glfw/include)
 
     if(WIN32 AND MSVC)
         set_target_properties(xcom PROPERTIES WIN32_EXECUTABLE $<CONFIG:Release>)

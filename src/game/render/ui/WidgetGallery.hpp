@@ -22,6 +22,7 @@
  */
 #pragma once
 
+#include "cromwell/sdf/WorldText.hpp"
 #include "cromwell/ui/core/UiContext.hpp"
 #include "game/render/ui/GameUi.hpp"
 
@@ -63,7 +64,26 @@ private:
 
     /* Badges pinned to world positions, to show that world-space UI here is
      * screen-space UI at a projected point — see cromwell/ui/paint/WorldAnchor.hpp. */
+    /* A size ladder, from the smallest the kit uses to far larger than it does.
+     * THE POINT IS DIAGNOSTIC, not decorative: "the text looks soft" has two
+     * completely different causes that look identical on one sample - a broken
+     * rasterisation path, which is wrong at every size, and simply not having
+     * many pixels to draw a letter with, which is only wrong at small ones.
+     * One column of the same string at nine sizes separates them in a glance.
+     * Every weight is shown too, because a hinting or coverage problem often
+     * shows in the thin ones first. */
+    void drawTypeSpecimen(cromwell::ui::UiRect band);
+
     void drawWorldAnchors(const Camera3D& camera);
+
+    /* The OTHER kind of world-space text, beside the anchored badges above, so
+     * the difference is visible rather than argued about. A badge is
+     * screen-space UI at a projected point: constant size, perspective
+     * quantised to a few crisp rasterisations. This is a distance field lying
+     * in the scene, so it scales continuously with distance and stays sharp at
+     * any of them, with no quantisation to hide a resample. Nameplates want
+     * the first; signage and floating numbers want the second. */
+    void drawMsdfSample(const Camera3D& camera);
 
     /* A section heading, and the running y cursor it advances. */
     float heading(const cromwell::ui::UiRect& column, float y, const char* text);
@@ -76,6 +96,12 @@ private:
     float px(float referencePixels) const;
 
     bool visible_ = false;
+
+    /* Loaded on first use rather than at setup: the atlas is baked from the
+     * licensed font pack (tools/bake_msdf.py) and is simply absent on a
+     * checkout without it, so this stays unready and draws nothing. */
+    cromwell::sdf::WorldText worldText_;
+    bool worldTextTried_ = false;
 
     /* Borrowed for the duration of one draw, so the section helpers do not each
      * need it threaded through. Never outlives the call. */

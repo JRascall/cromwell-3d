@@ -36,7 +36,11 @@ modder-derived. **[inferred]** our reading.
 Related: [`broken_arrow.md`](broken_arrow.md) — **the control experiment**: the
 same genre in 2025, on Unity, assembled from bought packages rather than built,
 and choosing the opposite networking model. Read its §10 against this note's §5,
-§9 and §11. Also [`map_scale.md`](map_scale.md) (the older, outside-in note —
+§9 and §11. **[`vehicle_animation.md`](vehicle_animation.md) extends §11's
+twelve-year diff into the animation layer** — how a turret, a suspension, a
+track and a visible crewman are driven across all four builds, and the finding
+that R.U.S.E.'s 2010 models are the *elaborate* ones that later got simplified.
+Also [`map_scale.md`](map_scale.md) (the older, outside-in note —
 §1.2 here corrects its central number),
 [`terrain_rendering.md`](terrain_rendering.md),
 [`world_streaming.md`](world_streaming.md),

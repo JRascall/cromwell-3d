@@ -8,29 +8,29 @@ std::unique_ptr<Unit> makeSoldier(Cell position, Team team)
 {
     auto unit = std::make_unique<Unit>(position, team);
 
-    BodyComponent& body    = unit->addComponent<BodyComponent>();
-    body.setFootprint(Footprint::single());
-    body.setBlocksLineOfSight(false);   /* you shoot past squadmates, as in XCOM */
-    body.setHullHeight(0.0f);
-    body.setBaseHeightMode(BaseHeightMode::TerrainCentre);
-    body.setPickHeights(0.25f, 0.75f);
+    unit->addComponent<BodyComponent>()
+        .withFootprint(Footprint::single())
+        .withBlocksLineOfSight(false)   /* you shoot past squadmates, as in XCOM */
+        .withHullHeight(0.0f)
+        .withBaseHeightMode(BaseHeightMode::TerrainCentre)
+        .withPickHeights(0.25f, 0.75f);
 
-    MobilityComponent& mobility = unit->addComponent<MobilityComponent>();
-    mobility.setGraph(MoveGraphKind::Infantry);
-    mobility.setPathStyle(PathStyle::Articulated);
-    mobility.setCanRestOnRamp(false);   /* stairs are pass-through only */
-    mobility.setCrushesHalfCover(false);
+    unit->addComponent<MobilityComponent>()
+        .withGraph(MoveGraphKind::Infantry)
+        .withPathStyle(PathStyle::Articulated)
+        .withCanRestOnRamp(false)   /* stairs are pass-through only */
+        .withCrushesHalfCover(false);
 
-    CoverComponent& cover   = unit->addComponent<CoverComponent>();
-    cover.setGrantsHullCover(false);
-    cover.setShowsCoverShields(true);
+    unit->addComponent<CoverComponent>()
+        .withGrantsHullCover(false)
+        .withShowsCoverShields(true);
 
-    unit->addComponent<DestructibleComponent>().setLeavesWreckage(false);
+    unit->addComponent<DestructibleComponent>().withLeavesWreckage(false);
 
-    PresentationComponent& presentation = unit->addComponent<PresentationComponent>();
-    presentation.setVisual(VisualKind::Infantry);
-    presentation.setNames("soldier", "soldier",
-                          "selected the soldier");
+    unit->addComponent<PresentationComponent>()
+        .withVisual(VisualKind::Infantry)
+        .withNames("soldier", "soldier",
+                   "selected the soldier");
 
     return unit;
 }
@@ -39,29 +39,29 @@ std::unique_ptr<Unit> makeVehicle(Cell position, Team team)
 {
     auto unit = std::make_unique<Unit>(position, team);
 
-    BodyComponent& body    = unit->addComponent<BodyComponent>();
-    body.setFootprint(Footprint::square2x2());
-    body.setBlocksLineOfSight(true);    /* the hull is terrain, for sight */
-    body.setHullHeight(kVehicleLosHeight);
-    body.setBaseHeightMode(BaseHeightMode::HighestUnderFootprint);
-    body.setPickHeights(0.1f, 1.9f);
+    unit->addComponent<BodyComponent>()
+        .withFootprint(Footprint::square2x2())
+        .withBlocksLineOfSight(true)    /* the hull is terrain, for sight */
+        .withHullHeight(kVehicleLosHeight)
+        .withBaseHeightMode(BaseHeightMode::HighestUnderFootprint)
+        .withPickHeights(0.1f, 1.9f);
 
-    MobilityComponent& mobility = unit->addComponent<MobilityComponent>();
-    mobility.setGraph(MoveGraphKind::Vehicle);
-    mobility.setPathStyle(PathStyle::Anchored);
-    mobility.setCanRestOnRamp(false);   /* cannot use stairs at all */
-    mobility.setCrushesHalfCover(true);
+    unit->addComponent<MobilityComponent>()
+        .withGraph(MoveGraphKind::Vehicle)
+        .withPathStyle(PathStyle::Anchored)
+        .withCanRestOnRamp(false)   /* cannot use stairs at all */
+        .withCrushesHalfCover(true);
 
-    CoverComponent& cover   = unit->addComponent<CoverComponent>();
-    cover.setGrantsHullCover(true);   /* XCOM treats a big unit as mobile high cover */
-    cover.setShowsCoverShields(false);  /* armour, not cover */
+    unit->addComponent<CoverComponent>()
+        .withGrantsHullCover(true)      /* XCOM treats a big unit as mobile high cover */
+        .withShowsCoverShields(false);  /* armour, not cover */
 
-    unit->addComponent<DestructibleComponent>().setLeavesWreckage(true);
+    unit->addComponent<DestructibleComponent>().withLeavesWreckage(true);
 
-    PresentationComponent& presentation = unit->addComponent<PresentationComponent>();
-    presentation.setVisual(VisualKind::Vehicle);
-    presentation.setNames("tank", "TANK 2x2",
-                          "selected the tank (2x2, crushes cover)");
+    unit->addComponent<PresentationComponent>()
+        .withVisual(VisualKind::Vehicle)
+        .withNames("tank", "TANK 2x2",
+                   "selected the tank (2x2, crushes cover)");
 
     return unit;
 }

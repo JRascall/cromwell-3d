@@ -2,6 +2,11 @@
 
 #include "raymath.h"
 
+#include "cromwell/camera/CameraDirector.hpp"
+#include "cromwell/camera/Viewport.hpp"
+#include "cromwell/debug/DebugDraw.hpp"
+#include "cromwell/math/RaylibInterop.hpp"
+
 #include "game/entities/pawns/CameraPawn.hpp"
 
 #include "game/lattice/Lattice.hpp"
@@ -44,7 +49,7 @@ void PlayerController::toggleGrenade()
 {
     grenadeArmed_ = !grenadeArmed_;
     if (grenadeArmed_) clearPreview();
-    else               buildPreviewFor(hovered_);
+    else               buildPreviewFor(hovered());
 }
 
 void PlayerController::setDecalTool(bool armed, const DevRequests::DecalPlacement& brush,
@@ -55,19 +60,41 @@ void PlayerController::setDecalTool(bool armed, const DevRequests::DecalPlacemen
     decalAvailable_ = available;
 }
 
+cromwell::Camera& PlayerController::viewCamera() const
+{
+    /* The pawn fallback keeps a controller wired before the director — or a
+     * test that never made one — picking through the camera it possesses. */
+    return director_ != nullptr ? director_->current() : pawn_->camera();
+}
+
+Viewport PlayerController::viewViewport() const
+{
+    const Camera3D rig = viewCamera().toRaylib();
+    if (viewArea_) {
+        return Viewport{ rig, Vec2{ viewArea_->x, viewArea_->y },
+                         Vec2{ viewArea_->width, viewArea_->height } };
+    }
+    return Viewport::ofWindow(rig);
+}
+
 std::string PlayerController::cameraArguments() const
 {
-    const Camera3D& camera = pawn_->camera();
+    /* THE PAWN'S camera, deliberately not viewCamera(): --cam reproduces the
+     * RIG's pose at startup, and copying whatever camera the screen happened
+     * to be switched to would paste a security feed's viewpoint into a flag
+     * that places the player's. */
+    const Vec3 position = pawn_->camera().position();
+    const Vec3 target   = pawn_->camera().target();
 
     char buffer[160];
     std::snprintf(buffer, sizeof(buffer),
                   "--cam %.3f %.3f %.3f %.3f %.3f %.3f",
-                  static_cast<double>(camera.position.x),
-                  static_cast<double>(camera.position.y),
-                  static_cast<double>(camera.position.z),
-                  static_cast<double>(camera.target.x),
-                  static_cast<double>(camera.target.y),
-                  static_cast<double>(camera.target.z));
+                  static_cast<double>(position.x),
+                  static_cast<double>(position.y),
+                  static_cast<double>(position.z),
+                  static_cast<double>(target.x),
+                  static_cast<double>(target.y),
+                  static_cast<double>(target.z));
     return buffer;
 }
 
@@ -123,12 +150,29 @@ void PlayerController::buildPreviewFor(std::optional<int> destination)
 
 void PlayerController::updatePointer(const FrameInput& input)
 {
-    const Ray ray = GetScreenToWorldRay(input.mousePosition, pawn_->camera());
+    /* THROUGH Viewport RATHER THAN raylib's GetScreenToWorldRay, which reads the
+     * window size out of globals and so cannot be told about a viewport that is
+     * not the whole window. Nothing here needs that yet; using it anyway means
+     * the day something does — a tactical inset, a split screen — is a
+     * constructor argument rather than a hunt for every place a ray is built.
+     * See cromwell/camera/Viewport.hpp. */
+    /* viewViewport, NOT the window: picks come from the camera the screen is
+     * SHOWING, at the rectangle its picture actually occupies — the whole
+     * window normally, pane 0 under a split. A cursor outside that rectangle
+     * is over some other pane's picture, and picking the world through it
+     * would select things this player is not pointing at; everything below
+     * treats it as the miss it is. */
+    const Viewport viewport = viewViewport();
+    const Vec2 cursor{ input.mousePosition.x, input.mousePosition.y };
+    const bool inView = viewport.contains(cursor);
+
+    const cromwell::Ray ray = viewport.rayThrough(cursor);
     const TilePicker picker(state_.world());
-    const std::optional<int> hit = picker.pick(ray, state_.isoLevel());
+    const std::optional<int> hit =
+        inView ? picker.pick(ray, state_.isoLevel()) : std::nullopt;
 
     /* THE SURFACE, as opposed to the tile — kept alongside rather than derived
-     * from `hovered_`, because they are genuinely different answers. TilePicker
+     * from `hover_`, because they are genuinely different answers. TilePicker
      * reports the standable tile a soldier could walk to and ignores walls
      * entirely; this reports the geometry under the cursor, wall faces
      * included, as a point and a normal. Only the decal tool reads it, and only
@@ -136,21 +180,45 @@ void PlayerController::updatePointer(const FrameInput& input)
      * a picker that runs only when a button is pressed cannot grey that button
      * out beforehand, which is the whole difference between "pointing at
      * nothing" and "the tool is broken". */
-    cursorSurface_ = SurfacePicker(state_.world()).pick(ray, state_.isoLevel());
+    cursorSurface_ = inView ? SurfacePicker(state_.world()).pick(ray, state_.isoLevel())
+                            : std::nullopt;
+
+    /* WHAT THE DECAL TOOL IS ABOUT TO DO, drawn. A decal is a projector, so its
+     * ORIENTATION is half of the placement and the ghost quad alone cannot show
+     * which way it faces — a mark on a wall and a mark on the floor beneath it
+     * look identical from above until one of them is wrong.
+     *
+     * Only while the tool is armed, so it costs nothing in play, and it doubles
+     * as the standing proof that the trace layer and the debug renderer are
+     * both alive. See cromwell/debug/DebugDraw.hpp. */
+    if (decalArmed_ && cursorSurface_) {
+        debugNormal(fromRaylib(cursorSurface_->point), fromRaylib(cursorSurface_->normal),
+                    0.4f, debugColour::cyan());
+    }
 
     /* After the pick, so the ghost is on the surface the cursor is over THIS
      * frame — a preview one frame behind the mouse reads as lag on the tool. */
     updateDecalPreview();
 
-    if (hit != hovered_) {
-        hovered_ = hit;
+    /* THE TRACKER, RATHER THAN `hit != hovered_`. A ray marched against tile
+     * geometry misses for a frame when the cursor sits on a seam between two
+     * cells, and the naive compare turns that into an exit and an enter — which
+     * clears the path preview and rebuilds it, sixty times a second, while the
+     * player holds still. The tracker holds the cell across a gap that short.
+     * See cromwell/input/HoverTracker.hpp. */
+    const HoverChange change = hover_.update(hit, input.deltaSeconds);
+    if (change.changed) {
         if (grenadeArmed_) { preview_.clear(); route_.clear(); }
-        else buildPreviewFor(hovered_);
+        else buildPreviewFor(hover_.target());
     }
 
-    if (input.leftPressed) pressedAt_ = input.mousePosition;
-    if (input.leftReleased && Vector2Distance(pressedAt_, input.mousePosition) < 6.0f)
-        handleClick();
+    /* A CLICK IS A FAILED DRAG, and the six pixels of slop that separate them
+     * used to be a literal and a Vector2Distance here. It is the same rule the
+     * marquee selection will need, so it moved to the engine rather than being
+     * written twice with two different thresholds. */
+    const DragResult gesture = click_.update(cursor, input.leftPressed,
+                                             input.leftDown, input.leftReleased);
+    if (gesture.clicked) handleClick();
 }
 
 /* ---- the dev decal tool --------------------------------------------------
@@ -240,11 +308,17 @@ void PlayerController::handleClick()
     }
 
     if (grenadeArmed_) {
-        if (hovered_) detonateAt(state_.world().lattice().cellAt(*hovered_));
+        if (hovered()) detonateAt(state_.world().lattice().cellAt(*hovered()));
         return;
     }
 
-    const Ray ray = GetScreenToWorldRay(GetMousePosition(), pawn_->camera());
+    /* Same viewport, same rule as the hover: a click outside the view's own
+     * rectangle landed on another pane's picture and orders nothing. */
+    const Viewport viewport = viewViewport();
+    const Vec2 click{ GetMousePosition().x, GetMousePosition().y };
+    if (!viewport.contains(click)) return;
+
+    const cromwell::Ray ray = viewport.rayThrough(click);
     UnitPicker unitPicker(state_.world());
     Unit* picked = unitPicker.pick(state_.roster(), ray, state_.isoLevel());
 
@@ -255,7 +329,7 @@ void PlayerController::handleClick()
         return;
     }
 
-    if (hovered_ && preview_.size() >= 2) animator_.start(*hovered_);
+    if (hovered() && preview_.size() >= 2) animator_.start(*hovered());
 }
 
 /* ------------------------------------------------------------ animation */
@@ -323,9 +397,9 @@ void PlayerController::detonateAt(const Cell& cell)
 RibbonPassSettings PlayerController::ribbonSettings(bool softCutaway) const
 {
     RibbonPassSettings settings;
-    settings.camera       = pawn_->camera();
-    settings.visibleRings = rings_.visibleRings(state_.reach(), hovered_, state_.moveBudget());
-    settings.solidRing    = rings_.solidRing(state_.reach(), hovered_, state_.moveBudget());
+    settings.camera       = viewCamera().toRaylib();
+    settings.visibleRings = rings_.visibleRings(state_.reach(), hovered(), state_.moveBudget());
+    settings.solidRing    = rings_.solidRing(state_.reach(), hovered(), state_.moveBudget());
     settings.hideHeight   = softCutaway
         ? Lattice::storeyBaseHeight(state_.isoLevel()) + kStoreyHeight
         : kHideHeightOff;
@@ -344,9 +418,10 @@ CutawayView PlayerController::cutawayView() const
      * Dynamic is the playing mode, where seeing into the building beats seeing
      * the building. */
     if (state_.cutawayMode() == CutawayMode::Dynamic) {
-        const Camera3D camera = pawn_->camera();
-        cutaway.facings = facingsVisibleFrom(camera.target.x - camera.position.x,
-                                             camera.target.z - camera.position.z);
+        /* The cutaway is a CAMERA affordance — walls come off for the camera
+         * actually looking, so it follows the view target like the picks do. */
+        const Vec3 look = viewCamera().target() - viewCamera().position();
+        cutaway.facings = facingsVisibleFrom(look.x, look.z);
     }
     return cutaway;
 }

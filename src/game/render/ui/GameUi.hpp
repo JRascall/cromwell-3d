@@ -63,6 +63,19 @@ public:
      * first setup(). */
     cromwell::ui::UiContext* context() { return context_.get(); }
 
+    /* True when a widget claimed the cursor in the LAST completed frame.
+     *
+     * Last, not this: an immediate-mode control's bounds exist only inside the
+     * call that draws it, so hover is resolved during the render — which is
+     * after input has been arbitrated. Asking here gives the most recent
+     * complete answer, which is what PointerFocus is built to consume. See the
+     * one-frame note in cromwell/input/PointerFocus.hpp, and wantsMouse() in
+     * UiContext.hpp for what "claimed" means.
+     *
+     * False before the first frame, which is correct: nothing has drawn, so
+     * nothing is under the cursor. */
+    bool wantsMouse() const { return context_ && context_->wantsMouse(); }
+
     const cromwell::ui::UiFontSet& fonts() const { return fonts_; }
 
 private:

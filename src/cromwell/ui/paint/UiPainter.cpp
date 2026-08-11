@@ -21,6 +21,7 @@ namespace {
  * inside it without a limit check per triangle. */
 constexpr int kBatchChunkVertices = 3000;
 
+
 Color toRaylibColour(std::uint32_t packed)
 {
     return Color{ static_cast<unsigned char>(packed & 0xFFu),
@@ -48,6 +49,7 @@ UiPainter::~UiPainter()
 
 void UiPainter::release()
 {
+
     if (captureTextureId_ != 0) {
         rlUnloadTexture(captureTextureId_);
         captureTextureId_ = 0;
@@ -185,18 +187,125 @@ void UiPainter::executeText(const TextRun& run, const UiFontSet& fonts)
         return;
     }
 
-    /* The run's position is the top-left of the LINE BOX, and raylib draws from
-     * the top-left of the glyph box, which is the font size rather than the
-     * line height. Centring the glyphs inside the line box here is what keeps
-     * text vertically where the layout said it would be — see the note on line
-     * height in UiFontSet.hpp. */
-    const float lineHeight = fonts.lineHeight(run.style);
-    const float glyphOffset = (lineHeight - run.style.sizePx) * 0.5f;
+    /* Drawn at the size the atlas was RASTERISED at, not the style's. They are
+     * the same number at a 100% display scale and differ the moment one is
+     * applied; a glyph baked for 13 px and drawn at 13.5 is resampled, which is
+     * the one thing per-size atlases exist to prevent. */
+    const float drawSize = UiFontSet::rasterSize(run.style.sizePx);
 
-    DrawTextEx(fonts.fontFor(run.style.weight, run.style.sizePx), run.text.c_str(),
-               Vector2{ run.position.x, run.position.y + glyphOffset },
-               run.style.sizePx, run.style.letterSpacingPx,
-               toRaylibColour(run.style.colour.toSrgb8()));
+    /* The run's position is the top-left of the LINE BOX and glyphs are placed
+     * from the top of the GLYPH box, so the difference is split above and
+     * below — see the note on line height in UiFontSet.hpp.
+     *
+     * Y IS SNAPPED, X IS NOT. Vertical subpixel positioning buys nothing: text
+     * sits on a baseline and every glyph in a run shares it, so rounding once
+     * costs no precision anyone can see. Horizontal is different — that is
+     * where fractional letter spacing accumulates — and it is handled per glyph
+     * below by choosing a phase rather than by rounding. */
+    const float lineHeight = fonts.lineHeight(run.style);
+    const float originY = std::round(run.position.y + (lineHeight - drawSize) * 0.5f);
+
+    const Color colour = toRaylibColour(run.style.colour.toSrgb8());
+
+    /* TRACKING, ROUNDED TO A WHOLE PIXEL, ONCE.
+     *
+     * This is what "the labels look pixelated" actually was. FreeType's
+     * advanceX is already an integer, so letter spacing is the ONLY source of
+     * fractional drift in the pen - and the kit's shouted styles track at 1.8,
+     * 2.1 and 2.4 px. Accumulated and rounded per glyph, 2.4 comes out as
+     * alternating 2s and 3s: measured on the STANDARD chip, the gaps ran
+     * 3,2,3,2,3,2,2,3. The eye does not read that as "tracking is 0.4 px off",
+     * it reads it as ragged, and ragged reads as low quality.
+     *
+     * Rounding here instead makes every gap identical, and as a side effect
+     * every pen position lands on a whole pixel by construction rather than by
+     * the rounding below - which is the condition the hinted glyphs want
+     * anyway.
+     *
+     * The alternative is subpixel positioning, and it is not available: it
+     * requires hinting to be off or light, and native hinting is what makes
+     * these glyphs crisp in the first place. Uniform-but-0.4px-narrow beats
+     * accurate-but-ragged. See study/text_rendering.md section 3. */
+    const float tracking = std::round(run.style.letterSpacingPx * drawSize
+                                      / std::max(run.style.sizePx, 0.001f));
+
+    /* Bound once for the whole run. Every phase of a given weight and size is a
+     * separate atlas, so a run genuinely can switch texture between glyphs —
+     * hence the batch is opened per glyph run below rather than once here, and
+     * rlSetTexture is called only when the atlas actually changes. */
+    unsigned int boundTexture = 0;
+    bool batchOpen = false;
+
+    float pen = run.position.x;
+    for (const char character : run.text) {
+        /* THE PHASE. Split the wanted position into the whole pixel the quad
+         * sits on and the fraction the RASTERISER absorbed. Rounding to the
+         * nearest quarter can carry into the next pixel, which is why the
+         * carry is handled rather than clamped. */
+        const float wholeX = std::floor(pen);
+        int phase = static_cast<int>(std::round((pen - wholeX) * UiFontSet::kPhaseCount));
+        float pixelX = wholeX;
+        if (phase >= UiFontSet::kPhaseCount) {
+            phase = 0;
+            pixelX += 1.0f;
+        }
+
+        const Font& font = fonts.fontFor(run.style.weight, run.style.sizePx, phase);
+        if (font.texture.id == 0 || font.glyphCount == 0) {
+            break;
+        }
+
+        const int index = GetGlyphIndex(font, static_cast<int>(
+            static_cast<unsigned char>(character)));
+        const Rectangle rect = font.recs[index];
+        const GlyphInfo& glyph = font.glyphs[index];
+        const float scale = font.baseSize > 0
+            ? drawSize / static_cast<float>(font.baseSize) : 1.0f;
+
+        if (rect.width > 0.0f && rect.height > 0.0f) {
+            if (font.texture.id != boundTexture) {
+                if (batchOpen) {
+                    rlEnd();
+                    batchOpen = false;
+                }
+                rlSetTexture(font.texture.id);
+                boundTexture = font.texture.id;
+            }
+            if (!batchOpen) {
+                rlCheckRenderBatchLimit(4 * static_cast<int>(run.text.size()));
+                rlBegin(RL_QUADS);
+                rlColor4ub(colour.r, colour.g, colour.b, colour.a);
+                batchOpen = true;
+            }
+
+            /* Whole pixels on both axes. The fractional part of the position is
+             * not lost — it is in the coverage, put there by the phase. */
+            const float left = pixelX + static_cast<float>(glyph.offsetX) * scale;
+            const float top = originY + static_cast<float>(glyph.offsetY) * scale;
+            const float right = left + rect.width * scale;
+            const float bottom = top + rect.height * scale;
+
+            const float texWidth = static_cast<float>(font.texture.width);
+            const float texHeight = static_cast<float>(font.texture.height);
+            const float u0 = rect.x / texWidth;
+            const float v0 = rect.y / texHeight;
+            const float u1 = (rect.x + rect.width) / texWidth;
+            const float v1 = (rect.y + rect.height) / texHeight;
+
+            rlTexCoord2f(u0, v0); rlVertex2f(left, top);
+            rlTexCoord2f(u0, v1); rlVertex2f(left, bottom);
+            rlTexCoord2f(u1, v1); rlVertex2f(right, bottom);
+            rlTexCoord2f(u1, v0); rlVertex2f(right, top);
+        }
+
+        /* The pen keeps its FRACTIONAL position. Rounding it here would be the
+         * snapping this whole mechanism exists to avoid, and the error would
+         * accumulate across the run. */
+        pen += static_cast<float>(glyph.advanceX) * scale + tracking;
+    }
+
+    if (batchOpen) rlEnd();
+    if (boundTexture != 0) rlSetTexture(0);
 }
 
 bool UiPainter::ensureCaptureTexture(int width, int height)

@@ -26,7 +26,12 @@ FrameInput InputHandler::sample(std::optional<int> forcedMouseX,
     input.toggleUiGallery = IsKeyPressed(KEY_F2);
     input.toggleCapture   = IsKeyPressed(KEY_F9);
     input.copyCamera      = IsKeyPressed(KEY_F3);
-    input.reloadShaders   = IsKeyPressed(KEY_F5);
+    input.toggleViewTarget = IsKeyPressed(KEY_F5);
+    input.cycleSplitScreen = IsKeyPressed(KEY_F7);
+    /* F6, and it was F5 until the view-target toggle took that key — reload is
+     * reached for in bursts while iterating on one shader; the view switch is
+     * the one a demo reaches for. */
+    input.reloadShaders   = IsKeyPressed(KEY_F6);
     input.resetWorld      = IsKeyPressed(KEY_R);
 
     input.orbiting = IsMouseButtonDown(MOUSE_BUTTON_MIDDLE) || IsKeyDown(KEY_LEFT_ALT);
@@ -48,6 +53,7 @@ FrameInput InputHandler::sample(std::optional<int> forcedMouseX,
     if (forcedMouseX && forcedMouseY) SetMousePosition(*forcedMouseX, *forcedMouseY);
     input.mousePosition = GetMousePosition();
     input.leftPressed   = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    input.leftDown      = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
     input.leftReleased  = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
 
     input.windowResized = IsWindowResized();

@@ -9,6 +9,8 @@
  */
 #pragma once
 
+#include "cromwell/math/Ray.hpp"
+
 #include "raylib.h"
 
 #include "game/query/BlockedMass.hpp"
@@ -27,7 +29,7 @@ public:
 
     /* The first standable surface or solid mass under the ray, honouring the
      * floor isolation ceiling. */
-    std::optional<int> pick(const Ray& ray, int maxStorey) const;
+    std::optional<int> pick(const cromwell::Ray& ray, int maxStorey) const;
 
 private:
     static constexpr float kStep = 0.03f;

@@ -34,6 +34,13 @@ trace, i.e. it demonstrably ran. **[inferred]** our reading.
 [`broken_arrow_damage.md`](broken_arrow_damage.md) reads the armour, penetration,
 critical-hit and suppression systems against Nuclear Option's.
 
+**Vehicle animation has its own note.**
+[`vehicle_animation.md`](vehicle_animation.md) reads the turret, suspension,
+track and crew-figure systems against Eugen's across three of their builds — and
+§8 there is the strongest single instance of §10's convergence argument: an
+`AnimationHub` holding an `IAnimationBehaviour[]` is Eugen's operator list,
+arrived at independently on a different engine.
+
 **Audio has its own note.** [`broken_arrow_audio.md`](broken_arrow_audio.md) reads
 the FMOD and Resonance usage in detail, against Nuclear Option's no-middleware
 equivalent — same method, same install.

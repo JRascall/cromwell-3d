@@ -18,7 +18,11 @@ public:
     /* Does its destruction stamp a wreck into the terrain? A wreck becomes half
      * cover, so cover, LOS and pathing all pick it up with no special case. */
     bool leavesWreckage() const { return leavesWreckage_; }
-    void setLeavesWreckage(bool leaves) { leavesWreckage_ = leaves; }
+    DestructibleComponent& withLeavesWreckage(bool leaves)
+    {
+        leavesWreckage_ = leaves;
+        return *this;
+    }
 
 private:
     bool leavesWreckage_ = false;

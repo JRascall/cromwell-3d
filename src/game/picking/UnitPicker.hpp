@@ -5,6 +5,8 @@
  */
 #pragma once
 
+#include "cromwell/math/Ray.hpp"
+
 #include "raylib.h"
 
 #include "game/world/World.hpp"
@@ -20,7 +22,7 @@ public:
     explicit UnitPicker(const World& world) : world_(world) {}
 
     /* nullptr when the ray misses every living unit at or below `maxStorey`. */
-    Unit* pick(UnitRoster& roster, const Ray& ray, int maxStorey);
+    Unit* pick(UnitRoster& roster, const cromwell::Ray& ray, int maxStorey);
 
 private:
     /* The box the ray is tested against, as a fraction of a cell. Both numbers
@@ -31,7 +33,7 @@ private:
     const World& world_;
 
     /* set before each test */
-    Ray   pendingRay_{};
+    cromwell::Ray pendingRay_{};
     Cell  pendingCell_{};
     float pendingBase_ = 0.0f;
     float pendingDistance_ = 0.0f;

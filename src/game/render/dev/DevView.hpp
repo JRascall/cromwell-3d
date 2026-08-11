@@ -24,6 +24,7 @@
 #include "cromwell/overlay/RenderEffects.hpp"
 #include "cromwell/overlay/ViewLayers.hpp"
 #include "cromwell/post/AmbientOcclusion.hpp"
+#include "game/render/DrawLayers.hpp"
 #include "game/render/ribbon/RibbonTuning.hpp"
 
 #include <memory>
@@ -286,6 +287,12 @@ private:
     /* Drags the CURRENT window back inside the viewport if it has ended up
      * outside. Applies to the window between Begin and End. */
     void keepOnScreen() const;
+
+    /* THE GAME'S DRAW-LAYER NAMES, so the layers panel can enumerate rather
+     * than hard-code a checkbox each. Held rather than rebuilt per frame: it
+     * owns strings, and ImGui borrows the pointers. See
+     * game/render/DrawLayers.hpp. */
+    cromwell::DrawLayerNames drawLayerNames_ = defaultDrawLayerNames();
 
     bool ready_    = false;
 

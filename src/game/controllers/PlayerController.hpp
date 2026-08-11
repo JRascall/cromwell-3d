@@ -22,6 +22,8 @@
 #include "cromwell/decal/Decal.hpp"
 #include "cromwell/decal/DecalSet.hpp"
 #include "cromwell/input/FrameInput.hpp"
+#include "cromwell/input/HoverTracker.hpp"
+#include "cromwell/input/PointerDrag.hpp"
 #include "cromwell/ribbon/RibbonRenderer.hpp"
 #include "game/lattice/Cell.hpp"
 #include "game/movement/search/PathPoint.hpp"
@@ -41,6 +43,15 @@ namespace game {
 using namespace cromwell;
 
 class CameraPawn;
+}  // namespace game
+
+namespace cromwell {
+class Camera;
+class CameraDirector;
+class Viewport;
+}
+
+namespace game {
 
 class PlayerController {
 public:
@@ -85,10 +96,36 @@ public:
 
     /* ---- possession -----------------------------------------------------
      * The pawn this controller drives. Set once at startup. The controller
-     * needs it back for one thing only - the picking ray starts at the
-     * possessed camera - which is the same reason Unreal's PlayerController
-     * can reach its pawn. */
+     * needs it back because the possessed pawn's camera is the DEFAULT view
+     * camera — the same reason Unreal's PlayerController can reach its pawn. */
     void possess(CameraPawn& pawn) { pawn_ = &pawn; }
+
+    /* ---- the view, READ but not decided ---------------------------------
+     * WHAT THE SCREEN SHOWS IS NOT THIS CLASS'S CALL. A controller interprets
+     * input; it may ask for a cut the way it asks for a move order, but the
+     * choice of camera is presentation state and lives with the
+     * CameraDirector (cromwell/camera/CameraDirector.hpp). It briefly lived
+     * here, and that was wrong: a kill-cam or a scripted cut is not an input
+     * concern, and a controller that owned the view would have made it one.
+     *
+     * The controller still has to AGREE with the view — a pick from a camera
+     * the player is not looking through clicks on things they cannot see —
+     * so it watches the director and builds its rays from current(). */
+    void setDirector(const cromwell::CameraDirector& director) { director_ = &director; }
+
+    /* The camera the screen is showing: the director's choice when one is
+     * wired, the possessed pawn's camera otherwise. What every pick and every
+     * camera-derived answer in this class reads. */
+    cromwell::Camera& viewCamera() const;
+
+    /* WHERE THE VIEW'S PICTURE LANDS ON SCREEN — the whole window normally,
+     * pane 0's rectangle when a splitscreen layout is tiling it. Picks
+     * project through this rectangle (Viewport.hpp: "the screen is not always
+     * the window" — this is that day arriving), and a cursor OUTSIDE it is
+     * pointing at some other pane's picture, which is not this player's
+     * world: it hovers and clicks nothing. Application states it each frame,
+     * because Application owns the layout; nullopt means the whole window. */
+    void setViewArea(std::optional<Rectangle> areaPx) { viewArea_ = areaPx; }
 
     /* ---- continuous camera intent, POLLED BY THE PAWN -------------------
      * Held state, true for as long as the key is down. The controller never
@@ -104,7 +141,7 @@ public:
     float consumeZoomDelta();
 
     /* ---- what the renderer and the HUD read ---------------------------- */
-    std::optional<int>            hovered()    const { return hovered_; }
+    std::optional<int>            hovered()    const { return hover_.target(); }
     const std::vector<PathPoint>& preview()    const { return preview_; }
     const MoveAnimator&           animator()   const { return animator_; }
     const RingSelector&           rings()      const { return rings_; }
@@ -153,6 +190,17 @@ private:
 
     CameraPawn* pawn_ = nullptr;
 
+    /* Where "what is the screen showing" is answered. Borrowed, read-only —
+     * see setDirector. */
+    const cromwell::CameraDirector* director_ = nullptr;
+
+    /* The view's on-screen rectangle, when it is not the whole window. */
+    std::optional<Rectangle> viewArea_;
+
+    /* The viewport every pick projects through: the view camera, at the view
+     * area. Built per use — a Viewport is a value; see Viewport.hpp. */
+    cromwell::Viewport viewViewport() const;
+
     /* Held camera intent, rebuilt from FrameInput every frame. */
     Vector2 panInput_{};
     Vector2 orbitDelta_{};
@@ -163,13 +211,23 @@ private:
     RingSelector rings_;
     MoveAnimator animator_;
 
-    std::optional<int>     hovered_;
+    /* WHICH CELL THE CURSOR IS OVER, held by the engine's tracker rather than
+     * as a bare optional. It is the same value it always was — `hovered()` still
+     * hands one back — but a seam flicker no longer reads as an exit and an
+     * enter, and a tooltip that wants "held still for 400 ms" now has somewhere
+     * to ask. See cromwell/input/HoverTracker.hpp. */
+    HoverTracker<int>      hover_;
+
     std::vector<PathPoint> preview_;
     std::vector<int>       route_;
-    Vector2                pressedAt_{};
+
+    /* Click versus drag for the world pointer. A click is what orders a move or
+     * selects a unit; the drag half is unused here so far and is what a marquee
+     * selection would read. */
+    PointerDrag            click_;
 
     /* What the cursor is over, as geometry rather than as a tile — see
-     * SurfacePicker for why that is a separate question from hovered_. */
+     * SurfacePicker for why that is a separate question from hover_. */
     std::optional<SurfaceHit> cursorSurface_;
 
     /* The decal tool's armed state and its live brush, mirrored from the panel

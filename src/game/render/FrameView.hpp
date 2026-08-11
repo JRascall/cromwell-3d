@@ -12,7 +12,9 @@
  *
  * POINTERS FOR THE BIG THINGS, VALUES FOR THE SMALL ONES. The world and the
  * path preview are borrowed for the duration of the call and outlive it; the
- * toggles and the hovered index are cheaper to copy than to indirect.
+ * hovered index and the per-frame flags are cheaper to copy than to indirect.
+ * `settings` is borrowed for a third reason — it is the one thing here the
+ * renderer writes back to. See the note on the field.
  *
  * PUBLIC FIELDS, deliberately. This is a one-shot data carrier: no invariant
  * spans its fields, so no setter could validate anything; it is filled by one
@@ -52,8 +54,25 @@ class RingSelector;
  * every one of them is written by input and read by drawing, and a set that
  * moves as a unit should be named as one. */
 struct ViewSettings {
-    /* Which passes are submitted. */
-    ViewLayers layers;
+    /* NO ViewLayers HERE ANY MORE. What the player's camera draws lives on the
+     * player's Camera — FrameView::camera below — exactly where every other
+     * camera keeps its own. This struct held a second copy for the main view
+     * only, which meant the one camera the player actually looks through was
+     * configured in a different place from all the others; see
+     * cromwell/camera/Camera.hpp for the one-type argument. */
+
+    /* The minimap plate on the HUD.
+     *
+     * HERE RATHER THAN IN ViewLayers, where it used to be and did not belong: a
+     * layer says what a CAMERA draws, and whether a rectangle is composited over
+     * the finished frame is not a property of any camera. Putting it there also
+     * meant every second camera carried a nonsense "does this camera draw a
+     * minimap" switch that the presets had to remember to turn off.
+     *
+     * Gates the DISPLAY only, not the camera behind it: hiding the plate to look
+     * at the scene should not stop it refreshing, or it would be a frame stale
+     * every time it came back. Stopping the render is the camera's schedule. */
+    bool minimap = true;
 
     /* Which lighting TERMS contribute, as opposed to which passes run. */
     RenderEffects effects;
@@ -119,7 +138,17 @@ struct FrameView {
 
     const GameState* state = nullptr;
 
-    Camera3D camera{};
+    /* THE PLAYER'S CAMERA — the same cromwell::Camera type a capture uses, so
+     * the one viewpoint the player actually looks through is not a special
+     * case. It carries the main view's layers; render passes take toRaylib()
+     * at their boundary, exactly as drawCameraScene does for a capture.
+     *
+     * BORROWED AND WRITTEN THROUGH, like `settings` below and for the same
+     * reason: the dev panel's layer checkboxes edit this camera's layers in
+     * place, and a copy here would revert every click within a frame. The
+     * pawn owns it; qualified because raylib's global `Camera` alias would
+     * otherwise make the name ambiguous under the using-directive above. */
+    cromwell::Camera* camera = nullptr;
 
     /* HOW MUCH OF THE WORLD THE CAMERA IS SHOWING — the storey cut and the
      * wall facings the camera angle removes, already decided.
@@ -155,7 +184,25 @@ struct FrameView {
      * and the cutaway — both of which are the controller's. */
     RibbonPassSettings ribbon;
 
-    ViewSettings settings;
+    /* BORROWED, NOT COPIED, and it is the one field here that is written to.
+     *
+     * Everything else in this struct travels one way: Application answers a
+     * question and the renderer reads the answer. The view settings travel BOTH
+     * ways, because the dev panel edits them in place — a layer checkbox, a
+     * lighting term, a ribbon dial — and the panel is drawn by the renderer.
+     *
+     * A value here made those edits disappear. They landed on the renderer's
+     * copy, which `render()` overwrites from a fresh FrameView at the top of the
+     * next frame, so every layer toggle and every effects checkbox reverted
+     * within one frame of being clicked and the panel looked broken. The
+     * settings that DID stick were the ones whose home is the renderer — the
+     * sun, the SSAO tuning, the exposure — which is exactly the tell.
+     *
+     * So it is a pointer to Application's live ViewSettings, the same borrowing
+     * `state` and `preview` do above, and there is now one copy of the answer
+     * rather than two that drift. Non-const because the panel writes through it;
+     * Application still owns it and the keyboard path still writes it directly. */
+    ViewSettings* settings = nullptr;
 
     SteamStatus steam;
 

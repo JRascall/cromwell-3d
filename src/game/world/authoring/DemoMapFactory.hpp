@@ -45,6 +45,10 @@ private:
     static void makeStructureDestructible(World& world);
 
     static void setCrate(MapAuthor& author, int x, int y, int storey);
+
+    /* Solid mass under an elevated flight, from the cell below it down to
+     * `downToZ` — see the definition for why the caller names that floor. */
+    static void packBelow(World& world, int x, int y, int fromZ, int downToZ);
 };
 
 }  // namespace game

@@ -1,7 +1,8 @@
 #include "game/picking/SurfacePicker.hpp"
 
-#include "game/query/BlockedMass.hpp"
-#include "game/query/Terrain.hpp"
+#include "cromwell/math/RaylibInterop.hpp"
+
+#include "game/picking/WorldTrace.hpp"
 
 #include <cmath>
 
@@ -9,130 +10,62 @@ namespace game {
 
 namespace {
 
-/* Whether a face is something a decal can be stuck to.
+/* WHAT A DECAL MAY STICK TO, taken from the project's layer table rather than
+ * restated here. The rule that windows are excluded — a mark inside a 6%-opaque
+ * pane is a smear hanging in the opening, and pbr.fs.glsl refuses decals on
+ * blended surfaces anyway — now lives in defaultLayerMatrix() with every other
+ * response, where it can be read beside the ones it has to be consistent with.
  *
- * WINDOWS ARE EXCLUDED, and not as an afterthought: pbr.fs.glsl refuses decals
- * on blended surfaces (a mark inside a 6%-opaque pane is a smear hanging in the
- * opening, not a mark on the glass), so a placement that lands on one would
- * simply produce nothing. Failing to pick is a far better answer than picking
- * somewhere the decal cannot appear. */
-bool facePaintable(const Edge& edge)
+ * Built once. It is configuration, and rebuilding the table per pick would put a
+ * few hundred bytes of setup in front of every frame's cursor. */
+const cromwell::TraceFilter& paintFilter()
 {
-    return edge.cover != Cover::None && !edge.window;
+    static const cromwell::TraceFilter filter =
+        defaultLayerMatrix().filterFor(layer::kPaint);
+    return filter;
 }
 
 }  // namespace
 
-std::optional<SurfaceHit> SurfacePicker::pick(const Ray& ray, int maxStorey) const
+std::optional<SurfaceHit> SurfacePicker::pick(const cromwell::Ray& ray, int maxStorey) const
 {
-    const Lattice& lattice = world_.lattice();
-    const Terrain terrain(world_);
-    const BlockedMass mass(world_);
+    /* THE FIXED-STEP MARCH IS GONE, and with it the reason this file used to
+     * carry a kStep constant an order of magnitude finer than TilePicker's. That
+     * step existed because sampling can walk past a 9 cm wall, and the answer was
+     * always to sample harder — fourteen thousand times over a 140 m ray — which
+     * made it slower without ever making it exact.
+     *
+     * The trace visits the cells the ray genuinely crosses and solves each
+     * contact in closed form. There is no step, so there is nothing to tune and
+     * nothing to miss. See game/picking/WorldTrace.hpp. */
+    WorldTrace trace(world_);
 
-    float previousX = ray.position.x;
-    float previousH = ray.position.y;
-    float previousY = ray.position.z;
+    WorldTrace::Params params;
+    params.start = ray.origin;
+    params.direction = ray.direction;
+    params.maxDistance = kMaxDistance;
+    params.filter = paintFilter();
+    params.maxStorey = maxStorey;
 
-    int previousCellX = static_cast<int>(std::floor(previousX));
-    int previousCellY = static_cast<int>(std::floor(previousY));
+    const std::optional<cromwell::TraceHit> found = trace.single(params);
+    if (!found) return std::nullopt;
 
-    for (float t = kStep; t < kMaxDistance; t += kStep) {
-        const float px = ray.position.x + ray.direction.x * t;
-        const float ph = ray.position.y + ray.direction.y * t;
-        const float py = ray.position.z + ray.direction.z * t;
+    SurfaceHit hit;
+    hit.point = cromwell::toRaylib(found->point);
+    hit.normal = cromwell::toRaylib(found->normal);
+    hit.cell = Cell{ found->cellX, found->cellY, found->cellZ };
 
-        const int x = static_cast<int>(std::floor(px));
-        const int y = static_cast<int>(std::floor(py));
+    /* Vertical means "a wall face", which is a question about the normal rather
+     * than about which layer answered — a ramp steep enough to be a wall would
+     * want the shallow projection too. Half is the 45-degree line, which is also
+     * where the tile data stops calling something a ramp (see Constants.hpp). */
+    hit.vertical = std::abs(found->normal.y) < 0.5f;
 
-        /* The lattice's y is the world's z; height is its own axis. */
-        const int z = lattice.cellOfHeight(ph);
-
-        if (lattice.isValid(x, y, z) && Lattice::storeyOfZ(z) <= maxStorey) {
-
-            /* ---- 1. a wall, found by the boundary the step just crossed -----
-             * Checked BEFORE the floor. A ray coming down at a shallow angle
-             * crosses the wall plane and the floor plane within a step or two
-             * of each other, and the wall is the nearer of the two — testing
-             * the floor first would put a poster meant for the wall on the
-             * pavement in front of it. */
-            if (x != previousCellX && lattice.inBounds(previousCellX, previousCellY)) {
-                const bool eastward = (x > previousCellX);
-                const Dir  d = eastward ? Dir::East : Dir::West;
-
-                if (facePaintable(world_.effectiveEdge(previousCellX, previousCellY, z, d))) {
-                    SurfaceHit hit;
-                    /* The plane is the boundary between the two tiles, which is
-                     * the larger of the two x indices either way. */
-                    const float plane = static_cast<float>(eastward ? x : previousCellX);
-                    hit.normal   = Vector3{ eastward ? -1.0f : 1.0f, 0.0f, 0.0f };
-                    hit.point    = Vector3{ plane + hit.normal.x * kWallHalfThickness, ph, py };
-                    hit.cell     = Cell{ previousCellX, previousCellY, z };
-                    hit.vertical = true;
-                    return hit;
-                }
-            }
-            if (y != previousCellY && lattice.inBounds(previousCellX, previousCellY)) {
-                const bool northward = (y > previousCellY);
-                const Dir  d = northward ? Dir::North : Dir::South;
-
-                if (facePaintable(world_.effectiveEdge(previousCellX, previousCellY, z, d))) {
-                    SurfaceHit hit;
-                    const float plane = static_cast<float>(northward ? y : previousCellY);
-                    hit.normal   = Vector3{ 0.0f, 0.0f, northward ? -1.0f : 1.0f };
-                    hit.point    = Vector3{ px, ph, plane + hit.normal.z * kWallHalfThickness };
-                    hit.cell     = Cell{ previousCellX, previousCellY, z };
-                    hit.vertical = true;
-                    return hit;
-                }
-            }
-
-            /* ---- 2. a floor or the top of a solid mass ---------------------
-             * Top-down so the highest surface in the column wins, which is what
-             * makes a roof pick as a roof rather than as the floor under it. */
-            for (int probe = lattice.depth() - 1; probe >= 0; probe--) {
-                if (Lattice::storeyOfZ(probe) > maxStorey) continue;
-                const Tile& tile = world_.at(lattice.index(x, y, probe));
-
-                if (tile.blocked) {
-                    const std::optional<float> top = mass.topHeight(x, y, probe);
-                    if (top && ph <= *top && ph >= Lattice::cellBaseHeight(probe) - 0.05f) {
-                        SurfaceHit hit;
-                        hit.normal = Vector3{ 0.0f, 1.0f, 0.0f };
-                        hit.point  = Vector3{ px, *top, py };
-                        hit.cell   = Cell{ x, y, probe };
-                        return hit;
-                    }
-                    continue;
-                }
-                if (!tile.hasFloor && !tile.isRamp()) continue;
-
-                /* CROSSING, not "below" — the same test TilePicker documents.
-                 * Standing outside a building the ray spends most of its length
-                 * beneath the upper floor, and a plain `ph <= surface` would
-                 * pick that floor straight through the wall. */
-                const float surface = terrain.surfaceHeightAt(x, y, probe, px, py);
-                const float previousSurface =
-                    terrain.surfaceHeightAt(x, y, probe, previousX, previousY);
-
-                if (previousH > previousSurface && ph <= surface) {
-                    SurfaceHit hit;
-                    hit.normal = Vector3{ 0.0f, 1.0f, 0.0f };
-                    hit.point  = Vector3{ px, surface, py };
-                    hit.cell   = Cell{ x, y, probe };
-                    return hit;
-                }
-            }
-        }
-
-        if (ph < -3.0f) break;
-
-        previousX = px;
-        previousH = ph;
-        previousY = py;
-        previousCellX = x;
-        previousCellY = y;
-    }
-    return std::nullopt;
+    /* The point comes back ON the surface, which is where the trace put it; the
+     * old march reported the wall plane and then pushed out by half a wall's
+     * thickness by hand. The slab the trace tests already has that thickness, so
+     * the contact is on the visible face by construction. */
+    return hit;
 }
 
 }  // namespace game

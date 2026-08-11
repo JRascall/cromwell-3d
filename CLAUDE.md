@@ -127,6 +127,55 @@ trusting it. See the header comment in CMakeLists.txt.
 cromwell is intended for future RTS, FPS and third-person projects, so judge
 engine-side features against three genres, not just this tile game.
 
+## API style: chain where chaining is honest
+
+**Configuration setters return `*this` so calls chain.** `EntityProps` is the
+model:
+
+```cpp
+auto props = EntityProps()
+    .withLocation({ 4.0f, 0.0f, 9.0f })
+    .withRotation(facing)
+    .withThinkInterval(0.25f)
+    .withName("sniper");
+```
+
+Prefer this over a default-construct-then-assign block wherever a class is
+configured before use. It reads as one expression, it survives a class gaining
+private state (an aggregate with designated initialisers does not), and every
+setter is still a real function with a place to validate — `withThinkInterval`
+rejects a non-positive interval, which no `= 0.0f` ever could.
+
+**Name them `withX`** for "set and hand the object back". Reserve `setX` for a
+void setter on a live object that is not part of a configuration chain.
+
+Where else it fits: builders and specs, painters and draw-list appenders,
+query objects that accumulate filters, and anything with three or more optional
+knobs. **Vec2, Vec3 and Quat already chain their mutating operators** — keep
+that when adding to them.
+
+### When not to chain
+
+- **A one-shot data carrier stays an aggregate.** `HttpRequest`, `FrameView`,
+  the UI `*Spec` structs: public fields, filled by one caller, read by one
+  callee, no invariant spanning them. Designated initialisers are already the
+  clearest thing there, and a fluent wrapper would be ceremony over a bag of
+  values. The reasoning is written out in HttpClient.hpp — read it before
+  converting one.
+- **When the method has a return value worth having.** Never throw away a
+  result to make a chain: a function that can fail, or that computes something,
+  returns that, not `*this`.
+- **In a hot loop.** Chaining is a cold-code readability tool. It is free when
+  inlined, but if you are reaching for it per-cell or per-agent, the question
+  is why an object is being reconfigured in there at all.
+- **When the chain hides an ordering dependency.** If `.withA()` must precede
+  `.withB()`, the chain reads as though it does not. Either make the order not
+  matter, or say so in the header.
+
+Return `*this` by non-const reference and mark nothing `[[nodiscard]]` on the
+chaining setters — a caller mutating in place and ignoring the return is a
+legitimate second way to use them.
+
 ## Performance discipline for new code
 
 Consider this on every non-trivial addition. Not as a final polish pass — the

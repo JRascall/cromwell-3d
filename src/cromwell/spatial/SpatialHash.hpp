@@ -109,6 +109,28 @@ public:
     /* The same, for an axis-aligned box. Inclusive on both bounds. */
     void queryBox(Vec3 min, Vec3 max, std::vector<int>& out) const;
 
+    /* Ids within `radius` of the SEGMENT from `start` to `end`. The broadphase
+     * for a sweep against moving bodies: pass the trace's line and the sum of
+     * the swept shape's and the bodies' bounding radii, and what comes back is
+     * every body the sweep could possibly touch. The caller then runs the exact
+     * swept test on those, which is the expensive part — cull cheaply, test
+     * expensively, per CLAUDE.md.
+     *
+     * WHY IT IS HERE AND NOT A DDA OVER THE HASH. Candidates come from the
+     * cells covering the segment's bounding box, which for a long diagonal is
+     * looser than walking the line would be. Deliberate: the hash's cells are
+     * sized for neighbourhood queries and are large — a few cells across for a
+     * typical trace — so the loose box costs a handful of extra chain walks,
+     * while a DDA over a hash with collision keys costs a branch per cell and a
+     * second traversal to maintain. If a profile ever shows this dominating,
+     * the fix is a second index sized for traces, not a cleverer walk of this
+     * one.
+     *
+     * Exact against the segment, not the box: nothing outside the capsule around
+     * the line is returned. `out` is CLEARED and refilled, so the same vector
+     * can be reused every frame and the query never allocates. */
+    void querySegment(Vec3 start, Vec3 end, float radius, std::vector<int>& out) const;
+
     int  size() const { return static_cast<int>(entries_.size()); }
     bool empty() const { return entries_.empty(); }
     float cellSize() const { return cellSize_; }

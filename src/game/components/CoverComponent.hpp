@@ -14,15 +14,25 @@ using namespace cromwell;
 
 class CoverComponent : public Component {
 public:
+    /* ---- fluent setters — see the note in BodyComponent.hpp -------------- */
+
     /* Does standing beside this body grant infantry full cover? XCOM treats a
      * big unit as mobile high cover. */
     bool grantsHullCover() const { return grantsHullCover_; }
-    void setGrantsHullCover(bool grants) { grantsHullCover_ = grants; }
+    CoverComponent& withGrantsHullCover(bool grants)
+    {
+        grantsHullCover_ = grants;
+        return *this;
+    }
 
     /* Should the cover shields be drawn for this body? A hull carries armour,
      * not cover, so shields would misreport it. */
     bool showsCoverShields() const { return showsCoverShields_; }
-    void setShowsCoverShields(bool shows) { showsCoverShields_ = shows; }
+    CoverComponent& withShowsCoverShields(bool shows)
+    {
+        showsCoverShields_ = shows;
+        return *this;
+    }
 
 private:
     bool grantsHullCover_ = false;

@@ -48,6 +48,10 @@ CliOptions CliOptions::parse(int argc, char** argv)
             options.bakeBenchmark = true;
         } else if (!std::strcmp(arg, "--dev-view")) {
             options.forceDevView = true;
+        } else if (!std::strcmp(arg, "--minimap-realtime")) {
+            options.minimapRealtime = true;
+        } else if (!std::strcmp(arg, "--ui-gallery")) {
+            options.forceUiGallery = true;
         } else if (!std::strcmp(arg, "--splash")) {
             options.forceSplash = true;
         } else if (!std::strcmp(arg, "--no-splash")) {

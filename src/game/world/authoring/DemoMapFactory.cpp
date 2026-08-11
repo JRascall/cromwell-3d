@@ -38,6 +38,36 @@ void DemoMapFactory::setCrate(MapAuthor& author, int x, int y, int storey)
     for (Dir d : kAllDirs) author.setWall(x, y, storey, d, Cover::Half, false, false);
 }
 
+/* --- solid spandrel under an elevated flight ----------------------------
+ * A flight's treads are boxes INSIDE the cell that owns it — they stop at
+ * that cell's base rather than reaching for the ground, and they have to:
+ * the tile data is one inclined plane spanning one tile, and how far the art
+ * hangs below it is not something the plane says. So a run that climbs three
+ * storeys leaves open sky under its upper flights, which is what you can see
+ * through today.
+ *
+ * The fix is MAP DATA, not a renderer rule. Real masonry stairs stand on a
+ * solid spandrel, so the demo map authors one: blocked cells from the cell
+ * under the flight down to whatever that flight stands on. A map that wants
+ * an open-sided steel stair simply does not call this, and nothing in the
+ * ramp system had to learn about undersides.
+ *
+ * `fromZ` is the cell owning the flight (the z setRamp handed back, so a
+ * rejected ramp's -1 fills nothing); `downToZ` is the first cell to fill.
+ * The caller names that floor because only the caller knows what the run
+ * stands on — the ground for an external run, the storey slab for a flight
+ * inside the building, and no scan of the column can tell those apart.
+ *
+ * The mass is left INDESTRUCTIBLE, like the containers and the plinth: it is
+ * masonry, and the flights above it are held up by the flight behind them
+ * (RampSupport chains by height, never downwards), so making it blowable
+ * would produce a hole under a staircase that still stood. */
+void DemoMapFactory::packBelow(World& world, int x, int y, int fromZ, int downToZ)
+{
+    for (int z = downToZ; z < fromZ; z++)
+        if (Tile* tile = world.tryAt(x, y, z)) tile->blocked = true;
+}
+
 /* --- ground level: open field ------------------------------------------ */
 void DemoMapFactory::buildGround(MapAuthor& author, const World& world)
 {
@@ -105,8 +135,9 @@ void DemoMapFactory::buildStaircaseA(MapAuthor& author)
 {
     for (int k = 0; k < 2; k++) {
         const int sx = 5 + k;
-        author.setRamp(sx, 13, Dir::North, 0.0f, 1.0f);
-        author.setRamp(sx, 14, Dir::North, 1.0f, 1.0f);
+        author.setRamp(sx, 13, Dir::North, 0.0f, 1.0f);  /* rests on the ground */
+        const int upperZ = author.setRamp(sx, 14, Dir::North, 1.0f, 1.0f);
+        packBelow(author.world(), sx, 14, upperZ, 0);    /* solid down to the ground */
         author.clearFloorAt(sx, 13, kStoreyHeight);      /* stairwell openings */
         author.clearFloorAt(sx, 14, kStoreyHeight);
     }
@@ -117,18 +148,36 @@ void DemoMapFactory::buildRoofAndStaircaseB(MapAuthor& author)
 {
     for (int y = 16; y <= kBY1; y++)
         for (int x = kBX0; x <= kBX1; x++) author.setFloorAt(x, y, 2.0f * kStoreyHeight);
-    author.setRamp(10, 14, Dir::North, 2.0f, 1.0f);
-    author.setRamp(10, 15, Dir::North, 3.0f, 1.0f);
+    author.setRamp(10, 14, Dir::North, 2.0f, 1.0f);      /* rests on the storey-1 slab */
+    const int topZ = author.setRamp(10, 15, Dir::North, 3.0f, 1.0f);
+
+    /* This flight is INSIDE the building, so it is packed down to the storey
+     * slab it stands on and no further — filling to the ground would put a
+     * pillar through the room below, which is not where the gap was. */
+    packBelow(author.world(), 10, 15, topZ, Lattice::storeyBaseZ(1));
 }
 
 /* --- staircase C: a long EXTERNAL 4-tile run from the ground to the roof.
- * The upper flights pass OVER walkable ground (multi-surface columns). */
+ * Every flight above the first is packed solid to the ground, so the run
+ * reads as one masonry stair rather than three steps hanging in the air.
+ *
+ * That does cost this run its second job — it used to demonstrate multi-
+ * surface columns by passing over walkable ground. The south balcony still
+ * does (open ground under an overhanging storey-1 floor), so the case is
+ * still on the map; it just is not under a staircase, where a hole in the
+ * masonry is what it actually looked like. */
 void DemoMapFactory::buildStaircaseC(MapAuthor& author)
 {
-    author.setRamp(15, 17, Dir::West, 0.0f, 1.0f);
-    author.setRamp(14, 17, Dir::West, 1.0f, 1.0f);
-    author.setRamp(13, 17, Dir::West, 2.0f, 1.0f);
-    author.setRamp(12, 17, Dir::West, 3.0f, 1.0f);
+    /* one flight, and the mass that carries it down to the ground */
+    const auto flight = [&author](int x, float baseHeight) {
+        const int z = author.setRamp(x, 17, Dir::West, baseHeight, 1.0f);
+        packBelow(author.world(), x, 17, z, 0);
+    };
+
+    author.setRamp(15, 17, Dir::West, 0.0f, 1.0f);       /* foot: on the ground already */
+    flight(14, 1.0f);
+    flight(13, 2.0f);
+    flight(12, 3.0f);
 }
 
 /* --- ladders (edge data; the landing level is DERIVED) + portals -------- */

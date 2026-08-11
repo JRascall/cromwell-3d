@@ -26,8 +26,14 @@ enum class VisualKind {
 
 class PresentationComponent : public Component {
 public:
+    /* ---- fluent setters — see the note in BodyComponent.hpp -------------- */
+
     VisualKind visual() const { return visual_; }
-    void setVisual(VisualKind visual) { visual_ = visual; }
+    PresentationComponent& withVisual(VisualKind visual)
+    {
+        visual_ = visual;
+        return *this;
+    }
 
     const std::string& displayName() const { return displayName_; }
     const std::string& hudLabel() const { return hudLabel_; }
@@ -36,12 +42,13 @@ public:
     /* Set together: they are three phrasings of one identity, and a body with
      * a new name but a stale HUD label is a bug nobody notices until a
      * screenshot. */
-    void setNames(std::string displayName, std::string hudLabel,
-                  std::string selectionDescription)
+    PresentationComponent& withNames(std::string displayName, std::string hudLabel,
+                                     std::string selectionDescription)
     {
         displayName_          = std::move(displayName);
         hudLabel_             = std::move(hudLabel);
         selectionDescription_ = std::move(selectionDescription);
+        return *this;
     }
 
 private:

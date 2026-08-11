@@ -22,8 +22,10 @@
  */
 #pragma once
 
+#include "cromwell/camera/CameraDirector.hpp"
 #include "cromwell/input/FrameInput.hpp"
 #include "cromwell/input/InputHandler.hpp"
+#include "cromwell/input/PointerFocus.hpp"
 #include "cromwell/steam/SteamAvatar.hpp"
 #include "cromwell/steam/SteamClient.hpp"
 #include "game/controllers/PlayerController.hpp"
@@ -76,13 +78,19 @@ private:
     void updateCutawayStorey();
 
     /* Folds the debug panel's clicks into the same FrameInput the keyboard
-     * produced, and blanks whatever the panel is currently swallowing — a drag
-     * on a slider must not also orbit the camera. */
+     * produced, and blanks whatever a UI surface is currently swallowing — a
+     * drag on a slider must not also orbit the camera, and a click on a HUD
+     * button must not also order a move. Which surfaces those are is decided by
+     * focus_ rather than by a list of ifs here; see PointerFocus. */
     FrameInput arbitrate(FrameInput input);
 
     /* This frame, as the renderer needs to see it. The only place the
-     * controller's state and the view toggles are read together. */
-    FrameView buildFrameView() const;
+     * controller's state and the view toggles are read together.
+     *
+     * NOT const, because the view it builds hands out a non-const pointer to
+     * view_ — the dev panel edits those settings in place and they have to land
+     * on the one that lasts. See FrameView::settings. */
+    FrameView buildFrameView();
 
     CliOptions options_;
     GameState  state_;
@@ -96,9 +104,31 @@ private:
      * and moves itself; nothing here drives it. */
     CameraPawn pawn_;
 
+    /* WHICH CAMERA THE SCREEN SHOWS. Defaults to the pawn's; F5 cuts to the
+     * plan camera and back as the worked example, and anything holding a
+     * Camera can be cut to. Deliberately not the controller's — a controller
+     * interprets input, and a kill-cam or a scripted cut is not input. See
+     * cromwell/camera/CameraDirector.hpp for the argument. */
+    CameraDirector director_;
+
+    /* THE SECOND PLAYER, AS A CAMERA — a rig with no controller, standing in
+     * until a real one exists. It orbits the board slowly so its splitscreen
+     * pane is visibly LIVE rather than a photograph; real multiplayer
+     * replaces the spin with a possessed pawn per player and changes nothing
+     * else, because the pane just mirrors whatever this camera does. See
+     * FrameRenderer::setPaneSource. */
+    OrbitCamera playerTwoRig_;
+
     /* Which screen the game is on. The renderer reads it to decide whether
      * there is a world to draw at all. */
     UIStateMachine ui_;
+
+    /* WHO OWNS THE CURSOR AND THE KEYBOARD. Rebuilt every frame from whatever
+     * is on screen — the dev panel, the widget kit, the embedded browser — and
+     * asked before any input is treated as the world's. It lives here rather
+     * than in the renderer because it is the frame loop's arbitration, and this
+     * class is the one whose entire job is order. */
+    PointerFocus focus_;
 
     /* A MINIMUM, NOT A DURATION, and the distinction is the whole point of it.
      *
@@ -172,7 +202,9 @@ private:
     InputHandler input_;
 
     /* What the player and the dev panel have switched on. Written by
-     * applyInput, read by the renderer through buildFrameView. */
+     * applyInput, and written directly by the dev panel — the renderer is
+     * handed a pointer to this rather than a copy of it, precisely so a
+     * checkbox in the panel and a keypress in the game edit the same bytes. */
     ViewSettings view_;
 
     /* The Steam session. UNGUARDED BY ANY #if, unlike the web runtime above:

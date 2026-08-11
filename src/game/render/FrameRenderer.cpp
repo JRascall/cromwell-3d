@@ -1,5 +1,7 @@
 #include "game/render/FrameRenderer.hpp"
 
+#include "game/render/DrawLayers.hpp"
+
 #include "raymath.h"
 #include "rlgl.h"
 #include "rlImGui.h"
@@ -61,7 +63,15 @@ bool FrameRenderer::initialise(int width, int height, const CliOptions& options,
     glow_->loadShader();
     glow_->resize(width, height);
 
-    sceneDepth_ = std::make_unique<DepthTarget>(width, height);
+    /* The main view's screen-space set — the same ScenePassBuffers a capture
+     * owns, at the window's resolution. Only the depth prepass inside it is
+     * hard-required; occlusion and decals degrade per part, exactly as they
+     * do for a capture. */
+    if (!mainBuffers_.create(width, height)) {
+        std::fprintf(stderr, "FATAL: no depth prepass target - "
+                             "screen-space passes cannot run\n");
+        return false;
+    }
 
     /* Custom depth/stencil. Window resolution rather than supersampled: its
      * consumers are screen-space effects and none of them wants subpixel
@@ -104,35 +114,25 @@ bool FrameRenderer::initialise(int width, int height, const CliOptions& options,
         pbr_.setGlassTransmission(transmission);
     }
 
-    /* SSAO reads the normals the prepass writes, so without that shader there
-     * is nothing for it to sample and it stays unavailable rather than
-     * sampling a colour plane full of whatever the last pass left.
-     *
-     * DECALS HAVE THE SAME DEPENDENCY and for a stronger reason: the projector
-     * pass unprojects the prepass depth to find its receiving surface and reads
-     * the prepass normal to reject the ones facing the wrong way. With no
-     * prepass there is nothing to project onto, so the buffer is never
-     * allocated and DecalBuffer hands out its "no decal" stand-in for the rest
-     * of the run. */
+    /* SSAO and the decals both read what the PREPASS writes — normals to
+     * orient the sampling hemisphere, depth to unproject onto a receiving
+     * surface — so both passes are gated on its shader loading. The BUFFERS
+     * live in mainBuffers_ and degrade per part on their own; what is gated
+     * here is the passes that fill them. */
     if (prepass_.load()) {
-        ao_.load();
-        ao_.resize(width, height);
-
         if (decalRenderer_.load()) {
-            decalBuffer_.resize(width, height);
-
             /* Scaffolding, and the only thing that puts a decal on the board
              * today — see DecalDemo.hpp. Inside the decalRenderer_ guard so a
              * run with no decal shader does not build textures nothing will
-             * ever sample. */
-            /* Materials always, instances only on request — the dev panel's
-             * decal tool has to have something to place even when the scatter
-             * is off. See DecalDemo.hpp. */
+             * ever sample. Materials always, instances only on request — the
+             * dev panel's decal tool has to have something to place even when
+             * the scatter is off. */
             if (options.decalDemo) populateDemoDecals(decals_, state.world());
             else                    registerDemoMaterials(decals_);
         }
     }
-    ao_.setEnabled(options.ambientOcclusion);
+    mainBuffers_.occlusion().setEnabled(options.ambientOcclusion);
+    minimapRealtime_ = options.minimapRealtime;
 
     /* After the material library, because every model registers its own
      * materials there as it loads. */
@@ -286,6 +286,461 @@ void FrameRenderer::worldBounds(const GameState& state, Vector3& minimum,
                        static_cast<float>(lattice.height()) + kMargin };
 }
 
+/* ------------------------------------------------------ the second cameras
+ *
+ * WHAT ADDING A CAMERA COSTS, which is the only real measure of whether the
+ * abstraction is right: describe it and hand it over. No target to allocate, no
+ * lambda forwarding a camera's own settings back to the renderer, no profiler
+ * name to keep distinct, no phase to hand-pick so it does not redraw on the
+ * same frame as its neighbours. CameraSet does all four.
+ *
+ * These two are a plan and a view of the same board, which between them
+ * exercise everything a caller can vary — projection, layers, whether the
+ * camera gets its own screen-space buffers — so the third one somebody adds has
+ * a worked example of each. */
+void FrameRenderer::captureOverview(float deltaSeconds)
+{
+    if (view_.state == nullptr) return;
+
+    /* Framed to the LONGER side, so a rectangular map fits whole in a square
+     * picture rather than being cropped along its long axis. */
+    Vector3 minimum;
+    Vector3 maximum;
+    worldBounds(*view_.state, minimum, maximum);
+    const float span = std::max(maximum.x - minimum.x, maximum.z - minimum.z);
+    const Vec3 centre{ (minimum.x + maximum.x) * 0.5f, 0.0f, (minimum.z + maximum.z) * 0.5f };
+
+    if (cameras_.empty()) {
+        /* A PLAN. Orthographic, so parallel walls stay parallel and two units a
+         * tile apart are a tile apart wherever they stand — the thing that makes
+         * a map readable as a map.
+         *
+         * FIVE TIMES A SECOND. Nothing at board scale moves fast enough to need
+         * more, and the gap between that and every-frame is the gap between a
+         * second camera that is nearly free and one that halves the frame rate.
+         * The set spreads their phases, so the two never land together.
+         * --minimap-realtime overrides it to every-frame, so a test can rule
+         * the schedule out; the interval stays the shipped answer. */
+        CameraDesc plan;
+        plan.name = "plan view";
+        plan.width = plan.height = 384;
+        plan.schedule = minimapRealtime_ ? CaptureSchedule::everyFrame()
+                                         : CaptureSchedule::interval(0.2f);
+        plan.camera = Camera::orthographic(span);
+        plan.camera.overlooking(centre, span, maximum.y + 20.0f).withLayers(planView());
+        planView_ = cameras_.add(std::move(plan));
+
+        /* THE SAME SUBJECT, EVERYTHING ELSE DIFFERENT — which is the point of
+         * having both. Perspective rather than orthographic, the overlays left
+         * on, and its OWN depth prepass, occlusion and decal buffers so that its
+         * ssao and decals features left ON — which is all it takes: a camera
+         * that asks for a screen-space feature is given the depth prepass it
+         * needs, so the map-versus-security-camera distinction is just whether
+         * the preset kept those two switches. */
+        CameraDesc feed;
+        feed.name = "camera feed";
+        feed.width = feed.height = 384;
+        feed.schedule = CaptureSchedule::interval(0.2f);
+        feed.camera = Camera::perspective(50.0f);
+        feed.camera.overlooking(centre, span).withLayers(worldOnly());
+        feed.camera.layers().show(drawLayer::kOverlays);
+        cctvView_ = cameras_.add(std::move(feed));
+    }
+
+    /* Re-aimed every frame, because the board can be rebuilt under them. Moving
+     * a camera afterwards is what the handle is for — and it is the same method
+     * that placed it, on the same type the main view uses. */
+    if (Camera* plan = cameras_.find(planView_)) plan->overlooking(centre, span, maximum.y + 20.0f);
+    if (Camera* feed = cameras_.find(cctvView_)) feed->overlooking(centre, span);
+
+    /* ONE DRAW FUNCTION FOR EVERY CAMERA, however many there are. The camera
+     * arrives as an argument and carries its own layers and buffers, so nothing
+     * has to be threaded in per camera. */
+    const CutawayView cutaway = view_.cutaway;
+    cameras_.renderAll(deltaSeconds, [this, cutaway](Camera& camera, Camera::ScenePhase phase,
+                                                     float width, float height) {
+        drawCameraScene(camera, phase, width, height, cutaway);
+    });
+}
+
+void FrameRenderer::drawCameraScene(Camera& camera, Camera::ScenePhase phase, float width,
+                                    float height, const CutawayView& cutaway)
+{
+    /* The camera unpacked and handed to the ONE scene function. layers()
+     * FIRST, deliberately: the non-const call settles the screen-space
+     * buffers against the layers — which can allocate or free the very object
+     * buffers() then hands out — so the fetch order is the correctness. */
+    const ViewLayers& requested = camera.layers();
+    drawSceneForView(camera.toRaylib(), requested, camera.buffers(), phase, width, height,
+                     cutaway);
+}
+
+void FrameRenderer::drawSceneForView(const Camera3D& rig, const ViewLayers& requested,
+                                     ScenePassBuffers* buffers, Camera::ScenePhase phase,
+                                     float width, float height, const CutawayView& cutaway)
+{
+    /* THE VIEW'S LAYERS, MADE ACTIVE FOR THE DURATION OF THE PASS.
+     *
+     * Every layer test in this file reads layers(), and there are a couple of
+     * dozen of them. Threading a second ViewLayers through drawGeometryLit and
+     * everything under it would mean touching all of them and would leave the
+     * next one written to be found later; repointing the one slot they already
+     * read means any view's flags are honoured by passes that were never told
+     * more than one view exists.
+     *
+     * RAII rather than a restore at the end, because this function can return
+     * early and leaving the main view drawing with the minimap's layers is a
+     * whole-frame corruption for a one-line mistake. */
+    class ScopedLayers {
+    public:
+        ScopedLayers(const ViewLayers*& slot, const ViewLayers& replacement)
+            : slot_(slot), saved_(slot) { slot_ = &replacement; }
+        ~ScopedLayers() { slot_ = saved_; }
+        ScopedLayers(const ScopedLayers&) = delete;
+        ScopedLayers& operator=(const ScopedLayers&) = delete;
+    private:
+        const ViewLayers*& slot_;
+        const ViewLayers*  saved_;
+    };
+
+    ViewLayers effective = requested;
+
+    /* SCREEN-SPACE EFFECTS NEED THIS VIEW'S OWN BUFFERS, and whether they
+     * exist is what decides these two flags — not some rule that a capture
+     * cannot have them.
+     *
+     * Occlusion and the DBuffer are both reconstructed from a depth prepass:
+     * SSAO orients its sampling hemisphere from the prepass normals, and the
+     * DBuffer is written by unprojecting the prepass depth. Rendered from a
+     * different camera at a different size, those are not degraded, they are
+     * WRONG — occlusion smeared in the shape of a view nobody is looking
+     * through. So a capture WITHOUT its own set gets them switched off; one
+     * WITH a set runs the real passes below and gets them properly.
+     *
+     * That is the minimap/CCTV split, and it is per capture. See
+     * Camera::hasScreenSpaceEffects. */
+    if (buffers == nullptr || !buffers->valid()) {
+        effective.features.ambientOcclusion = false;
+        effective.features.decals = false;
+    } else {
+        effective.features.ambientOcclusion =
+            effective.features.ambientOcclusion && buffers->occlusionAvailable();
+        effective.features.decals = effective.features.decals && buffers->decalsAvailable();
+    }
+
+    const ScopedLayers scoped(activeLayers_, effective);
+
+    /* ---- over the finished picture, after this camera's tone map ---------
+     *
+     * THE SAME PASSES THE MAIN VIEW DRAWS AFTER ITS RESOLVE, in display
+     * colour — which is the whole point of the phase: a capture, a pane and
+     * the screen are one system, and a layer switch means the same thing on
+     * all of them. The rings fade against a depth texture from THIS camera,
+     * so like the screen-space features they need its own prepass; a camera
+     * without one skips them rather than drawing them wrong. Their GLOW stays
+     * main-view-only for now — bloom needs per-camera blur targets nobody has
+     * asked to pay for — so kRingGlow should stay hidden on capture cameras. */
+    if (phase == Camera::ScenePhase::Display) {
+        if (buffers != nullptr && buffers->valid()
+            && layers().drawing(drawLayer::kMovementRings)) {
+            RibbonPassSettings ribbon = view_.ribbon;
+            ribbon.camera = rig;
+            BeginMode3D(rig);
+            ribbonRenderer_->submit(ribbon, 1.0f, width, height,
+                                    buffers->depth().depthTexture());
+            EndMode3D();
+        }
+        return;
+    }
+
+    /* ---- this camera's own prepass, decals and occlusion -----------------
+     *
+     * THE OFFSCREEN PHASE, and it runs with nothing bound. Each of these opens
+     * a render target of its own, and raylib's BeginTextureMode does not nest —
+     * EndTextureMode binds framebuffer zero, so a target opened inside this
+     * camera's colour buffer would never hand it back and every later draw
+     * would land on the backbuffer. That produced exactly one symptom: a black
+     * minimap. See Camera::ScenePhase. */
+    if (phase == Camera::ScenePhase::Offscreen) {
+        if (buffers == nullptr || !buffers->valid()) return;
+        /* THE SAME THREE PASSES THE MAIN VIEW RUNS, in the same order and for
+         * the same reasons — the prepass first because both of the others are
+         * unprojected from it, decals before occlusion because the DBuffer is a
+         * material write and occlusion is not.
+         *
+         * Sized to the capture's HDR buffer rather than its resolve, so the
+         * occlusion buffer is sampled at the coordinates the lit pass fragments
+         * actually have. */
+        {
+            CW_GPU_ZONE("prepass");
+            DepthTarget::Scope scope(buffers->depth());
+            ClearBackground(BLANK);
+            BeginMode3D(rig);
+
+            /* Blending OFF, for the reason the main prepass documents at
+             * length: this buffer's ALPHA IS ROUGHNESS, not coverage, and
+             * blending into it mixes two surfaces per pixel. */
+            rlDisableColorBlend();
+            drawGeometryPrepass();
+            rlEnableColorBlend();
+
+            EndMode3D();
+        }
+
+        if (effective.features.decals) {
+            CW_GPU_ZONE("decals");
+            decalRenderer_.render(decals_, rig, buffers->decals(),
+                                  buffers->depth().depthTexture(),
+                                  buffers->depth().colourTexture(),
+                                  view_.decalGhost ? &*view_.decalGhost : nullptr);
+        }
+
+        {
+            CW_GPU_ZONE("ssao");
+            buffers->occlusion().setEnabled(effective.features.ambientOcclusion);
+            buffers->occlusion().render(rig, buffers->depth().depthTexture(),
+                                        buffers->depth().colourTexture());
+        }
+        return;
+    }
+
+    /* ---- the lit pass, INSIDE this camera's colour target ---------------- */
+
+    /* THE ENVIRONMENT, SET UP FOR THIS PASS'S SIZE AND CAMERA. Everything here
+     * is overwritten by the main pass immediately afterwards, which is the
+     * ordering the call site depends on. */
+    pbr_.updateEnvironment(sun_, shadows_, rig.position);
+    pbr_.setSceneSize(width, height);
+
+    /* SHADOWS AND REFLECTIONS ARE GENUINELY AVAILABLE, and that is worth
+     * knowing: unlike the two above, both are WORLD-space. The sun's shadow map
+     * is an orthographic projection over the whole board and the probes are
+     * cubemaps parallax-corrected against it, so they are as valid from this
+     * camera as from any other. Which makes them real per-camera options rather
+     * than ones that only work in the off direction. */
+    const Texture2D white{ rlGetTextureIdDefault(), 1, 1, 1,
+                           PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    const bool shadowed = effective.features.shadows && shadows_.valid();
+
+    /* THIS CAPTURE'S occlusion, not the main view's. AmbientOcclusion::texture()
+     * hands back 1x1 white when it is disabled or absent, which the lit shader
+     * multiplies by and never has to know the effect is missing — so the two
+     * cases need no branch here. */
+    const Texture2D occlusion = (buffers != nullptr && buffers->valid())
+                                    ? buffers->occlusion().texture()
+                                    : white;
+
+    pbr_.setShadowsEnabled(shadowed);
+    pbr_.bindFrameTextures(shadowed ? shadows_.depthTexture() : white,
+                           occlusion,
+                           lightmapTexture_, lightIndexTexture_,
+                           shadowed ? shadows_.transmissionTexture() : white);
+
+    pbr_.setDecalsEnabled(effective.features.decals);
+    /* `decals` cannot survive the gate above without buffers existing, but that
+     * correlation lives across a branch merge the analyzer will not carry —
+     * so the dependency is restated here rather than suppressed. */
+    if (buffers != nullptr && effective.features.decals) pbr_.bindDecalBuffer(buffers->decals());
+
+    if (effective.features.reflections && probes_.valid()) pbr_.setEnvironmentProbes(probes_);
+    else                                          pbr_.clearEnvironmentProbes();
+
+    /* THE SKY, BEFORE THE 3D MODE AND INSIDE THE TARGET — the exact ordering
+     * ScenePhase::Main exists to make sayable (see Camera.hpp). Without this a
+     * capture with sky on rendered a world floating in transparency, and a
+     * splitscreen pane is a whole player's view: it needs the sky the main
+     * pass has. */
+    if (layers().features.sky) sky_.draw(sun_, rig, width, height);
+
+    /* The projection lives on the camera and BeginMode3D honours it, so this
+     * one function draws both the orthographic and the perspective capture
+     * without knowing which it is doing. */
+    BeginMode3D(rig);
+    drawGeometryLit(cutaway);
+
+    /* THE PROBE BALLS, and deliberately NOT inside drawGeometryLit: that
+     * function is also what the probe capture draws with, so a ball added
+     * there would be captured into every cubemap — each probe would see the
+     * others as chrome spheres hanging in the room, and then see those
+     * reflections reflected. A debug overlay has no business inside the data
+     * it is there to inspect. Every view shows them under debug view 2, the
+     * main one included — one scene function, one rule. */
+    if (view_.settings->debugView == 2)
+        probeSpheres_.draw(probes_, sun_, rig.position, sun_.ambientIntensity());
+
+    /* THE GAME'S ANNOTATIONS, honoured identically for every view — this is
+     * what makes any camera's `show(kOverlays)` real. Same shader scope, same
+     * gate, same pass, whoever is looking. */
+    if (layers().drawing(drawLayer::kOverlays)) {
+        OverlayShader::Scope unlit(overlayShader_);
+        drawOverlays();
+    }
+
+    /* Debug geometry, inside the 3D mode so it depth-tests against this
+     * camera's scene — the same reasoning as the main pass. */
+    if (layers().features.debugDraw) debugRenderer_.draw(DebugDraw::get());
+
+    EndMode3D();
+
+    /* Not here: the movement ribbons. They draw in DISPLAY colour after the
+     * tone map — drawing them in this phase would tone-map them like radiance
+     * and wash them out. They run in ScenePhase::Display above. */
+}
+
+/* --------------------------------------------------------------- the minimap
+ *
+ * THE ORTHOGRAPHIC CAPTURE, ON SCREEN. Everything above it produced a texture;
+ * this is the ten lines that put it in front of the player, and they are
+ * separate from the capture on purpose — where a picture is shown is a HUD
+ * decision, and the camera that made it should not have an opinion about screen
+ * corners.
+ *
+ * DRAWN AFTER THE RESOLVE, so it is composited over the finished frame at its
+ * own exposure rather than being tone-mapped a second time. */
+void FrameRenderer::drawMinimap()
+{
+    if (!view_.settings->minimap) return;
+
+    const Camera* plan = cameras_.find(planView_);
+    if (plan == nullptr || !plan->rendersToTexture()) return;
+    if (!plan->schedule().everCaptured()) return;  /* nothing in it yet */
+
+    CW_PROFILE_ZONE_N("minimap");
+
+    /* Reference pixels times the display scale, the same arrangement the widget
+     * kit uses — a fixed pixel size is a different physical size on every
+     * monitor. See ui/core/UiContext.hpp. */
+    const float scale = GetWindowScaleDPI().y > 0.0f ? GetWindowScaleDPI().y : 1.0f;
+    const float size = 200.0f * scale;
+    const float margin = 16.0f * scale;
+
+    const Rectangle destination{ static_cast<float>(GetScreenWidth()) - size - margin, margin,
+                                 size, size };
+
+    /* A plate behind it, because the capture clears to transparent and a map
+     * with holes in it over a bright floor is unreadable. */
+    DrawRectangleRec(destination, Color{ 0, 0, 0, 160 });
+
+    /* drawTo, NOT DrawTexture: a render texture's rows are stored bottom-up, so
+     * a straight blit shows the board mirrored — and on a roughly symmetrical
+     * map that is invisible until somebody walks north and the marker goes
+     * south. See Camera::drawTo. */
+    plan->drawTo(destination);
+
+    DrawRectangleLinesEx(destination, std::max(1.0f, scale), Color{ 255, 255, 255, 60 });
+}
+
+/* ------------------------------------------------------------- splitscreen
+ *
+ * PANES ARE ORDINARY CAPTURES — same set, same scene pass, same schedule
+ * machinery — which is why this whole feature is three short functions. The
+ * layouts and the cost argument live in cromwell/camera/SplitScreen.hpp. */
+
+void FrameRenderer::syncSplitPanes()
+{
+    const int count = paneCount(split_);
+    const float windowW = static_cast<float>(GetScreenWidth());
+    const float windowH = static_cast<float>(GetScreenHeight());
+
+    /* The stand-in viewpoints: one per corner of the board, the way four
+     * players sit around a table. Real multiplayer replaces these poses with
+     * the other players' cameras; nothing else here would change. */
+    Vector3 minimum, maximum;
+    worldBounds(*view_.state, minimum, maximum);
+    const Vec3 centre{ (minimum.x + maximum.x) * 0.5f, 0.0f,
+                       (minimum.z + maximum.z) * 0.5f };
+    const float span = std::max(maximum.x - minimum.x, maximum.z - minimum.z);
+    constexpr float kCornerX[4] = { 1.0f, -1.0f, -1.0f, 1.0f };
+    constexpr float kCornerZ[4] = { -1.0f, -1.0f, 1.0f, 1.0f };
+
+    for (int i = 0; i < count; ++i) {
+        const Rectangle rect = paneRect(split_, i, windowW, windowH);
+
+        if (panes_[i] == 0) {
+            static const char* kNames[4] = { "pane 1", "pane 2", "pane 3", "pane 4" };
+            CameraDesc pane;
+            pane.name = kNames[i];
+            pane.width = static_cast<int>(rect.width);
+            pane.height = static_cast<int>(rect.height);
+            pane.schedule = CaptureSchedule::everyFrame();
+            pane.camera = Camera::perspective(50.0f);
+            pane.camera
+                .at(centre
+                    + Vec3{ kCornerX[i] * span * 0.9f, span * 0.8f, kCornerZ[i] * span * 0.9f })
+                .lookingAt(centre);
+            pane.camera.withLayers(worldOnly());
+            panes_[i] = cameras_.add(std::move(pane));
+        }
+
+        Camera* pane = cameras_.find(panes_[i]);
+        if (pane == nullptr) continue;
+
+        /* Tracks layout and window changes; a no-op at the same size. */
+        pane->renderingToTexture(static_cast<int>(rect.width), static_cast<int>(rect.height));
+
+        /* THE PANE'S SOURCE, MIRRORED EVERY FRAME — pose, lens, projection,
+         * layers. Pane 0's source is the view camera by definition, so the
+         * director's cuts and the panel's layer switches show up in it
+         * exactly as they would fullscreen; any other pane mirrors whatever
+         * setPaneSource gave it — a second player's rig, a replay camera —
+         * or keeps its corner stand-in when nothing has. Rings included: the
+         * Display phase draws them over the pane's resolve, provided the
+         * source's layers keep a screen-space feature on so the pane has the
+         * depth prepass they fade against. Only the ring GLOW is hidden —
+         * bloom is still a main-view pass; see drawSceneForView. */
+        const Camera* source = (i == 0) ? view_.camera : paneSources_[i];
+        if (source != nullptr) {
+            if (pane->projection() != source->projection())
+                pane->switchTo(source->projection());
+            pane->at(source->position()).lookingAt(source->target(), source->up());
+            pane->setLens(source->lens());
+
+            ViewLayers mirrored = source->layers();
+            mirrored.hide(drawLayer::kRingGlow);
+            pane->withLayers(mirrored);
+        }
+    }
+
+    /* The layout shrank: free the panes past the count. */
+    for (int i = count; i < 4; ++i) {
+        if (panes_[i] != 0) {
+            cameras_.remove(panes_[i]);
+            panes_[i] = 0;
+        }
+    }
+}
+
+void FrameRenderer::releaseSplitPanes()
+{
+    for (CameraId& id : panes_) {
+        if (id != 0) {
+            cameras_.remove(id);
+            id = 0;
+        }
+    }
+}
+
+void FrameRenderer::drawSplitScreen()
+{
+    CW_PROFILE_ZONE_N("split composite");
+
+    const float windowW = static_cast<float>(GetScreenWidth());
+    const float windowH = static_cast<float>(GetScreenHeight());
+    const int count = paneCount(split_);
+
+    for (int i = 0; i < count; ++i) {
+        const Camera* pane = cameras_.find(panes_[i]);
+        if (pane == nullptr || !pane->rendersToTexture()) continue;
+
+        const Rectangle rect = paneRect(split_, i, windowW, windowH);
+        pane->drawTo(rect);
+
+        /* A hairline seam, so two panes of similar scenery read as two panes
+         * rather than one continuous, subtly wrong picture. */
+        DrawRectangleLinesEx(rect, 1.0f, Color{ 0, 0, 0, 180 });
+    }
+}
+
 void FrameRenderer::rebuildRibbons(const GameState& state, const RibbonTuning& tuning)
 {
     ribbonMeshes_->clear();
@@ -332,23 +787,20 @@ void FrameRenderer::rebuildRibbons(const GameState& state, const RibbonTuning& t
 /* The render targets that track the window. */
 void FrameRenderer::resizeForWindow()
 {
-    sceneDepth_->resize(GetScreenWidth(), GetScreenHeight());
+    /* One resize for the whole screen-space set — prepass, occlusion and
+     * DBuffer stay the same size as each other by construction, which used to
+     * be three calls and a comment asking them to agree. */
+    mainBuffers_.resize(GetScreenWidth(), GetScreenHeight());
     glow_->resize(GetScreenWidth(), GetScreenHeight());
     resizeSceneTarget(GetScreenWidth(), GetScreenHeight());
-    /* must track the prepass exactly: SSAO samples it by pixel */
-    ao_.resize(GetScreenWidth(), GetScreenHeight());
-    /* and the DBuffer likewise - it unprojects that depth, so a DBuffer at any
-     * other size would be inventing precision the depth does not have */
-    if (decalRenderer_.valid())
-        decalBuffer_.resize(GetScreenWidth(), GetScreenHeight());
 }
 
 void FrameRenderer::drawGeometry(const CutawayView& cutaway, const Material& material,
                                  bool castersOnly)
 {
-    if (view_.settings.layers.statics) statics_->draw(cutaway, material, castersOnly);
-    if (view_.settings.layers.props)   props_.draw(material);
-    if (!view_.settings.layers.units)  return;
+    if (layers().drawing(drawLayer::kStatics)) statics_->draw(cutaway, material, castersOnly);
+    if (layers().drawing(drawLayer::kProps))   props_.draw(material);
+    if (!layers().drawing(drawLayer::kUnits))  return;
 
     const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
     units_->drawRoster(view_.state->roster(), cutaway.maxStorey, animating, material);
@@ -369,20 +821,20 @@ void FrameRenderer::drawGeometryLit(const CutawayView& cutaway)
     /* The lattice is baked; everything else is not. Props carry no lightmap
      * UVs and units move, so both stay on the shadow map — which is exactly
      * Source 2's split between lightmapped world and mesh entities. */
-    pbr_.setDebugView(view_.settings.debugView);
+    pbr_.setDebugView(view_.settings->debugView);
 
     /* HERE RATHER THAN ONCE PER FRAME, so the probe capture shades with the
      * same terms the scene does — this function is what draws both. Switching
      * the sun off and seeing it survive in the reflections would be a switch
      * that half works, which is worse than one that does not. */
-    pbr_.setLightingSuppress(view_.settings.effects.suppressMask());
-    pbr_.setLightmapEnabled(view_.settings.useBakedSun);
-    if (view_.settings.layers.statics)
+    pbr_.setLightingSuppress(view_.settings->effects.suppressMask());
+    pbr_.setLightmapEnabled(view_.settings->useBakedSun);
+    if (layers().drawing(drawLayer::kStatics))
         statics_->drawLit(cutaway, materials_, pbr_,
-                          /*includeTransparent=*/view_.settings.flatShading());
+                          /*includeTransparent=*/view_.settings->flatShading());
 
     pbr_.setLightmapEnabled(false);
-    if (view_.settings.layers.props) props_.drawLit(materials_, pbr_);
+    if (layers().drawing(drawLayer::kProps)) props_.drawLit(materials_, pbr_);
 
     /* Every body is one material, so its factors go up once rather than per
      * unit; only the albedo tint changes between them, and that travels in the
@@ -393,7 +845,7 @@ void FrameRenderer::drawGeometryLit(const CutawayView& cutaway)
         materials_.transmissionOf(materials_.handleOf(SurfaceKind::Body)));
     const Material& bodyMaterial = materials_.material(SurfaceKind::Body);
 
-    if (view_.settings.layers.units) {
+    if (layers().drawing(drawLayer::kUnits)) {
         const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
         units_->drawRoster(view_.state->roster(), cutaway.maxStorey, animating, bodyMaterial);
 
@@ -420,9 +872,9 @@ void FrameRenderer::drawGeometryLit(const CutawayView& cutaway)
     /* Already drawn solid, in the pass above — but only by the views that
      * replace surface shading. The probe view is an ordinary frame with balls
      * on top, so its glass blends normally. */
-    if (view_.settings.flatShading() || !view_.settings.layers.statics) return;
+    if (view_.settings->flatShading() || !layers().drawing(drawLayer::kStatics)) return;
 
-    pbr_.setLightmapEnabled(view_.settings.useBakedSun);
+    pbr_.setLightmapEnabled(view_.settings->useBakedSun);
 
     /* BLENDING ON EXPLICITLY, because this function also runs inside a probe
      * capture and the capture turns it OFF — "the capture replaces, nothing
@@ -450,7 +902,7 @@ void FrameRenderer::drawOverlays()
 {
     if (view_.state->losMode()) overlays_->drawVisibility(view_.state->visibility(), view_.state->isoLevel());
 
-    if (view_.settings.showCover) {
+    if (view_.settings->showCover) {
         const Unit& selected = view_.state->selectedUnit();
         if (selected.showsCoverShields()) overlays_->drawCoverShields(selected.position());
 
@@ -487,9 +939,9 @@ DevModel FrameRenderer::buildDevModel() const
     model.selectedCell = selected.position();
     model.isoLevel     = view_.state->isoLevel();
     model.ringOverrideName = (*view_.rings).overrideName();
-    model.softCutaway  = view_.settings.softCutaway;
+    model.softCutaway  = view_.settings->softCutaway;
     model.losMode      = view_.state->losMode();
-    model.showCover    = view_.settings.showCover;
+    model.showCover    = view_.settings->showCover;
     model.grenadeArmed = view_.grenadeArmed;
 
     model.moveLoops   = ribbonStats_.moveLoops;
@@ -506,9 +958,9 @@ DevModel FrameRenderer::buildDevModel() const
     model.sunAzimuth      = sun_.azimuthDegrees();
     model.sunElevation    = sun_.elevationDegrees();
     model.shadowsActive   = shadows_.valid();
-    model.occlusionActive = ao_.active();
-    model.bakedSun        = view_.settings.useBakedSun;
-    model.debugView       = view_.settings.debugView;
+    model.occlusionActive = mainBuffers_.occlusion().active();
+    model.bakedSun        = view_.settings->useBakedSun;
+    model.debugView       = view_.settings->debugView;
     model.probeCount      = probes_.probeCount();
     model.cameraArgs      = view_.cameraArgs;
 
@@ -583,11 +1035,11 @@ void FrameRenderer::shadowFocus(const Camera3D& camera, Vector3& centre, float& 
 
 void FrameRenderer::drawShadowMap()
 {
-    if (!shadows_.valid() || !view_.settings.layers.shadows) return;
+    if (!shadows_.valid() || !layers().features.shadows) return;
 
     Vector3 centre;
     float   radius = 1.0f;
-    shadowFocus(view_.camera, centre, radius);
+    shadowFocus(view_.camera->toRaylib(), centre, radius);
 
     /* Depth reaches the world's diagonal — enough for any caster to throw into
      * the focus sphere, and tight enough that the bias stays meaningful. */
@@ -658,14 +1110,14 @@ void FrameRenderer::drawGeometryPrepass()
 {
     const Material& material = prepassMaterial();
 
-    if (view_.settings.layers.statics)
+    if (layers().drawing(drawLayer::kStatics))
         statics_->drawPrepass(view_.cutaway, material, materials_, prepass_);
 
     prepass_.setRoughness(0.8f);
-    if (view_.settings.layers.props) props_.draw(material);
+    if (layers().drawing(drawLayer::kProps)) props_.draw(material);
 
     prepass_.setRoughness(materials_.factorsOf(SurfaceKind::Body).x);
-    if (view_.settings.layers.units) {
+    if (layers().drawing(drawLayer::kUnits)) {
         const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
         units_->drawRoster(view_.state->roster(), view_.cutaway.maxStorey, animating, material);
 
@@ -706,7 +1158,7 @@ void FrameRenderer::captureEnvironmentProbes()
     const Texture2D white{ rlGetTextureIdDefault(), 1, 1, 1,
                            PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
 
-    pbr_.setShadowsEnabled(view_.settings.layers.shadows);
+    pbr_.setShadowsEnabled(layers().features.shadows);
 
     /* NO DECALS IN A CUBEMAP, for exactly the reason the occlusion buffer above
      * gets a white stand-in — and this one is worse, because it is not a subtle
@@ -773,7 +1225,26 @@ void FrameRenderer::render(const FrameView& view)
         return;
     }
 
-    const RibbonPassSettings settings = view_.ribbon;
+    /* The main frame draws for the player's camera, so its layers are the live
+     * ones until a capture swaps its own in — see activeLayers_. An in-game
+     * FrameView always carries the camera; buildFrameView sets it. */
+    activeLayers_ = &view_.camera->layers();
+
+    RibbonPassSettings settings = view_.ribbon;
+
+    /* THE VIEW CAMERA, NOT THE PAWN'S. The controller filled this with the
+     * camera it computed the ribbon numbers from — which is the pawn's, and
+     * was the same thing until the view target could point the screen at
+     * another camera. The frame draws through FrameView::camera, so the copy
+     * every pass below reads is overridden once here rather than at a dozen
+     * BeginMode3D sites. */
+    settings.camera = view_.camera->toRaylib();
+
+    /* Whether panes replace the fullscreen pass this frame. The WORLD-space
+     * work — shadow map, probes, the captures themselves — runs either way,
+     * because it serves every camera; what a split skips is everything that
+     * only exists to shade the one fullscreen view. */
+    const bool split = split_ != SplitLayout::Single;
 
     /* PROFILING ZONES ARE PAIRED, CPU AND GPU, PER PASS. Both are needed and
      * they answer different questions: the CPU zone is how long submitting the
@@ -798,7 +1269,7 @@ void FrameRenderer::render(const FrameView& view)
      *     sampling them would swap the volume array out from under a draw
      *     call. Deferring to the top of the next frame costs one frame of a
      *     stale room partition and removes the race entirely. */
-    if (probes_.valid() && view_.settings.layers.reflections) {
+    if (probes_.valid() && layers().features.reflections) {
         if (probesDirty_) {
             rebuildEnvironmentProbes(*view_.state);
             probesDirty_ = false;
@@ -806,72 +1277,26 @@ void FrameRenderer::render(const FrameView& view)
         captureEnvironmentProbes();
     }
 
-    /* 2. THE G-BUFFER — depth, world normals, and roughness in the alpha the
-     *    normal write was throwing away. Three customers now: the ribbon
-     *    compares its own depth against this to fade where it is buried, SSAO
-     *    needs depth and normals, and screen-space reflections need all three.
-     *
-     *    Overlays are deliberately absent. They are not occluders, and the
-     *    hover plate lying a centimetre above the floor must not count as
-     *    something for the ribbon to hide behind. */
-    {
-        DepthTarget::Scope scope(*sceneDepth_);
-        ClearBackground(BLANK);
-        BeginMode3D(settings.camera);
-
-        /* A G-BUFFER IS WRITTEN, NOT COMPOSITED. Blending has to be OFF here,
-         * and it was on, because raylib's default state is alpha blending and
-         * nothing in this pass had ever said otherwise.
-         *
-         * That is ruinous for a buffer whose ALPHA CHANNEL IS ROUGHNESS rather
-         * than coverage. Every surface was blended into the target using its
-         * own roughness as an opacity: a wall at 0.75 landed as three quarters
-         * wall and one quarter whatever had been drawn there before. Statics go
-         * down kind by kind with floors and roofs ahead of walls, so what was
-         * behind was usually still in the colour buffer — and the G-buffer came
-         * out holding a MIXTURE of two surfaces per pixel, showing the room
-         * behind a wall straight through it in both the normal and the
-         * roughness channel.
-         *
-         * Everything downstream then inherits it. SSAO orients its sampling
-         * hemisphere from that blended normal, so on a wall with geometry
-         * behind it the hemisphere tilts toward the wrong surface and the taps
-         * report occlusion that belongs to the room beyond — which is why the
-         * occlusion buffer prints the shapes of rooms onto flat walls, and why
-         * boxes with nothing behind them were unaffected.
-         *
-         * The depth buffer was never wrong; only the colour attachment was. */
-        rlDisableColorBlend();
-
-        drawGeometryPrepass();
-
-        rlEnableColorBlend();
-        EndMode3D();
-    }
-
-    /* 2a. THE DECALS, into the DBuffer. Here and nowhere else: it needs the
-     *     prepass finished, because it unprojects that depth buffer to find the
-     *     real surface under each pixel of a projector box, and it must be done
-     *     before the lit pass, because what it writes is a MATERIAL and the lit
-     *     pass is what turns materials into light.
-     *
-     *     THAT ORDERING IS THE WHOLE FEATURE. A decal blended into the surface
-     *     before shading takes that surface's shadow, its probe, its lightmap
-     *     texel and its occlusion for free — so a scorch mark in a doorway is a
-     *     shadowed scorch mark, with nothing here knowing what a shadow is. A
-     *     decal drawn as its own lit quad afterwards would have to recover all
-     *     four, and would still z-fight with the surface it sits on. */
-    if (view_.settings.layers.decals)
-        decalRenderer_.render(decals_, settings.camera, decalBuffer_,
-                              sceneDepth_->depthTexture(), sceneDepth_->colourTexture(),
-                              view_.decalGhost ? &*view_.decalGhost : nullptr);
+    /* 2. THE VIEW'S SCREEN-SPACE BUFFERS — prepass, decals, occlusion — run
+     *    through THE ONE SCENE FUNCTION, exactly as every capture runs them.
+     *    The main view is a camera whose output is the backbuffer, and
+     *    drawSceneForView cannot tell it from a minimap. Its old private copy
+     *    of these passes is gone, which is the point: a pass added to the
+     *    scene function now exists for every camera, or for none. The
+     *    G-buffer rules — write don't composite, overlays are not occluders,
+     *    decals before occlusion — live there now, once. */
+    if (!split)
+        drawSceneForView(settings.camera, view_.camera->layers(), &mainBuffers_,
+                         Camera::ScenePhase::Offscreen,
+                         static_cast<float>(GetScreenWidth()),
+                         static_cast<float>(GetScreenHeight()), view_.cutaway);
 
     /* 2b. THE SILHOUETTE MASK — the units alone, into their own target, each
      *     writing its tint and its depth. Nothing consumes it yet; it exists
      *     so that drawing a soldier through a wall later is one full-screen
      *     shader rather than a pipeline change. Cleared to transparent, so
      *     "nothing here" and "something here" are distinguishable by alpha. */
-    if (view_.settings.layers.customDepth && customDepth_.valid()) {
+    if (!split && layers().features.customDepth && customDepth_.valid()) {
         CustomDepthStencil::Scope scope(customDepth_);
         ClearBackground(BLANK);
         BeginMode3D(settings.camera);
@@ -907,108 +1332,79 @@ void FrameRenderer::render(const FrameView& view)
         EndMode3D();
     }
 
-    /* 3. AMBIENT OCCLUSION, from that prepass. Two fullscreen passes, no
-     *    geometry resubmitted. */
-    {
-        CW_PROFILE_ZONE_N("ssao");
-        CW_GPU_ZONE("ssao");
-        ao_.render(settings.camera, sceneDepth_->depthTexture(), sceneDepth_->colourTexture());
-    }
-
-    /* 4. THE LIT SCENE, in linear radiance at supersampled resolution. */
-    pbr_.updateEnvironment(sun_, shadows_, settings.camera.position);
-    pbr_.setSceneSize(static_cast<float>(sceneWidth_), static_cast<float>(sceneHeight_));
-
-    /* After updateEnvironment, which sets the same uniform from whether the
-     * map loaded. Skipping the pass is not enough on its own — the last
-     * frame's depth would still be bound and still be sampled. */
-    pbr_.setShadowsEnabled(view_.settings.layers.shadows);
-
-    /* The shadow map and the occlusion buffer belong to the frame, not to any
-     * material, so they are bound straight to their own texture units rather
-     * than copied into every material's map array. Here rather than earlier
-     * because both were only just rendered. */
-    pbr_.bindFrameTextures(shadows_.depthTexture(), ao_.texture(),
-                           lightmapTexture_, lightIndexTexture_,
-                           shadows_.transmissionTexture());
-
-    /* The DBuffer, to its own three units — separately from the frame textures
-     * above because it was written later than any of them, and binding a target
-     * that a pass is still filling is the kind of thing that works right up
-     * until a driver reorders it.
+    /* 3b. THE OVERVIEW CAPTURE, and it has to be HERE — after the shadow map
+     *     exists to be sampled, and before the main pass sets its own
+     *     environment up.
      *
-     * OFF MEANS OFF here as well as at the pass. Skipping only the render would
-     * leave the last frame's planes bound and still sampled, which freezes the
-     * decals rather than removing them — the exact failure the reflection-probe
-     * switch had, and the reason that one now clears as well as skips. */
-    pbr_.setDecalsEnabled(view_.settings.layers.decals);
-    pbr_.bindDecalBuffer(decalBuffer_);
-    /* OFF MEANS OFF, not "stop refreshing". Gating only the capture left the
-     * cubemaps bound and still sampled, so the layer switch froze the
-     * reflections instead of removing them — and a switch that cannot take the
-     * probes out of the picture cannot be used to find out whether the probes
-     * are responsible for something. */
-    if (view_.settings.layers.reflections) pbr_.setEnvironmentProbes(probes_);
-    else                     pbr_.clearEnvironmentProbes();
-    {
+     *     A scene pass pushes its whole environment into the shared PbrShader
+     *     and nothing puts back what was there, so the only safe ordering is
+     *     "capture first, main pass overwrites". Everything below re-establishes
+     *     the lot, which is exactly what makes that safe. Move this after line
+     *     919 and the battlefield gets lit with the minimap's state. Same rule
+     *     ModelPreview documents at length, same reason. */
+    /* The panes ride the same renderAll as the plan and feed cameras, so they
+     * only need to exist and be aimed before it runs. */
+    if (split) syncSplitPanes();
+    else       releaseSplitPanes();
+
+    captureOverview(GetFrameTime());
+
+    /* 4. THE LIT SCENE, in linear radiance at supersampled resolution — the
+     *    ONE SCENE FUNCTION's Main phase, into the frame's HDR target, exactly
+     *    the arrangement Camera::captureNow makes for a capture. Skipped when
+     *    panes tile the window: each pane already ran this same work through
+     *    its own capture, and a fullscreen pass would shade pixels the
+     *    composite is about to cover. */
+    if (!split) {
         CW_PROFILE_ZONE_N("lit scene");
         CW_GPU_ZONE("lit scene");
         HdrTarget::Scope scope(scene_);
         ClearBackground(BLANK);
-
-        /* Before BeginMode3D, and so with depth testing — and therefore depth
-         * writing — off: the sky lands under the whole frame without needing a
-         * far plane or a cube. */
-        if (view_.settings.layers.sky) sky_.draw(sun_, settings.camera, sceneWidth_, sceneHeight_);
-
-        BeginMode3D(settings.camera);
-        drawGeometryLit(view_.cutaway);
-
-        /* THE PROBE BALLS, and deliberately NOT inside drawGeometryLit: that
-         * function is also what the probe capture draws with, so a ball added
-         * there would be captured into every cubemap — each probe would see
-         * the others as chrome spheres hanging in the room, and then see those
-         * reflections reflected. A debug overlay has no business inside the
-         * data it is there to inspect. */
-        if (view_.settings.debugView == 2)
-            probeSpheres_.draw(probes_, sun_, settings.camera.position,
-                               sun_.ambientIntensity());
-
-        if (view_.settings.layers.overlays) {
-            OverlayShader::Scope unlit(overlayShader_);
-            drawOverlays();
-        }
-        EndMode3D();
+        drawSceneForView(settings.camera, view_.camera->layers(), &mainBuffers_,
+                         Camera::ScenePhase::Main, static_cast<float>(sceneWidth_),
+                         static_cast<float>(sceneHeight_), view_.cutaway);
     }
 
     /* 5. RESOLVE. Past this line everything is display colour on the
      *    backbuffer, which is why the ribbon and its glow did not have to
-     *    change to gain a lit world behind them. */
+     *    change to gain a lit world behind them. Under a split there is no
+     *    fullscreen scene to resolve; the panes' already-tonemapped textures
+     *    tile the window instead. */
     BeginDrawing();
     ClearBackground(palette::kBackground);
-    tonemap_.draw(scene_,
-                  static_cast<float>(GetScreenWidth()),
-                  static_cast<float>(GetScreenHeight()));
+    if (split) {
+        drawSplitScreen();
+    } else {
+        /* The tone map switch travels INTO the resolve rather than branching
+         * here — the pass blits raw when the curve is off, so there is no
+         * second path for a future feature to forget. See ToneMapPass. */
+        tonemap_.draw(scene_, static_cast<float>(GetScreenWidth()),
+                      static_cast<float>(GetScreenHeight()), layers().features.toneMap);
+    }
 
     /* The ribbon's live dials, pushed where the pass that reads them runs. */
-    ribbonShader_->setPanSpeed(view_.settings.ribbon.panSpeed);
-    glow_->setTuning(view_.settings.ribbon);
+    ribbonShader_->setPanSpeed(view_.settings->ribbon.panSpeed);
+    glow_->setTuning(view_.settings->ribbon);
 
-    if (view_.settings.layers.ribbons) {
-        BeginMode3D(settings.camera);
-        ribbonRenderer_->submit(settings, 1.0f,
-                                static_cast<float>(sceneDepth_->width()),
-                                static_cast<float>(sceneDepth_->height()),
-                                sceneDepth_->depthTexture());
-        EndMode3D();
+    /* 6. OVER THE FINISHED PICTURE — the scene function's Display phase, on
+     *    the backbuffer: the movement ribbons, fading against the main view's
+     *    own prepass, exactly as a capture's Display phase fades against its. */
+    if (!split) {
+        drawSceneForView(settings.camera, view_.camera->layers(), &mainBuffers_,
+                         Camera::ScenePhase::Display,
+                         static_cast<float>(GetScreenWidth()),
+                         static_cast<float>(GetScreenHeight()), view_.cutaway);
 
-        /* the emissive halo: unlit emissive is only half the material, the
-         * other half is the bloom that would pick it up. Must come after
-         * EndMode3D and before anything 2D over the top, which should not
+        /* The emissive halo stays a main-view extra: bloom needs blur targets
+         * at the output's size, and only the window has them. Must come after
+         * the rings and before anything 2D over the top, which should not
          * glow. */
-        if (view_.settings.layers.glow)
-            glow_->render(*ribbonRenderer_, settings, sceneDepth_->depthTexture());
+        if (layers().drawing(drawLayer::kMovementRings)
+            && layers().drawing(drawLayer::kRingGlow))
+            glow_->render(*ribbonRenderer_, settings, mainBuffers_.depth().depthTexture());
     }
+
+    drawMinimap();
 
     const DevModel model = buildDevModel();
 
@@ -1019,7 +1415,8 @@ void FrameRenderer::render(const FrameView& view)
      * The exposure round-trip is so ToneMapPass keeps its setter rather than
      * handing out a reference to its own field. */
     float exposure = tonemap_.exposure();
-    DevTunables tunables{ sun_, view_.settings.ribbon, ao_.tuning(), exposure, view_.settings.effects };
+    DevTunables tunables{ sun_, view_.settings->ribbon, mainBuffers_.occlusion().tuning(),
+                          exposure, view_.settings->effects };
 
     /* Every intermediate the frame produced, so it can be LOOKED at rather
      * than reasoned about. Rebuilt per frame because several of these change
@@ -1057,18 +1454,18 @@ void FrameRenderer::render(const FrameView& view)
                  previews_.render(slot++, shadows_.transmissionTexture(), Preview::Raw, kTarget),
                  "sunlight surviving. white is open air, darker is glass");
     textures.add("ambient occlusion",
-                 previews_.render(slot++, ao_.texture(), Preview::Raw, kTarget),
+                 previews_.render(slot++, mainBuffers_.occlusion().texture(), Preview::Raw, kTarget),
                  "screen space. white is unoccluded; 1x1 white when off");
     textures.add("g-buffer depth",
-                 previews_.render(slot++, sceneDepth_ ? sceneDepth_->depthTexture() : noTexture,
+                 previews_.render(slot++, mainBuffers_.depth().depthTexture(),
                                   Preview::Depth, kTarget),
                  "linearised and banded — each band is an equal slice of distance");
     textures.add("g-buffer normal",
-                 previews_.render(slot++, sceneDepth_ ? sceneDepth_->colourTexture() : noTexture,
+                 previews_.render(slot++, mainBuffers_.depth().colourTexture(),
                                   Preview::Raw, kTarget),
                  "world normal, encoded n * 0.5 + 0.5");
     textures.add("g-buffer roughness",
-                 previews_.render(slot++, sceneDepth_ ? sceneDepth_->colourTexture() : noTexture,
+                 previews_.render(slot++, mainBuffers_.depth().colourTexture(),
                                   Preview::Alpha, kTarget),
                  "the same buffer's alpha. black is a mirror, white is fully diffuse");
     textures.add("lightmap atlas",
@@ -1083,6 +1480,24 @@ void FrameRenderer::render(const FrameView& view)
     textures.add("custom depth",
                  previews_.render(slot++, customDepth_.depth(), Preview::Depth, kTarget),
                  "tagged objects only, to compare against the g-buffer's depth");
+    /* NOT THE RENDERER'S INTERNAL BUFFERS, unlike everything above — each of
+     * these is a whole second render of the world from another camera.
+     *
+     * ENUMERATED RATHER THAN LISTED, which is the point of the set holding
+     * them: a camera added anywhere in the codebase shows up here without this
+     * function being told about it. The name comes from the descriptor that
+     * made it, so it is the same string the profiler row carries and the two
+     * can be read against each other.
+     *
+     * The names outlive the frame because the set owns them — DevTextures
+     * borrows its pointers and copies nothing; see the note below. */
+    cameras_.forEach([&](CameraId, const std::string& name, const Camera& camera) {
+        textures.add(name.c_str(),
+                     previews_.render(slot++, camera.texture(), Preview::Raw, kTarget),
+                     camera.hasScreenSpaceEffects()
+                         ? "a second camera, with its own prepass: ssao and decals work"
+                         : "a second camera. no prepass of its own, so no ssao or decals");
+    });
     /* A MEMBER BUFFER, NOT TextFormat. DevTextures borrows its name and note
      * pointers and copies nothing, and TextFormat hands back one of four
      * rotating static buffers — four more formatted strings between here and
@@ -1102,7 +1517,7 @@ void FrameRenderer::render(const FrameView& view)
      * pictures separate them at a glance: ink here and nothing on screen is the
      * READ; nothing here is the PASS. */
     DevDecalTool decalTool;
-    decalTool.available   = decalRenderer_.valid() && decalBuffer_.valid();
+    decalTool.available   = decalRenderer_.valid() && mainBuffers_.decalsAvailable();
     decalTool.placedCount = static_cast<int>(decals_.count());
     decalTool.cursorOnSurface = view_.cursorOnSurface;
 
@@ -1113,13 +1528,13 @@ void FrameRenderer::render(const FrameView& view)
         decalTool.materialNames[i] = decals_.materialName(i);
 
     textures.add("dbuffer albedo",
-                 previews_.render(slot++, decalBuffer_.albedo(), Preview::Raw, kTarget),
+                 previews_.render(slot++, mainBuffers_.decals().albedo(), Preview::Raw, kTarget),
                  "decal base colour, premultiplied. black is untouched");
     textures.add("dbuffer normal",
-                 previews_.render(slot++, decalBuffer_.normal(), Preview::Raw, kTarget),
+                 previews_.render(slot++, mainBuffers_.decals().normal(), Preview::Raw, kTarget),
                  "decal world normal, encoded and premultiplied");
     textures.add("dbuffer coverage",
-                 previews_.render(slot++, decalBuffer_.albedo(), Preview::Alpha, kTarget),
+                 previews_.render(slot++, mainBuffers_.decals().albedo(), Preview::Alpha, kTarget),
                  "the SAME plane's alpha, which is 1 - coverage: "
                  "white is no decal, dark is fully inked");
 
@@ -1137,11 +1552,15 @@ void FrameRenderer::render(const FrameView& view)
      * hidden. */
     uiGallery_.draw(gameUi_, settings.camera);
 
+    /* THE PLAYER CAMERA'S OWN LAYERS, not the read-only active slot: the panel
+     * edits these in place, and what it should edit is the main view — the same
+     * per-camera settings a capture keeps for itself. See FrameView::camera. */
+    ViewLayers& playerLayers = view_.camera->layers();
 #if XC_HAVE_WEB
-    devView_.draw(model, view_.settings.layers, tunables, textures, decalTool,
+    devView_.draw(model, playerLayers, tunables, textures, decalTool,
                   steamPanel, devRequests_, webPanel_.get());
 #else
-    devView_.draw(model, view_.settings.layers, tunables, textures, decalTool,
+    devView_.draw(model, playerLayers, tunables, textures, decalTool,
                   steamPanel, devRequests_);
 #endif
     tonemap_.setExposure(exposure);
@@ -1267,15 +1686,15 @@ void FrameRenderer::drawFrontEnd()
 
             /* Read from the frame's settings and reported as REQUESTS - the
              * renderer does not own these, Application does. */
-            bool ao = ao_.enabled();
+            bool ao = mainBuffers_.occlusion().enabled();
             if (ImGui::Checkbox("Ambient occlusion", &ao))
                 uiRequest_.setAmbientOcclusion = ao;
 
-            bool baked = view_.settings.useBakedSun;
+            bool baked = view_.settings->useBakedSun;
             if (ImGui::Checkbox("Baked sun (vs shadow map)", &baked))
                 uiRequest_.setUseBakedSun = baked;
 
-            bool cutaway = view_.settings.softCutaway;
+            bool cutaway = view_.settings->softCutaway;
             if (ImGui::Checkbox("Soft cutaway", &cutaway))
                 uiRequest_.setSoftCutaway = cutaway;
 

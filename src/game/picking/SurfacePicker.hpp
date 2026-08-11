@@ -29,6 +29,8 @@
  */
 #pragma once
 
+#include "cromwell/math/Ray.hpp"
+
 #include "raylib.h"
 
 #include "game/world/World.hpp"
@@ -56,7 +58,7 @@ public:
     explicit SurfacePicker(const World& world) : world_(world) {}
 
     /* Nothing when the ray leaves the grid without meeting anything. */
-    std::optional<SurfaceHit> pick(const Ray& ray, int maxStorey) const;
+    std::optional<SurfaceHit> pick(const cromwell::Ray& ray, int maxStorey) const;
 
 private:
     /* Finer than TilePicker's 0.03: that one only has to land in the right

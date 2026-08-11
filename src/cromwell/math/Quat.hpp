@@ -146,6 +146,178 @@ inline Quat slerp(Quat a, Quat b, float t)
              a.w * weightA + b.w * weightB };
 }
 
+/* ============== POINTING THINGS AT OTHER THINGS ============================
+ *
+ * Everything above builds a rotation from numbers a human typed. Everything
+ * below builds one from a DIRECTION the game computed, which is what gameplay
+ * actually has in hand — a vector to the target, a surface normal, a velocity.
+ * Unity ships all three of these and they are the most-called quaternion
+ * functions in it, for exactly that reason.
+ * ========================================================================== */
+
+/* The rotation whose FORWARD (+Z) points along `forward` and whose up is as
+ * close to `up` as it can be — Unity's Quaternion.LookRotation, Unreal's
+ * FRotationMatrix::MakeFromXZ.
+ *
+ * Aim a turret, face a soldier at what it is shooting, orient a decal, point a
+ * camera. +Z is forward because Vec3::forward() is (0,0,1); +Y is up because
+ * this engine is Y-up.
+ *
+ * DEGENERATE INPUT IS HANDLED RATHER THAN UNDEFINED, and it has to be: the two
+ * cases are a zero-length forward (the target is exactly where you are — which
+ * happens on the frame something reaches its destination) and a forward
+ * parallel to up (looking straight down, which is a camera's normal state).
+ * Both make the cross product vanish, and the naive version returns a
+ * quaternion full of NaNs that then propagates into a transform and makes an
+ * entire model disappear with no error anywhere. */
+inline Quat lookRotation(Vec3 forward, Vec3 up = Vec3::up())
+{
+    Vec3 axisZ = forward.normalised();
+    if (axisZ.lengthSquared() < 0.5f) return Quat::identity();
+
+    Vec3 axisX = cross(up, axisZ);
+    if (axisX.lengthSquared() < 1e-12f) {
+        /* Looking along `up`. Any roll about the view axis is equally correct,
+         * so pick one deterministically instead of producing NaNs — a camera
+         * that snaps to an arbitrary but STABLE roll at the zenith is a known
+         * quantity; one that produces NaN is not. */
+        axisX = anyPerpendicular(axisZ);
+    }
+    axisX = axisX.normalised();
+    const Vec3 axisY = cross(axisZ, axisX);
+
+    /* Shepperd's method: pick the branch whose divisor is largest, so the
+     * division never happens by something near zero. The naive single-branch
+     * conversion loses most of its precision when the trace approaches -1. */
+    const float trace = axisX.x + axisY.y + axisZ.z;
+    if (trace > 0.0f) {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;
+        return Quat{ (axisY.z - axisZ.y) / s, (axisZ.x - axisX.z) / s,
+                     (axisX.y - axisY.x) / s, 0.25f * s }
+            .normalised();
+    }
+    if (axisX.x > axisY.y && axisX.x > axisZ.z) {
+        const float s = std::sqrt(1.0f + axisX.x - axisY.y - axisZ.z) * 2.0f;
+        return Quat{ 0.25f * s, (axisY.x + axisX.y) / s, (axisZ.x + axisX.z) / s,
+                     (axisY.z - axisZ.y) / s }
+            .normalised();
+    }
+    if (axisY.y > axisZ.z) {
+        const float s = std::sqrt(1.0f + axisY.y - axisX.x - axisZ.z) * 2.0f;
+        return Quat{ (axisY.x + axisX.y) / s, 0.25f * s, (axisZ.y + axisY.z) / s,
+                     (axisZ.x - axisX.z) / s }
+            .normalised();
+    }
+    const float s = std::sqrt(1.0f + axisZ.z - axisX.x - axisY.y) * 2.0f;
+    return Quat{ (axisZ.x + axisX.z) / s, (axisZ.y + axisY.z) / s, 0.25f * s,
+                 (axisX.y - axisY.x) / s }
+        .normalised();
+}
+
+/* The shortest rotation taking `from` onto `to` — Unity's
+ * Quaternion.FromToRotation.
+ *
+ * Aligning something to a surface: a decal to a wall's normal, a footprint to
+ * the ground, a shield to the direction of a hit. Different from lookRotation,
+ * which pins a whole orientation; this one only promises that one vector lands
+ * on the other and leaves the roll about it alone.
+ *
+ * NO TRIGONOMETRY. The half-angle identity gives the quaternion directly from
+ * the cross product and the dot — `w = 1 + cos` and the axis unnormalised —
+ * which is both faster and better conditioned than acos followed by
+ * fromAxisAngle. */
+inline Quat fromToRotation(Vec3 from, Vec3 to)
+{
+    const Vec3 a = from.normalised();
+    const Vec3 b = to.normalised();
+    if (a.lengthSquared() < 0.5f || b.lengthSquared() < 0.5f) return Quat::identity();
+
+    const float cosine = dot(a, b);
+    if (cosine >= 1.0f - 1e-6f) return Quat::identity();
+
+    if (cosine <= -1.0f + 1e-6f) {
+        /* EXACTLY OPPOSED, and this is the case the identity above cannot
+         * express: every axis perpendicular to `a` is an equally valid
+         * half-turn, and the cross product is zero so it names none of them.
+         * Left unhandled it returns a zero quaternion, which normalises to
+         * identity — a "rotation" that leaves the vector pointing exactly the
+         * wrong way, silently. */
+        return Quat::fromAxisAngle(anyPerpendicular(a), 3.14159265358979323846f);
+    }
+
+    const Vec3 axis = cross(a, b);
+    return Quat{ axis.x, axis.y, axis.z, 1.0f + cosine }.normalised();
+}
+
+/* The angle between two orientations, in radians. */
+inline float angleBetween(Quat a, Quat b)
+{
+    /* Absolute, because q and -q are the same orientation — without it, half of
+     * all pairs report the reflex angle. */
+    const float cosine = std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
+    return 2.0f * std::acos(cosine > 1.0f ? 1.0f : cosine);
+}
+
+/* Toward `to`, by at most `maxRadians` — Unity's Quaternion.RotateTowards.
+ *
+ * TURN RATE, which is what makes a unit feel like it has mass instead of
+ * snapping to face things. slerp cannot express it: slerp takes a FRACTION, so
+ * its angular speed depends on how far there is to go and a unit spins fastest
+ * when it has furthest to turn, which is exactly backwards. This moves at a
+ * fixed rate and arrives exactly. */
+inline Quat rotateTowards(Quat from, Quat to, float maxRadians)
+{
+    const float angle = angleBetween(from, to);
+    if (angle <= maxRadians || angle <= 1e-6f) return to;
+    return slerp(from, to, maxRadians / angle);
+}
+
+/* Yaw, pitch and roll back out, in the same convention and order fromEuler
+ * takes them — so `toEuler(fromEuler(y, p, r))` returns what went in.
+ *
+ * FOR DISPLAY, SERIALISATION AND AUTHORING, not for doing rotation maths with.
+ * Everything gimbal lock does to Euler angles it still does here; the reason
+ * this exists is that a dev panel slider, a saved file and a command line are
+ * all in degrees, and without it there is no way back out of a quaternion. */
+inline void toEuler(Quat q, float& yaw, float& pitch, float& roll)
+{
+    const Quat u = q.normalised();
+
+    /* Straight out of the rotation matrix Y*X*Z builds: sin(pitch) is one
+     * element, and yaw and roll are each an atan2 of a pair. */
+    const float sinPitch = 2.0f * (u.w * u.x - u.y * u.z);
+
+    if (std::fabs(sinPitch) >= 1.0f - 1e-6f) {
+        /* GIMBAL LOCK — pointing straight up or straight down. Yaw and roll
+         * become the same axis, so only their COMBINATION is recoverable; roll
+         * is pinned to zero and the whole turn is reported as yaw. Any split is
+         * arbitrary, and this one at least round-trips through fromEuler.
+         *
+         * WHICH combination flips with the pitch direction: straight up leaves
+         * (yaw - roll) determined, straight down leaves (yaw + roll). Hence the
+         * sign, which is not decoration — without it, looking straight DOWN
+         * comes back with its yaw negated, and a camera restored from a saved
+         * file faces the opposite way. */
+        const float toward = sinPitch > 0.0f ? 1.0f : -1.0f;
+        pitch = toward * 1.57079632679489661923f;
+        roll = 0.0f;
+        yaw = std::atan2(toward * 2.0f * (u.x * u.y - u.w * u.z),
+                         1.0f - 2.0f * (u.y * u.y + u.z * u.z));
+        return;
+    }
+
+    pitch = std::asin(sinPitch);
+    yaw = std::atan2(2.0f * (u.x * u.z + u.w * u.y), 1.0f - 2.0f * (u.x * u.x + u.y * u.y));
+    roll = std::atan2(2.0f * (u.x * u.y + u.w * u.z), 1.0f - 2.0f * (u.x * u.x + u.z * u.z));
+}
+
+/* The three axes of an orientation, as directions. What a caller usually wants
+ * a rotation FOR — "which way is this thing facing" — without having to
+ * remember that forward is +Z. */
+inline Vec3 forwardOf(Quat q) { return rotate(q, Vec3::forward()); }
+inline Vec3 upOf(Quat q) { return rotate(q, Vec3::up()); }
+inline Vec3 rightOf(Quat q) { return rotate(q, Vec3::right()); }
+
 inline bool nearlyEqual(Quat a, Quat b, float tolerance = 1e-5f)
 {
     /* Compares ORIENTATIONS, so q and -q count as equal — see slerp. */

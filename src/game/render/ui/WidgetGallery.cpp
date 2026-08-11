@@ -1,5 +1,7 @@
 #include "game/render/ui/WidgetGallery.hpp"
 
+#include "cromwell/math/RaylibInterop.hpp"
+
 #include "cromwell/diag/Logger.hpp"
 #include "cromwell/gpu/ShaderLibrary.hpp"
 #include "cromwell/ui/control/BorderButton.hpp"
@@ -120,11 +122,18 @@ void WidgetGallery::draw(GameUi& gameUi, const Camera3D& camera)
     context_ = &gameUi.begin();
 
     /* A scrim over the scene, so the widgets are judged against a flat ground
-     * rather than against whatever happens to be behind them. Frosted, which
-     * also exercises the backdrop blur on something the size of the screen. */
+     * rather than against whatever happens to be behind them. The blur still
+     * runs, so the pass is still exercised at full-screen size.
+     *
+     * OPAQUE, not the 0.55 it used to be. A translucent scrim leaves the scene
+     * showing through as a mid grey, and mid grey is the worst possible ground
+     * for judging text: it hides both the colour fringing that subpixel
+     * antialiasing produces and the contrast that small labels depend on.
+     * Black is the honest test surface - every artefact the text has is
+     * visible against it. */
     ui::BlurPanelSpec scrim;
     scrim.blurStrengthPx = 10.0f;
-    scrim.fillColour = ui::UiColor::black().withAlpha(0.55f);
+    scrim.fillColour = ui::UiColor::black();
     scrim.contentPadding = ui::UiPadding::all(kMargin);
     const ui::UiRect content = ui::drawBlurPanel(*context_, context_->screenRect(),
                                                  ui::scaled(scrim, context_->scale()));
@@ -146,7 +155,14 @@ void WidgetGallery::draw(GameUi& gameUi, const Camera3D& camera)
 
     /* Last, so the badges sit over the scrim — they are anchored to the world
      * behind it, which is exactly the point. */
+    /* The lower half, which the four widget columns leave empty. Taken as a
+     * band across the whole content rect rather than as a fifth column: a size
+     * ladder is only readable if the large sizes have room to be large. */
+    drawTypeSpecimen(ui::UiRect{ content.x, content.y + content.height * 0.52f,
+                                 content.width, content.height * 0.48f });
+
     drawWorldAnchors(camera);
+    drawMsdfSample(camera);
 
     gameUi.end();
     context_ = nullptr;
@@ -504,6 +520,73 @@ void WidgetGallery::drawPanels(ui::UiRect col)
     }
 }
 
+void WidgetGallery::drawTypeSpecimen(ui::UiRect band)
+{
+    float y = heading(band, band.y, "TYPE - SIZE LADDER");
+
+    /* Deliberately spanning well past what the kit uses. The kit tops out
+     * around 16; going to 56 is what makes it obvious whether a soft edge is a
+     * property of the pipeline or of the pixel count. */
+    constexpr float kSizes[] = { 10.0f, 12.0f, 14.0f, 16.0f, 20.0f, 28.0f, 40.0f, 56.0f };
+
+    /* Mixed shapes on purpose: verticals, a diagonal, tight curves and digits.
+     * ASCII only - the atlas is 32..126, and a character outside it would draw
+     * as nothing and read as a rasterisation bug. */
+    constexpr const char* kSample = "Handgloves 0123 quick brown fox";
+
+    for (const float size : kSizes) {
+        ui::TextStyle style;
+        style.sizePx = size;
+        style.weight = ui::FontWeight::Regular;
+        style.colour = ui::UiColor::white();
+        const ui::TextStyle device = ui::scaled(style, context_->scale());
+
+        /* The size, in the caption style, so the ladder is self-labelling and
+         * a screenshot of it needs no accompanying note. */
+        char label[16];
+        std::snprintf(label, sizeof(label), "%.0f px", static_cast<double>(size));
+        ui::TextStyle labelStyle = ui::scaled(captionStyle(), context_->scale());
+        ui::TextRun labelRun;
+        labelRun.text = label;
+        labelRun.position = { band.x, y };
+        labelRun.style = labelStyle;
+        context_->drawList().addText(std::move(labelRun));
+
+        ui::TextRun run;
+        run.text = kSample;
+        run.position = { band.x + px(52.0f), y };
+        run.style = device;
+        context_->drawList().addText(std::move(run));
+
+        y += context_->metrics().lineHeight(device) + px(2.0f);
+    }
+
+    /* Every weight at one size. A coverage or hinting problem usually shows in
+     * the lightest weight first, where there is least ink to lose. */
+    y += px(6.0f);
+    const ui::FontWeight weights[] = { ui::FontWeight::Regular, ui::FontWeight::Medium,
+                                       ui::FontWeight::SemiBold, ui::FontWeight::Bold,
+                                       ui::FontWeight::ExtraBold };
+    const char* names[] = { "Regular", "Medium", "SemiBold", "Bold", "ExtraBold" };
+
+    float x = band.x;
+    for (int i = 0; i < 5; ++i) {
+        ui::TextStyle style;
+        style.sizePx = 22.0f;
+        style.weight = weights[i];
+        style.colour = ui::UiColor::white();
+        const ui::TextStyle device = ui::scaled(style, context_->scale());
+
+        ui::TextRun run;
+        run.text = names[i];
+        run.position = { x, y };
+        run.style = device;
+        const cromwell::Vec2 size = context_->metrics().measure(names[i], device);
+        context_->drawList().addText(std::move(run));
+        x += size.x + px(18.0f);
+    }
+}
+
 void WidgetGallery::drawWorldAnchors(const Camera3D& camera)
 {
     const float scale = context_->scale();
@@ -518,7 +601,7 @@ void WidgetGallery::drawWorldAnchors(const Camera3D& camera)
         settings.maxDistance = 60.0f;
 
         const ui::WorldAnchor anchor =
-            ui::anchorToWorld(kAnchorPoints[index], camera, { 0.0f, px(-18.0f) }, settings);
+            ui::anchorToWorld(cromwell::fromRaylib(kAnchorPoints[index]), camera, { 0.0f, px(-18.0f) }, settings);
         if (!anchor.visible) {
             continue;
         }
@@ -546,6 +629,33 @@ void WidgetGallery::drawWorldAnchors(const Camera3D& camera)
                                  size.x, size.y };
         ui::drawLabel(*context_, ui::UiContext::id("gallery.anchor", index), bounds, device);
     }
+}
+
+void WidgetGallery::drawMsdfSample(const Camera3D& camera)
+{
+    if (!worldTextTried_) {
+        worldTextTried_ = true;
+        worldText_.load("fonts/msdf/Inter-SemiBold.cwfont");
+    }
+    if (!worldText_.ready()) {
+        return;
+    }
+
+    /* 3D, unlike everything else in this gallery. The quads are real geometry
+     * at a real world position, so they need the camera's projection — and
+     * they depth-test against the scene that was already drawn, which is the
+     * point: this text is IN the world rather than over it. */
+    BeginMode3D(camera);
+    for (int index = 0; index < 3; ++index) {
+        /* Half a metre per em, sitting below the anchor its badge floats above,
+         * so the two treatments of the same point can be compared directly. */
+        const Vector3 position{ kAnchorPoints[index].x,
+                                kAnchorPoints[index].y - 0.6f,
+                                kAnchorPoints[index].z };
+        worldText_.draw(camera, kAnchorNames[index], position, 0.5f,
+                        Color{ 255, 255, 255, 255 });
+    }
+    EndMode3D();
 }
 
 }  // namespace game

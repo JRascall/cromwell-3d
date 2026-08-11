@@ -49,8 +49,20 @@ public:
     void  setExposure(float exposure) { exposure_ = exposure; }
     float exposure() const { return exposure_; }
 
-    /* Call on the backbuffer, inside BeginDrawing and outside any 3D mode. */
-    void draw(const HdrTarget& scene, float destinationWidth, float destinationHeight) const;
+    /* Resolves the scene to the current target: the supersample collapse and,
+     * when `graded`, the filmic curve. Call on the backbuffer or inside a
+     * render target, outside any 3D mode.
+     *
+     * THE RESOLVE ALWAYS RUNS — something must move the HDR buffer into the
+     * output — so "tone map off" selects the RAW path rather than skipping the
+     * stage: the same blit without the curve, linear values clamped by the
+     * destination. The switch is absorbed HERE so no call site carries a
+     * second resolve to keep in step — the same shape AmbientOcclusion gives
+     * its consumers by handing back 1x1 white when disabled. A shader that
+     * failed to load degrades to the raw path too: a washed-out picture is
+     * diagnosable, a black one is not. */
+    void draw(const HdrTarget& scene, float destinationWidth, float destinationHeight,
+              bool graded = true) const;
 
 private:
     Shader shader_ = { 0 };

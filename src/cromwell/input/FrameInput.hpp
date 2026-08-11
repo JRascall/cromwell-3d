@@ -66,6 +66,15 @@ struct FrameInput {
      * nothing else. */
     bool reloadShaders   = false;
 
+    /* Switch the main view to another camera and back — the view-target
+     * toggle. WHAT it switches to is the application's decision; this is only
+     * the key. */
+    bool toggleViewTarget = false;
+
+    /* Cycle the splitscreen layouts. Which layouts exist is SplitScreen.hpp's
+     * business; this is only the key. */
+    bool cycleSplitScreen = false;
+
     /* camera */
     bool    orbiting = false;
     Vector2 mouseDelta{};
@@ -83,6 +92,15 @@ struct FrameInput {
     Vector2 mousePosition{};
     bool    leftPressed  = false;
     bool    leftReleased = false;
+
+    /* The LEVEL, alongside the two edges. Needed by anything that lasts longer
+     * than an event — a marquee being dragged, a slider being held — and it is
+     * also the only evidence that a release happened somewhere the game never
+     * saw it. A press that arrives, then an alt-tab, then a release over another
+     * window: the edges never balance, and a gesture tracking only edges stays
+     * stuck down forever. See input/PointerDrag.hpp, which trusts this over its
+     * own bookkeeping for exactly that reason. */
+    bool    leftDown     = false;
 
     bool windowResized = false;
 };

@@ -5,18 +5,18 @@
 namespace game {
 
 
-std::optional<int> TilePicker::pick(const Ray& ray, int maxStorey) const
+std::optional<int> TilePicker::pick(const cromwell::Ray& ray, int maxStorey) const
 {
     const Lattice& lattice = world_.lattice();
 
-    float previousX = ray.position.x;
-    float previousH = ray.position.y;
-    float previousY = ray.position.z;
+    float previousX = ray.origin.x;
+    float previousH = ray.origin.y;
+    float previousY = ray.origin.z;
 
     for (float t = kStep; t < kMaxDistance; t += kStep) {
-        const float px = ray.position.x + ray.direction.x * t;
-        const float ph = ray.position.y + ray.direction.y * t;
-        const float py = ray.position.z + ray.direction.z * t;
+        const float px = ray.origin.x + ray.direction.x * t;
+        const float ph = ray.origin.y + ray.direction.y * t;
+        const float py = ray.origin.z + ray.direction.z * t;
 
         const int x = static_cast<int>(std::floor(px));
         const int y = static_cast<int>(std::floor(py));

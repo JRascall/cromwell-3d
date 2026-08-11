@@ -2,9 +2,12 @@
 
 #include "game/controllers/PlayerController.hpp"
 #include "game/entities/pawns/CameraPawn.hpp"
+#include "game/render/DrawLayers.hpp"
 #include "game/events/GameEvents.hpp"
 #include "game/ui/state/UIStateMachine.hpp"
+#include "cromwell/debug/DebugDraw.hpp"
 #include "cromwell/diag/Profile.hpp"
+#include "cromwell/platform/ModalLoopPump.hpp"
 #include "cromwell/gpu/GpuProfiler.hpp"
 #include "cromwell/services/Services.hpp"
 #include "cromwell/settings/SettingKeys.hpp"
@@ -63,6 +66,20 @@ Application::Application(CliOptions options)
      * ray. Set once - nothing re-possesses. */
     controller_.possess(pawn_);
 
+    /* The screen shows the pawn's camera until something cuts away, and the
+     * controller reads the director so its picks agree with whatever is on
+     * screen. Set once, like possession. */
+    director_.withDefault(pawn_.camera());
+    controller_.setDirector(director_);
+
+    /* THE SECOND PLAYER'S CAMERA, feeding the splitscreen's second pane.
+     * Placed opposite player one and seeing the world WITHOUT player one's
+     * interface — the layers travel with the camera, so the pane inherits
+     * that choice without being told. */
+    playerTwoRig_.camera().at({ 0.0f, 24.0f, 30.0f }).lookingAt({ 23.0f, 1.0f, 12.0f });
+    playerTwoRig_.camera().withLayers(worldOnly());
+    renderer_.setPaneSource(1, &playerTwoRig_.camera());
+
     /* THE SETTINGS BAG, BEFORE ANY ENTITY EXISTS. cromwell reads its own
      * defaults out of this (see SettingKeys.hpp) and a component captures them
      * when it is constructed, so registering it after the roster was built
@@ -76,11 +93,13 @@ Application::Application(CliOptions options)
 }
 
 /* ------------------------------------------------------------ lifecycle */
-FrameView Application::buildFrameView() const
+FrameView Application::buildFrameView()
 {
     FrameView view;
     view.state           = &state_;
-    view.camera          = pawn_.camera();
+    /* The camera the screen shows — the director's choice. Borrowed; see
+     * FrameView.hpp. */
+    view.camera          = &director_.current();
     view.uiState         = ui_.state();
     view.splashSeconds   = splashElapsed_;
     view.splashProgress  = splashProgress();
@@ -94,7 +113,7 @@ FrameView Application::buildFrameView() const
     view.decalGhost      = controller_.decalPreview();
     view.ribbon          = controller_.ribbonSettings(view_.softCutaway);
     view.cutaway         = controller_.cutawayView();
-    view.settings        = view_;
+    view.settings        = &view_;   /* borrowed and written through — see FrameView.hpp */
 
     view.steam.running     = steam_.running();
     view.steam.reason      = steam_.reason();
@@ -239,6 +258,32 @@ void Application::applyInput(const FrameInput& input)
     if (input.toggleBake) view_.useBakedSun = !view_.useBakedSun;
     if (input.toggleFlatView) view_.debugView = (view_.debugView + 1) % ViewSettings::kDebugViewCount;
 
+    /* F5: cut to the plan-view camera; F5 again cuts back. The whole switch
+     * is two director calls — the renderer follows FrameView::camera without
+     * knowing a cut happened, and the picks follow the controller's
+     * viewCamera(). Any camera can be cut to; the plan view is the worked
+     * example. */
+    if (input.toggleViewTarget) {
+        if (director_.isCutAway()) {
+            director_.cutBack();
+            controller_.setStatus("view: player camera");
+        } else if (Camera* plan = renderer_.planCamera()) {
+            director_.cutTo(*plan);
+            controller_.setStatus("view: plan camera - F5 to return");
+        }
+    }
+
+    /* F7: cycle the splitscreen layouts. Pane 0 follows the view camera, so
+     * F5's cuts keep working inside a split. */
+    if (input.cycleSplitScreen) {
+        static const char* kNames[] = { "single view", "2 player - horizontal split",
+                                        "2 player - vertical split", "3 player", "4 player" };
+        const int count = static_cast<int>(SplitLayout::Four) + 1;
+        const int next = (static_cast<int>(renderer_.splitLayout()) + 1) % count;
+        renderer_.setSplitLayout(static_cast<SplitLayout>(next));
+        controller_.setStatus(kNames[next]);
+    }
+
     if (input.copyCamera) {
         /* The DEBUG VIEW rides along, because reproducing a view means both:
          * an artefact seen in the occlusion pass is not visible in the lit
@@ -295,7 +340,39 @@ FrameInput Application::arbitrate(FrameInput input)
 {
     const DevRequests requests = renderer_.takeDevRequests();
 
-    if (renderer_.devWantsKeyboard()) {
+    /* GATHER, RESOLVE, ASK — see cromwell/input/PointerFocus.hpp.
+     *
+     * WHY A CLAIM LIST RATHER THAN THE THREE `if`s THIS USED TO BE. Because
+     * there is more than one surface, and the dev panel was the only one being
+     * asked. ImGui knows nothing about a button drawn by cromwell's widget kit,
+     * so a click on the HUD was swallowed by the button AND delivered to the
+     * world underneath it — which for this game means a stray move order every
+     * time the gallery is open. Adding the kit as a second claimant is one line
+     * here instead of a second flag every reader has to remember to check.
+     *
+     * All three answer for the frame that most recently finished drawing, which
+     * is inherent to hit-testing an immediate-mode UI and costs a wrong decision
+     * only when the cursor crosses a widget's edge on the exact frame of a
+     * press. */
+    if (renderer_.devWantsMouse())    focus_.claimMouse("dev panel");
+    if (renderer_.devWantsKeyboard()) focus_.claimKeyboard("dev panel");
+    if (renderer_.uiWantsMouse())     focus_.claimMouse("hud");
+#if XC_HAVE_WEB
+    /* THE POINTER NEEDS NOTHING FROM THE WEB PANEL. The page lives inside an
+     * ImGui window, so any click that reaches it has already made
+     * WantCaptureMouse true and the dev panel's claim above covers it.
+     *
+     * The keyboard does need it, because ImGui cannot see a caret that is inside
+     * the page rather than in one of its own fields. Asked of the surface
+     * directly rather than cached, so it is false the moment focus leaves the
+     * field — which is what keeps an open browser from swallowing the game's
+     * hotkeys for as long as it is on screen. */
+    if (renderer_.webPanel() && renderer_.webPanel()->wantsKeyboard())
+        focus_.claimKeyboard("web panel");
+#endif
+    focus_.resolve();
+
+    if (!focus_.worldTakesKeys()) {
         input.setStoreyGround = input.setStoreyMiddle = input.setStoreyTop = false;
         input.setStoreyDynamic = false;
         input.cycleRing = input.toggleCutaway = input.toggleLos = false;
@@ -305,34 +382,13 @@ FrameInput Application::arbitrate(FrameInput input)
         input.sunAzimuthRate = input.sunElevationRate = 0.0f;
     }
 
-    if (renderer_.devWantsMouse()) {
+    if (!focus_.worldTakesPointer()) {
         input.orbiting     = false;
         input.wheel        = 0.0f;
         input.leftPressed  = false;
+        input.leftDown     = false;
         input.leftReleased = false;
     }
-
-#if XC_HAVE_WEB
-    /* THE POINTER NEEDS NOTHING HERE. The page lives inside an ImGui window,
-     * so any click that reaches it has already made WantCaptureMouse true and
-     * the block above has already taken the mouse away from the world.
-     *
-     * The keyboard does need it, because ImGui cannot see a caret that is
-     * inside the page rather than in one of its own fields. Asked of the
-     * surface directly rather than cached from the last frame, so it is this
-     * frame's answer — and it is false the moment focus leaves the field,
-     * which is what keeps an open browser from swallowing the game's hotkeys
-     * for as long as it is on screen. */
-    if (renderer_.webPanel() && renderer_.webPanel()->wantsKeyboard()) {
-        input.setStoreyGround = input.setStoreyMiddle = input.setStoreyTop = false;
-        input.setStoreyDynamic = false;
-        input.cycleRing = input.toggleCutaway = input.toggleLos = false;
-        input.toggleCover = input.toggleGrenade = input.toggleOcclusion = false;
-        input.toggleBake = input.toggleFlatView = input.resetWorld = false;
-        input.panForward = input.panRight = 0.0f;
-        input.sunAzimuthRate = input.sunElevationRate = 0.0f;
-    }
-#endif
 
     input.toggleCutaway   |= requests.toggleCutaway;
     input.toggleCover     |= requests.toggleCover;
@@ -480,6 +536,7 @@ int Application::run()
      * is the only way a screenshot run can have it, having no F1 to press. */
     renderer_.setupDevView(state_.world().lattice().storeys());
     if (options_.forceDevView) renderer_.setDevViewVisible(true);
+    if (options_.forceUiGallery) renderer_.toggleUiGallery();
 
     /* Diagnostic mode: prove the compute path and leave. Before the web test
      * and before the camera, because it depends on nothing but a live GL
@@ -526,15 +583,45 @@ int Application::run()
     }
 #endif
 
-    pawn_.rig().applyPreset(options_.cameraPreset, options_.freeCamera);
+    /* THE STARTING VIEWPOINT — game data, applied by the game. These are
+     * framings of THIS demo map (Staircase looks down its stairwell), which is
+     * exactly why the engine's rig no longer has an applyPreset: a pose is
+     * nothing but at().lookingAt(), and the coordinates belong beside the
+     * option that names them. See CliOptions::cameraPreset. */
+    switch (options_.cameraPreset) {
+        case CameraPreset::Free:
+            pawn_.camera().at({ options_.freeCamera[0], options_.freeCamera[1],
+                                options_.freeCamera[2] })
+                          .lookingAt({ options_.freeCamera[3], options_.freeCamera[4],
+                                       options_.freeCamera[5] });
+            break;
+        case CameraPreset::Staircase:
+            pawn_.camera().at({ 21.0f, 5.5f, 11.5f }).lookingAt({ 13.5f, 2.2f, 17.0f });
+            break;
+        default:
+            pawn_.camera().at({ 34.0f, 24.0f, -6.0f }).lookingAt({ 11.0f, 1.0f, 12.0f });
+            break;
+    }
     rebuildDerivedState();
     if (options_.detonateAt) {
         controller_.detonateAt(*options_.detonateAt);
         applyOutcome(controller_.takeOutcome());
     }
 
-    int frames = 0;
-    while (!WindowShouldClose()) {
+    int  frames  = 0;
+    bool running = true;
+
+    /* THE FRAME, AS A CALLABLE RATHER THAN A LOOP BODY — and it has to be.
+     * On Windows, grabbing the title bar parks this thread inside the OS's
+     * modal move/size loop: glfwPollEvents (at the tail of EndDrawing) does
+     * not return until the mouse is released, and a loop written inline here
+     * would simply stop presenting for the duration — the window drags as a
+     * frozen image with the background bleeding through its edges. The
+     * ModalLoopPump below re-enters this frame from INSIDE that stall, which
+     * is only possible because it is callable. That call site is why exits
+     * set `running` rather than break. See cromwell/platform/ModalLoopPump.hpp
+     * for the whole story, including what each platform needs. */
+    auto tickFrame = [&] {
         /* THE WHOLE FRAME, and every system inside it as its own row. The
          * panel is meant to answer the same question Unreal's stat breakdown
          * does — which system is eating the frame — and it can only name the
@@ -560,6 +647,18 @@ int Application::run()
         }
 
         FrameInput input = input_.sample(options_.mouseX, options_.mouseY);
+
+        /* AGES THE DEBUG QUEUE AT THE TOP OF THE FRAME, before anything can add
+         * to it. That ordering is what makes the default lifetime mean "one
+         * frame": a line queued during this frame is drawn at the end of it and
+         * swept by the next tick round. Ageing after the draw instead would
+         * make every line vanish before it was ever seen.
+         *
+         * Unconditional, and not gated on the layer switch: turning the drawing
+         * off must not stop the queue emptying, or a hidden queue would grow
+         * until it hit its cap and then report an overflow that nothing caused. */
+        DebugDraw::get().advance(input.deltaSeconds);
+
         if (input.toggleDevView) renderer_.toggleDevView();
         if (input.toggleUiGallery) renderer_.toggleUiGallery();
 
@@ -587,6 +686,11 @@ int Application::run()
              * itself. */
             pawn_.tick(input.deltaSeconds, controller_, state_.world());
 
+            /* The stand-in second player looks around slowly — enough motion
+             * to prove their pane is a live feed. A real player two replaces
+             * this line with their own controller's intent. */
+            playerTwoRig_.orbit(Vector2{ 20.0f * input.deltaSeconds, 0.0f });
+
             /* The entity update cycle: every unit ticks, and its components
              * tick or think from there. */
             {
@@ -603,10 +707,23 @@ int Application::run()
              * cursor moves, so it is a genuine per-frame cost rather than
              * bookkeeping — and the first thing to suspect when the frame
              * time moves with the mouse. */
+            /* WHERE THE VIEW'S PICTURE IS, this frame — the whole window, or
+             * pane 0 of the split. The controller's picks project through this
+             * rectangle, so it has to be stated by the thing that knows the
+             * layout, and restated per frame because the layout and the window
+             * both change. */
+            if (renderer_.splitLayout() == SplitLayout::Single) {
+                controller_.setViewArea(std::nullopt);
+            } else {
+                controller_.setViewArea(paneRect(renderer_.splitLayout(), 0,
+                                                 static_cast<float>(GetScreenWidth()),
+                                                 static_cast<float>(GetScreenHeight())));
+            }
+
             if (controller_.animator().isRunning()) {
                 CW_PROFILE_ZONE_N("move animation");
                 controller_.stepAnimation(input.deltaSeconds);
-            } else if (!input.orbiting && !renderer_.devWantsMouse()) {
+            } else if (!input.orbiting && focus_.worldTakesPointer()) {
                 CW_PROFILE_ZONE_N("pointer pick");
                 controller_.updatePointer(input);
             }
@@ -630,7 +747,7 @@ int Application::run()
              * a move animation rather than the previous one's. */
             updateCutawayStorey();
         } else {
-            /* F5 re-reads the splash shader. Handled here rather than with the
+            /* F6 re-reads the splash shader. Handled here rather than with the
              * in-game keys because this branch is the only place the front end
              * runs, and the splash is the only pass listening. */
             if (input.reloadShaders) renderer_.reloadShaders();
@@ -693,7 +810,7 @@ int Application::run()
          * changing state mid-draw would leave the rest of the frame drawing a
          * screen that is no longer current. */
         const FrameRenderer::UIRequest request = renderer_.takeUIRequest();
-        if (request.quit) break;
+        if (request.quit) { running = false; return; }
         if (request.setAmbientOcclusion) renderer_.ao().setEnabled(*request.setAmbientOcclusion);
         if (request.setUseBakedSun)      view_.useBakedSun = *request.setUseBakedSun;
         if (request.setSoftCutaway)      view_.softCutaway = *request.setSoftCutaway;
@@ -701,8 +818,20 @@ int Application::run()
 
         if (options_.screenshotPath && ++frames >= options_.screenshotFrame) {
             TakeScreenshot(options_.screenshotPath->c_str());
-            break;
+            running = false;
         }
+    };
+
+    /* SCOPED, DELIBERATELY: the pump hooks the live window in its constructor
+     * and unhooks in its destructor, and the unhook has to happen while the
+     * window still exists — CloseWindow below would otherwise be tearing down
+     * a window whose wndproc chain still points at us. Inside the scope, every
+     * frame goes THROUGH the pump so its depth guard sees the loop's entries
+     * as well as its own; during a drag the guard is what keeps a nested frame
+     * from nesting again. */
+    {
+        ModalLoopPump pump(tickFrame);
+        while (running && !WindowShouldClose()) pump.tick();
     }
 
 #if XC_HAVE_WEB

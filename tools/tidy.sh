@@ -64,6 +64,11 @@ EXTRA_INCLUDES=()
 HAVE_RAYLIB=0
 if [ -f "$DEPS/raylib-src/src/raylib.h" ]; then
     EXTRA_INCLUDES+=("-I$DEPS/raylib-src/src" "-I$DEPS/raylib-src/src/external")
+    # GLFW rides along inside raylib's tree. One file wants its headers -
+    # platform/ModalLoopPump.cpp - for the same reason its CMake include is
+    # PRIVATE: the refresh callback and the native handle, which raylib does
+    # not re-export.
+    EXTRA_INCLUDES+=("-I$DEPS/raylib-src/src/external/glfw/include")
     HAVE_RAYLIB=1
 fi
 if [ -f "$DEPS/imgui-src/imgui.h" ]; then
@@ -91,7 +96,8 @@ if [ ${#FILES[@]} -eq 0 ]; then
     if [ $HAVE_RAYLIB -eq 1 ]; then
         SEARCH+=(src/cromwell/camera src/cromwell/decal src/cromwell/geometry
                  src/cromwell/gpu src/cromwell/lighting src/cromwell/material
-                 src/cromwell/model src/cromwell/overlay src/cromwell/post
+                 src/cromwell/model src/cromwell/overlay src/cromwell/platform
+                 src/cromwell/post
                  src/cromwell/ribbon src/cromwell/input src/cromwell/ui/paint)
     else
         echo "note: raylib not found under $DEPS - skipping render code."

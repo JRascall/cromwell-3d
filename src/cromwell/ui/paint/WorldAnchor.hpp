@@ -32,6 +32,7 @@
 #pragma once
 
 #include "cromwell/math/Vec2.hpp"
+#include "cromwell/math/Vec3.hpp"
 
 #include "raylib.h"
 
@@ -89,7 +90,7 @@ struct WorldAnchorSettings {
  * not collapse as the target recedes, which is what makes it a UI offset rather
  * than a second world position. Pass it already multiplied by the display
  * scale. */
-WorldAnchor anchorToWorld(Vector3 worldPosition, const Camera3D& camera,
+WorldAnchor anchorToWorld(Vec3 worldPosition, const Camera3D& camera,
                           Vec2 pixelOffset = {},
                           const WorldAnchorSettings& settings = {});
 

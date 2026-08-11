@@ -1,5 +1,6 @@
 #include "cromwell/spatial/SpatialHash.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace cromwell {
@@ -146,6 +147,38 @@ void SpatialHash::queryBox(Vec3 min, Vec3 max, std::vector<int>& out) const
             p.y >= min.y && p.y <= max.y &&
             p.z >= min.z && p.z <= max.z)
             out.push_back(entry.id);
+    });
+}
+
+void SpatialHash::querySegment(Vec3 start, Vec3 end, float radius, std::vector<int>& out) const
+{
+    out.clear();
+    if (radius <= 0.0f) return;
+
+    const Vec3 min{ std::min(start.x, end.x) - radius, std::min(start.y, end.y) - radius,
+                    std::min(start.z, end.z) - radius };
+    const Vec3 max{ std::max(start.x, end.x) + radius, std::max(start.y, end.y) + radius,
+                    std::max(start.z, end.z) + radius };
+
+    const Vec3  along = end - start;
+    const float lengthSquared = along.lengthSquared();
+    const float radiusSquared = radius * radius;
+
+    forEachInCellRange(min, max, [&](const Entry& entry) {
+        /* Distance from the point to the SEGMENT, not to the infinite line: a
+         * body well past the end of a trace is not along it, and clamping the
+         * parameter is the whole difference. A degenerate segment — a zero-length
+         * trace, which happens when a sweep is asked for before anything has
+         * moved — falls back to the distance from the start, which is the right
+         * answer rather than a division by zero. */
+        float t = 0.0f;
+        if (lengthSquared > 1e-12f) {
+            t = dot(entry.position - start, along) / lengthSquared;
+            t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+        }
+
+        const Vec3 closest = start + along * t;
+        if (distanceSquared(entry.position, closest) <= radiusSquared) out.push_back(entry.id);
     });
 }
 

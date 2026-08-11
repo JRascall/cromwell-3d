@@ -70,6 +70,25 @@ public:
     static constexpr int kMinSizePx = 4;
     static constexpr int kMaxSizePx = 256;
 
+    /* Horizontal subpixel positions per pixel. Must be a power of two - the
+     * cache key masks with it - and ONE means every glyph lands on a whole
+     * pixel, which is what the painter's phase arithmetic degrades to on its
+     * own.
+     *
+     * ONE, NOT FOUR, AND THE REASON IS THE HINTING. Four gives quarter-pixel
+     * placement, which is Godot's default and buys exact letter spacing. But it
+     * only works with hinting off or light: native hinting snaps stems onto the
+     * pixel grid, and then shifting the hinted outline by a quarter of a pixel
+     * throws that away again. The two features are alternatives, not additions.
+     *
+     * We take the hinting. It is what Dear ImGui and Source both do - hint
+     * hard, place on whole pixels - and on this project's own text it is
+     * visibly crisper at the 10 to 16 px the kit lives at. The cost is that
+     * fractional letter spacing quantises: 2.4 px of tracking becomes
+     * alternating 2s and 3s. Raise this to 4 and turn hinting off in
+     * loadFontFreeType to swap back to Godot's trade. */
+    static constexpr int kPhaseCount = 1;
+
     UiFontSet() = default;
     ~UiFontSet();
 
@@ -92,6 +111,16 @@ public:
      * on a set that loaded nothing. */
     void unload();
 
+    /* The integer pixel size the atlas backing this style is rasterised at.
+     *
+     * PUBLIC BECAUSE THE PAINTER HAS TO DRAW AT IT. A glyph rasterised for 13 px
+     * and drawn at 13.5 is resampled, and resampling is the one thing per-size
+     * atlases exist to avoid — raylib's DrawTextEx scales by size/baseSize, so
+     * any difference between the requested size and the baked one softens every
+     * glyph. Style sizes are fractional the moment a display scale multiplies
+     * them, so the two numbers cannot be assumed equal. */
+    static float rasterSize(float sizePx);
+
     /* The atlas for this weight AT THIS SIZE — rasterising it if this is the
      * first time that pair has been asked for. Falls back a weight at a time:
      * the requested weight, else Regular, else raylib's built-in font.
@@ -99,10 +128,17 @@ public:
      * For the painter; widgets never see this. `sizePx` must be the size the
      * text will actually be drawn at, because that is the entire point.
      *
+     * `phase` selects which horizontal subpixel variant to use: 0 is on the
+     * pixel, 1 is a quarter right, and so on. The painter picks it from the
+     * fractional part of the position it wants and then draws on the whole
+     * pixel below it - so the glyph is never resampled, but the text still
+     * sits where the layout asked. Anything measuring rather than drawing
+     * should pass 0; the advances are identical across phases by construction.
+     *
      * const, and it mutates the cache, because "which atlas" is a question
      * measure() has to ask too and neither caller is conceptually writing to
      * the font set. */
-    const Font& fontFor(FontWeight weight, float sizePx) const;
+    const Font& fontFor(FontWeight weight, float sizePx, int phase) const;
 
     /* ---- TextMetrics --------------------------------------------------- */
     Vec2  measure(std::string_view text, const TextStyle& style) const override;
@@ -121,7 +157,7 @@ private:
      * tens of times per frame against a container holding single digits of
      * entries — the tree walk is two or three comparisons and it never
      * rehashes. This is cold code by the standard in UiContext.hpp. */
-    static std::uint32_t cacheKey(int weightIndex, int sizePx);
+    static std::uint32_t cacheKey(int weightIndex, int sizePx, int phase);
 
     /* The file behind each weight, empty when it never loaded. */
     std::string paths_[kWeightCount]{};
