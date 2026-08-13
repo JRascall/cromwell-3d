@@ -15,14 +15,35 @@ from those decks unless marked otherwise.
 |---|---|
 | **[CEDEC16]** | CEDEC 2016 — *Rendering technology behind Resident Evil 7*. The foundational architecture talk. |
 | **[CEDEC18]** | CEDEC 2018 — *Graphics optimisation in recent titles* (RE:2, DMC5). |
-| **[COC22]** | Open Conference RE:2022 — *Efforts toward GPU-driven rendering*. |
+| **[CEDEC17]** | CEDEC 2017 — Monster Hunter: World rendering and GPU optimisation. **MT Framework, not RE ENGINE** (see §2.1's trap), but the *probe* work in §4.1.1 is by the same R&D division and continues RE7's system directly. |
+| **[COC22]** | *Efforts toward GPU-driven rendering.* **Dating disputed — see below.** |
+| **[REAC25]** | REAC 2025 — *RE ENGINE Meshlet Rendering Pipeline*. Official English, DD2 / MH Wilds generation. |
 | **[COC23]** | Open Conference RE:2023 — *Is Rendering Still Evolving?*, *Advances in Ray Tracing*, *New Rendering Features Rundown*, *RE4 Hair*, *RayTracingLensFlare*. |
 | **[GDC26]** | GDC 2026 — *Implementing Real-Time Path Tracing in RE ENGINE for Resident Evil Requiem and PRAGMATA*. |
 | **[NV]** | NVIDIA developer-blog Q&A with Capcom on the same work. |
 | **[GDC19]** | GDC 2019 — *Optimization Techniques: RE2 / DMC5*. 110 slides, official English, distributed via GPUOpen. |
 | **[tool]** | Observed from shipped tooling — Autodesk's Dragon's Dogma 2 tools piece, the RELit modding docs, engine enums and material files read by community tooling. Descriptive, not Capcom's engineering word, and the material-file archaeology in particular is unverified. |
 | **[3P]** | Third-party technical analysis — Digital Foundry, ComputerBase, TechPowerUp — and shipped graphics menus. Observation of the output, never a claim about the implementation. |
+| **[CAPTURE]** | **Our own RenderDoc frame captures of the shipped game.** A different evidence class from everything else here: not what Capcom said, but what the binary does. It can therefore *contradict* a deck, and where it does, it wins on questions of fact about that build. It cannot speak to intent, to other titles, or to anything outside the captured frame. See §2.5. |
 | **[inferred]** | Our reading, not Capcom's. |
+
+> **[COC22] IS MISDATED BY SIX YEARS, AND THIS IS NOW SETTLED.** The deck this
+> document has been citing as "Open Conference RE:2022" is
+> **Game Creators Conference 2016**. Three independent confirmations: its own
+> slide 2 reads 「**GCC 2016はオープンなイベントです**」; its description says
+> 「**Game Creators Conference 2016の講演で使用したスライドです**」; and the
+> CEDEC 2016 RE7 deck cites it as a *companion talk given that same year*
+> (「多くの設計概念は、GCC資料をご確認下さい」). The 2022-07-15 in the docswell
+> slug is the **upload** date, and the sidebar linking to RE:2019/2022/2023 is
+> channel boilerplate.
+>
+> **This matters most for §9.1.** Everything there described as "what Capcom
+> currently do" about GPU-driven rendering and hash-map auto-instancing is
+> **RE7-era, 2016, three years before RE2R** — contemporaneous with RE7's
+> development, not a recent statement of practice. The technique is not thereby
+> wrong, but "RE ENGINE does this today" is not what the source supports. The
+> tag is kept as `[COC22]` only to avoid breaking every cross-reference in this
+> file; read it as **GCC 2016** everywhere.
 
 > **Caveat on the numbers.** These decks are Japanese slide decks read through
 > machine extraction and translation. The structure and the technique names are
@@ -178,6 +199,40 @@ Two details are worth more than the layout itself:
   three-bit selector packed next to occlusion. Skin in a title whose entire
   reputation rests on faces is a *material index*, not an architecture.
 
+### Light culling is CLUSTERED, and the dimensions are published **[CEDEC16]**
+
+Missing from earlier revisions of this document, and it is the most directly
+applicable thing in the whole RE7 talk for a renderer planning Forward+.
+
+> 「**32ｘ32ピクセルを1タイル、深度方向を16分割して使用**」 — 32×32 pixel tiles,
+> the depth split into 16 slices. A tile's min and max depth become an AABB along
+> the frustum, tested against each light; spot lights fall out as intersections
+> against several planes. Run on async compute where possible.
+
+The cluster structure, exactly:
+
+| | |
+|---|---|
+| cluster grid | **60 × 34 × 16 at 1080p**, 32 bit per cluster |
+| cluster word | 24 bit light-list offset + 8 bit light-list mask |
+| light list | up to 8 consecutive 32-bit words, one bit per light index |
+| reconstruction | mask + bit → light index, per **[Humus 2015]** |
+| ceiling | **512 lights** |
+| depth slicing | logarithmic, α = 16 |
+| light types | directional, point + IES, spot + IES |
+
+Two-stage: GPU occlusion culling decides whether a light draws shadows at all,
+then clustered shading uses the depth buffer.
+
+**Why this is worth having in front of us.** 60 × 34 × 16 is 32 640 clusters
+carrying 32 bits each — 130 KB — to index 512 lights at 1080p. Our lattice is
+24 × 24 × 9 = 5 184 cells. A *world-space* cluster grid over the lattice is
+smaller than RE7's screen-space one by a factor of six, needs no depth-slice
+maths and no per-frame rebuild as the camera moves, and is indexed by the same
+arithmetic every other grid in this codebase already uses. **The hard part of
+Forward+ is the cluster structure, and the lattice is one.** That is the fourth
+time this document has reached that conclusion from a different direction.
+
 ### Frame budget, RE7, 1080p/60 **[CEDEC16]**
 
 | pass | cost |
@@ -202,11 +257,28 @@ reason the rest of this document leans so hard on RE7-era material.
 
 **There is no published RE ENGINE G-Buffer layout later than RE7's, in any
 language.** The four RE:2023 rendering decks contain no channel table, no bit
-depth, and no statement of the shading model or BRDF after CEDEC 2016. Nor is
-there any RE2R- or RE3R-specific rendering talk beyond CEDEC 2018 and GDC 2019,
-**any RE4R lighting talk at all**, any cascade count or per-cascade shadow
-resolution for any remake, any per-pass GPU millisecond figure for any of the
-three, or any published frame breakdown of an RE ENGINE game.
+depth, and no statement of the shading model or BRDF after CEDEC 2016 — and
+neither does REAC 2025, which publishes only the *visibility* buffer's format
+(`R32G32Uint`, or a 64-bit atomic; 1 bit signature / 24 bit instance / 7 bit
+triangle). Nor is there any RE2R- or RE3R-specific rendering talk beyond
+CEDEC 2018 and GDC 2019, **any RE4R lighting talk at all**, or any published
+frame *breakdown* of an RE ENGINE game.
+
+**One correction to an earlier revision of this line.** It used to say no
+per-pass GPU figure exists for any remake. That was too strong: GDC 2019's
+testing-environment slide pins the whole deck to **"RE2 (2/15 patch), 1080p,
+mainly Radeon RX 480, partially R9 Fury X"**, which makes every number in it an
+RE2 number — including a per-stage culling-and-GBuffer table and a whole-frame
+figure. See §2.4. What remains absent is a *complete* breakdown: there is no
+shadow, lighting, post, transparent or UI figure for RE2 anywhere.
+
+**One gap that has since closed: the cascade count.** REAC 2025 states it
+outright for the DD2 / MH Wilds generation — **"3 Cascade Shadow with
+AsyncCompute"**, and elsewhere **"3 cascade shadow maps and 1 spotlight shadow
+map"**. **[REAC25]** Still nothing for the remakes, but this is the only cascade
+figure Capcom have ever published and it is worth having: three, async, plus one
+spotlight. Note how modest that is next to the engine's `ShadowResolution` enum
+topping out at 4096 and `SparseShadowTreeResolution` reaching 64K.
 
 > **A trap worth flagging.** Capcom R&D's deck archive contains a CEDEC 2017
 > Monster Hunter: World talk with a full **six**-render-target G-Buffer table,
@@ -256,6 +328,556 @@ RE4R. RE4R exposes an SSS on/off graphics toggle and cuts SSS entirely on PS4
 **[3P]**, which is consistent with a separable screen-space pass that can simply
 be skipped.
 
+### 2.4 The two remakes, stage by stage
+
+Assembled because they are the titles worth learning from, and written with each
+claim marked by how well it is actually attested. **Nobody can give you an
+RE ENGINE frame the way they can for Doom** — Capcom have never published a frame
+breakdown of any title in any language. What follows is the most that the sources
+support, and it stops where they stop.
+
+**These are not one renderer.** RE2R (2019) and RE4R (2023) are four years and a
+console generation apart. RE2R shipped with no ray tracing and no SDF machinery;
+RE4R has RT reflections, SDF types in its runtime, sheen/velvet materials and the
+normal-correction fix. Reading them as a single pipeline would flatten the most
+informative part.
+
+#### Resident Evil 2 (2019) — the purest rasterised RE ENGINE
+
+**The attribution anchor that makes this section possible** **[GDC19]**: the
+testing-environment slide reads *"RE2 (2/15 patch) • 1080p • Mainly Radeon RX480,
+partially Radeon R9 Fury X"*. DMC5 appears in that deck only as a shipped title —
+**no DMC5 measurement appears in it at all** — so every figure below is RE2.
+
+**Frame time**: **15.84 ms → 12.09 ms** at 1080p on an RX 480, a stated *"24%
+frame time saving"* across the optimisation work. (The deck contradicts itself by
+0.04 ms — 12.13 elsewhere — unexplained.)
+
+**The only published per-pass figures for any remake**, µs, RE2 / 1080p / RX 480
+/ DX12 / Radeon GPU Profiler:
+
+| configuration | culling | GBuffer | total |
+|---|---|---|---|
+| frustum culling | 115.5 | 2 295.4 | 2 410.9 |
+| + occlusion culling | 618.3 | 1 976.9 | 2 595.2 |
+| + auto split | 829.4 | 1 764.4 | 2 593.8 |
+| + partial Z-prepass | 823.1 | 1 560.6 | 2 383.7 |
+| + reduced resource barriers | 285.4 | 1 592.5 | 1 877.9 |
+
+**Two things in that table cut against the tidy narrative, and they are the most
+useful part of it.** Auto-split made the total *slightly worse* — the culling
+cost ate the GBuffer saving. And **the barrier reduction is what actually paid**,
+cutting culling by 65% while GBuffer rose. Capcom say so themselves: GPU
+occlusion culling alone moved the frame 15.84 → 15.61 ms, *"At this point not
+gain performance"*, and *"Not as much geometry culled as hoped"*. It only became
+worthwhile once the barriers were fixed.
+
+**Pass order — and this is as far as the sources go.** Culling → partial
+Z-prepass → GBuffer (decals inside or adjacent) → … and then nothing. There is no
+RE2R pass list, timeline or capture in any published deck; the RGP screenshots in
+GDC 2019 carry their pass names only in the images. The engine's registered pass
+*names*, from 2016, are `GBuffer, DeferredLighting, ShadowCast, PostProcess, Etc`.
+
+**The culling chain**, in order **[GDC19]**, and it is the best-documented part of
+RE2R:
+
+1. A `VisibleBuffer` — a `ByteAddressBuffer`, one element per mesh, `0xffff`
+   visible / `0x0000` not — which **doubles as the `ExecuteIndirect` CountBuffer**,
+   so culling and dispatch share one structure.
+2. **Frustum, in compute, one dispatch for the entire scene.**
+3. **Occlusion, by rasterising the AABBs — one instanced draw for all of them** —
+   into a **256×128 MSAA 4× depth buffer** built from *artist-authored simplified
+   occluder geometry*, configured never to be read through an SRV.
+4. The test is inverted and costs almost nothing: `[earlydepthstencil]`, and the
+   pixel shader writes `0xffff` only if it survives. If EarlyZ kills the fragment,
+   the compute stage's verdict stands. `WaveCompactValue` collapses writes to the
+   same address within a wave.
+5. **Sub-pixel occludees are handled by inflating the AABB's vertices in the
+   vertex shader** — half a pixel outward from the box centre — because without
+   conservative rasterisation a small projected box tests as nothing.
+6. Large meshes are **auto-split into 256-triangle batches** with a per-batch
+   AABB, because *"large meshes are always visible"*.
+7. Instancing indices are compacted with a wave prefix count, then **adjacent
+   indirect commands are merged**, because *"almost all draws fall below 768
+   indices"* and many tiny batches perform badly.
+
+**Partial Z-prepass**: *"Limiting Z-prepass to meshes close to the camera"*, and
+**no distance threshold is published in either language**. Its summary notes it is
+*"very effective indoors"* — the one place a technique is characterised in a way
+that favours RE2 over DMC5.
+
+> **A correction to a claim this document carried.** "Alpha-tested geometry forced
+> through the Z-prepass" is stated of **RE7**, not RE2, and only in the Japanese
+> deck — presented as the *prior* practice the partial Z-prepass departs from.
+> Do not attribute it to RE2R.
+
+**Depth Bounds Test** is used *"for decals and light shafts"*, killing pixel
+shaders for decal volumes entirely hidden behind a wall. Savings are chart-only,
+no data labels, in both decks.
+
+**Two negatives worth as much as the positives.** RE2R on PC shipped with **no
+async compute** — *"Used for Consoles • Implementation was incompatible for PC"* —
+and no SM6.0, *"Not enough time to ensure stability"*. And DX12 beat DX11 by
+2.15 ms but beat **DX11-with-AGS by only 0.06 ms**: nearly the entire win was
+vendor intrinsics, not the API.
+
+### 2.5 RE2R measured — six frame captures **[CAPTURE]**
+
+Everything above is testimony. This section is measurement: six RenderDoc
+captures of the shipped Steam build on DX12, taken 2026-08-13 across the Mizoil
+gas station, the shop interior, a street vista, an alley, the RPD main hall and a
+cutscene. **Where this contradicts a deck, it wins on questions of fact about
+this build** — and it contradicts one.
+
+Method note for anyone repeating it: the game must be launched *by Steam through*
+`renderdoccmd`, via launch options, or Steam's DRM relaunch produces an unhooked
+process and nothing captures. Confirm the hook by checking `renderdoc.dll` is
+loaded in the game process, not by looking for the overlay.
+
+**Caveat on resolution.** These frames render at **1129×635** and upscale to
+1920×1080 — a ~59% resolution scale was set in the graphics options. Absolute
+buffer sizes below scale with that; the *architecture* does not.
+
+#### The G-Buffer, at last
+
+**Identical in all six captures**, same resource ids, same formats — so this is
+the layout, not a per-scene artefact:
+
+| target | format |
+|---|---|
+| 3473 | `R10G10B10A2_UNORM` |
+| 3474 | `R8G8B8A8_SRGB` |
+| 3475 | `R10G10B10A2_UNORM` |
+| 3479 | **`R16G16B16A16_SNORM`** |
+| depth | `D32S8_TYPELESS` |
+
+**This is not RE7's layout.** RE7 was four targets at 16 B/px —
+`R11G11B10F` emissive, `R8G8B8A8_SRGB` basecolor, and two `R10G10B10A2`. RE2R
+keeps three and replaces one with a **64-bit signed target**, taking the
+G-Buffer to **20 B/px**. Capcom have published nothing on this since 2016.
+
+A second, much smaller pass follows the geometry pass in every capture (19–81
+draws against 656–1642) binding `R11G11B10_FLOAT` **plus** basecolor and one of
+the `R10G10B10A2` targets, but *not* 3473 or 3479. Its position and shape match
+RE7's "GBuffer + Decal" adjacency, and writing basecolor and normals while
+leaving velocity alone is what a decal pass would do. **[inferred]** — the
+channel assignments are not yet read off the shader.
+
+Worth noting what the SNORM target probably buys. RE7 stored velocity in an
+*unsigned* `R10G10B10A2` and had to encode it as `sqrt(abs(v))` with a separate
+sign bit. A signed 16-bit-per-channel target needs none of that. **[inferred]**
+
+#### Shadows — RE7's architecture, doubled, and observed running
+
+Two `2048×2048` `R32_TYPELESS` depth arrays of **32 slices** exist in every
+capture (3346 and 3356). **Only 3346 is ever bound as a render target. 3356 is
+never drawn into.**
+
+That is the shadow cache, caught in the act. RE7 described exactly this — a
+`Texture2DArray` at "default 1024×1024×32", a static cache, and a copy between
+them — and the engine's own `ShadowCastSegment` enum carries a `CacheCopy` value
+between `StaticShadow` and `DynamicShadow`. **RE2R runs RE7's mechanism at twice
+the resolution.**
+
+Draws into the shadow array, which do *not* track visible light count:
+
+| scene | shadow draws |
+|---|---|
+| gas station forecourt | 165 |
+| street vista | 710 |
+| alley, one visible streetlight | 750 |
+| RPD main hall, a dozen sconces | 763 |
+| shop interior, one zombie | 952 |
+
+#### The Sparse Shadow Tree is not in RE2R
+
+**No texture of any kind reaches 8192 in either dimension in any of the six
+captures** — including the outdoor street vista with a long view down a city
+block, which is precisely where a 16K–32K baked directional map would be used.
+The largest textures in every frame are ordinary 4096² BC7 art.
+
+§3.2 argued from Capcom's own DMC5-framed wording that the Sparse Shadow Tree
+was probably not RE2R's. **That inference is now measurement.**
+
+#### The shaders name everything — and this is the real haul
+
+RE2R ships **SM6.0 DXIL with full reflection**, so the disassembly carries
+Capcom's own resource and field names. The G-Buffer pixel shader's entry point is
+literally `PS_GBuffer`.
+
+**The G-Buffer, named by Capcom.** The deferred lighting shader binds it as:
+
+| SRV name | our measured format |
+|---|---|
+| `BaseColorMetallicSRV` | `R8G8B8A8_SRGB` |
+| `NormalXNormalYRoughnessMiscSRV` | `R10G10B10A2_UNORM` |
+| `VelocityXVelocityYOcclusionSubSurfaceSRV` | `R16G16B16A16_SNORM` |
+
+That maps onto RE7's published layout exactly, and **confirms the inference above**:
+the new signed 16-bit target is velocity + occlusion + subsurface. RE7 packed
+those into an *unsigned* `R10G10B10A2` and needed a `sqrt(abs(v))` encoding with a
+sign bit; a signed target needs none of it. Also bound: `GIDSRV` (`Texture2D<int>`,
+a material/GBuffer id) and `AmbientBRDF` — a split-sum environment BRDF LUT.
+
+**Light culling is clustered, and still is.** `LightCullingVolumeSRV` is a
+`Texture3D<int>` and `LightCullingListSRV` a `ByteAddressBuffer<int>` — a cluster
+volume plus a light-index list, which is precisely RE7's published scheme
+(§2, "Light culling is CLUSTERED"). `LightInfo` counts them separately:
+`PunctualLightCount`, `AreaLightCount`, forward variants of each, and
+`RT_PunctualLightCount` / `RT_AreaLightCount`. **RE ENGINE has area lights on the
+raster path**, not only under ray tracing. `IESLightTableSRV` is a
+`Texture1DArray<float>`, confirming the IES profiles RE7 described.
+
+**Shadows: two arrays, three cascades, SDSM, and eight rotated taps.**
+
+```
+Texture2DArray<float>  StaticShadowMapSRV
+Texture2DArray<float>  ShadowMapSRV
+SamplerComparisonState LinearCompare
+cbuffer ShadowSamplingRotation { float4 ShadowSamplePoints[8]; }
+```
+
+The static cache and the dynamic map are **both bound to the lit pass and
+combined in the shader**. That is exactly the `min(A, B)` two-map arrangement
+[`source2_rendering.md`](../valve/source2_rendering.md) §9.4 proposed and §11.5
+here argues for — **Capcom do it too, and do not composite into one map at shading
+time.** Worth correcting the impression §3.1 leaves: the `CacheCopy` step builds
+the cache, but the *shading* reads two arrays.
+
+From `LightInfo`, the directional light carries:
+
+```
+Cascade_Translate1..3   Cascade_Bias1..3   Cascade_Scale1..3
+CascadeDistance (float4)   SDSMEnable   SDSMDebugDraw
+DL_Variance   DL_Bias   DL_ArrayIndex   DL_TranslucentArrayIndex
+DL_VolumetricScatteringColor   DL_MinAlpha
+```
+
+**Three cascades** — the same count REAC 2025 reports for the DD2 / MH Wilds
+generation, so it is stable across the engine. **`SDSMEnable` is Sample
+Distribution Shadow Maps**, automatic cascade fitting from the depth buffer, which
+Capcom have never published anywhere. `DL_TranslucentArrayIndex` is a second
+shadow slice for transmitted light. `DL_VolumetricScatteringColor` confirms the
+per-light volumetric scattering that RELit exposes as a tool parameter.
+
+**And there is no PCSS.** Zero hits for `pcss`, `blocker`, `penumbra` or
+`poisson` across all three shaders. What exists is **eight sample points, rotated
+per pixel, fetched through a hardware `SamplerComparisonState`** — a rotated PCF
+kernel — alongside a `DL_Variance` term. §3.3 argued from the total absence of
+PCSS in the literature that RE ENGINE does not do contact hardening. **That is now
+measured rather than argued**, and this project's PCSS with a real blocker search
+is genuinely the more sophisticated filter.
+
+**The tetrahedral probe network is alive.** `LightInfo` carries:
+
+```
+lightProbeOffset   sparseLightProbeAreaNum
+tetNumMinus1       sparseTetNumMinus1
+smoothStepRateMinus  smoothStepRateRcp
+LightProbe_WorldOffset   AOTint
+```
+
+`tetNumMinus1` is a **tetrahedron count**. Earlier research could not establish
+that RE7's tetrahedral network survived, because no engine dump contained the
+word — and here it is, in the shipped lighting shader, with a *sparse* variant
+alongside matching the `LightProbesType { Indoor, Outdoor, Sparse }` enum.
+**RE7's 2016 irradiance-volume design is still what lights this game.** That is
+the strongest single piece of evidence in this document for §11.2.
+
+> **These captures are NOT the 2019 build.** The shaders compile under **SM6.0**,
+> and GDC 2019 states SM6.0 was tried but *"not enough time to ensure
+> stability"* — so it did not ship in 2019. The frames also carry bindless
+> tables, `CheckerBoardInfo` (which likely explains the non-native render
+> resolutions — checkerboard, not a scale slider), `vrsVelocityThreshold`, and
+> `RT_*` light counts. This is the build after the **June 2022 next-gen patch**.
+> Everything above is true of RE2R *as it ships today*; where it differs from the
+> 2019 original is not established, and the bindless and SM6.0 parts almost
+> certainly post-date it.
+
+#### Volumes, probes, IES and colour — from the texture inventory
+
+A render-target walk cannot see any of this: froxel fog, light culling and
+colour grading all live in 3D textures written by compute. Sweeping the
+inventory by *depth* rather than by binding finds them.
+
+**Colour grading: 50 LUTs at 32×32×32 `R8G8B8A8_SRGB`, resident simultaneously.**
+Not one grade — fifty, which is a **per-zone grading set** blended as the player
+moves between areas. Note the size: **32³, not the 64³** RE:2023 describes for
+the baked ACES RRT+ODT. Those are different jobs — a 64³ to bake an expensive
+transform once, 32³ for an artist's look per room — and a renderer can want both.
+This is the concrete form of §8's argument, and it is a much bigger deal than "we
+should add a LUT": the interesting part is that there are *fifty* of them.
+
+**Local reflection probes, exactly as RE7 described them:**
+
+| resource | reading |
+|---|---|
+| `512×512`, **128 slices**, 5 mips, `R11G11B10_FLOAT` | 128 **octahedral** probes, roughness-prefiltered |
+| `256×256`, 6 faces, 5 mips, **`BC6_UFLOAT`** ×many | the baked cubemaps — RE7 states "256×256 BC6H" |
+| `256×256`, 6 faces, `R11G11B10_FLOAT` render targets | live capture into cube faces |
+
+RE7's deck says local cubemaps are stored 256² BC6H and expanded at runtime to a
+512² octahedral map with mips. **All three stages are visible in the frame.**
+
+**A second shadow atlas for local lights**: `512×512` with **128 depth slices**,
+alongside the two 2048²×32 directional arrays. So the shadow budget is 32 slices
+at 2048² for the sun and cache, plus 128 at 512² for everything else.
+
+**IES profiles**: a `512×1` **64-slice** `R16_FLOAT` 1D array — the
+`IESLightTableSRV` the lighting shader binds. Sixty-four photometric profiles.
+
+**Volumetric fog** is present but not yet named. The candidates are two pairs of
+small volumes — `32×32×16` and `32×32×32`, one `R16G16B16A16_FLOAT` and one
+`R11G11B10_FLOAT` in each pair — which is the froxel signature (scattering and
+extinction in one, integrated in-scatter in the other). It is corroborated by
+`DL_VolumetricScatteringColor` in `LightInfo` and by the visible god-ray in the
+RPD hall capture. **[inferred]** — these are written by compute, so confirming
+them means walking the dispatches, which this pass did not do.
+
+Also present and unexplained: a `64×32×384 R11G11B10_FLOAT` volume, and a
+`32×80×32 R32_UINT` volume which is almost certainly the
+`LightCullingVolumeSRV` the lighting shader binds — i.e. **the cluster grid, at
+32×80×32 carrying 32 bits per cell.** RE7 published 60×34×16 at 1080p, so the
+shape has changed while the scheme has not. **[inferred]**
+
+**A note on names.** The engine sets no debug names on *resources* — RenderDoc
+reports them all as "3D Texture 3141" and similar. Everything named above is
+named because it appears in a **shader's reflection data**, not because the
+resource carries a label. That is why the lighting shader was worth more than the
+whole texture inventory.
+
+#### The compute map — 848 dispatches, named
+
+Every compute entry point in the frame, by dispatch count. This is the closest
+thing to a table of contents for RE ENGINE that exists outside Capcom.
+
+| system | entry points |
+|---|---|
+| **culling** | `CS_FastClear` ×372, **`CS_MiniClusterFrustumTest` ×112**, **`CS_MiniClusterCompaction` ×112**, `CS_InstancingCompaction` ×56, `CS_DrawIndirectArgumentFill` ×44, `HiZCS2/3/4`, `CS_CullVolumeOccluder`, `CS_CulltestFirst`, `CS_UpdateInstanceCount` |
+| **lighting** | `CS_LightCulling2`, `CS_LightCullingPatch`, `CS_LightFrustumTransform`, `CS_LightSphereTransform`, **`IndirectIlluminationCS`**, `PreCalculateLighting`, `CalculateGpuBillboardLighting` ×22 |
+| **screen space** | `SSR_IndirectPrepareCS`, `SSR_RayTrace_CS`, `SSR_IndirectClear_CS`, `SSR_ResolveReflectionCS`, `SmallDiffuseFilterCS` ×7, **`FastScreenSpaceSubsurfaceScatteringParam`** |
+| **post** | **`HistogramCS`**, **`WhitePointCS`**, `MotionBlur_TileMaxHCS`, `MotionBlur_TileMaxVCS`, `MotionBlur_NeighborMaxCS`, `FillVelocityCS` |
+| **geometry** | `CS_SkinningMeshTransform`, `CSSkinning`, `CSBlendShape`, `CSCalculateNormal` ×23, `CSWriteNormal`, `CS_ProbagateDupVertex` *(sic)*, `CS_VertAreaSkin`, `CS_PrimAreaSkin` |
+
+Four things worth pulling out.
+
+**"MiniCluster" is Capcom's name for sub-mesh culling granularity.** 112
+frustum-test dispatches and 112 compaction dispatches per frame. CEDEC 2018 and
+GDC 2019 describe this as "automatic division into 256-triangle batches with a
+per-batch AABB" without ever naming it — and it is the direct ancestor of the
+meshlet pipeline REAC 2025 describes. **The culling system is by far the largest
+consumer of compute in the frame**, which is consistent with GDC 2019's admission
+that it barely paid for itself until the barriers were fixed.
+
+**`HistogramCS` + `WhitePointCS` means auto-exposure is histogram-driven**, with
+a computed white point. Our `ToneMapPass` has a fixed exposure uniform and a
+hard-coded `kLinearWhite = 11.2`; both of those are the *constants* that these
+two passes compute per frame. That is a more valuable thing to copy than the tone
+curve itself.
+
+**Subsurface scattering is confirmed screen-space in RE2R**, via
+`FastScreenSpaceSubsurfaceScatteringParam` — so GDC 2026's *"RE ENGINE implements
+subsurface scattering using screen-space blurring"* describes a technique already
+running here, not a recent choice.
+
+**And the resource named `LightCullingVolumeSRV` is written by `CS_LightCulling2`,
+at 32×80×32 `R32_UINT`.** Clustered light culling, in compute, confirmed by name
+rather than by shape. `IndirectIlluminationCS` then *reads* it — so indirect
+illumination is also a compute pass and is light-culling-aware.
+
+#### The output transform is literally BT.709 — measured
+
+The frame's last pass is two draws straight to the swapchain, entry point
+**`ScreenOutputPS`**, sampling one `tLinearImage` through an
+`OutputColorAdjustment` constant buffer. Per channel it computes:
+
+```
+if (x < 0.018)   y = 4.5 * x
+else             y = 1.099 * pow(x, 0.45) - 0.099
+```
+
+**That is the ITU-R BT.709 opto-electronic transfer function, exactly** — the
+0.018 breakpoint, the 4.5 linear slope, the 0.45 exponent and the 1.099/0.099
+scale-and-offset, straight out of the recommendation.
+
+It is worth being precise about why that is not a pedantic distinction:
+
+| | breakpoint | slope | exponent | scale / offset |
+|---|---|---|---|---|
+| **BT.709** (what RE2R does) | 0.018 | 4.5 | **0.45** | 1.099 / −0.099 |
+| sRGB | 0.0031308 | 12.92 | 1/2.4 ≈ 0.4167 | 1.055 / −0.055 |
+| `pow(1/2.2)` (what we do) | — | — | 0.4545 | — |
+
+The three agree in the midtones and diverge in the **shadows**, where BT.709's
+much later breakpoint and gentler toe lift the darkest values relative to sRGB.
+For a game played almost entirely in near-darkness that is not a rounding
+difference, it is the part of the curve the whole image lives in.
+
+The rest of `OutputColorAdjustment` says the encode is a deliberate, configurable
+output stage rather than a constant baked into a shader:
+
+```
+float fGamma;  float fLowerLimit;  float fUpperLimit;  float fConvertToLimit;
+int   uConfigMode;   float fConfigImageIntensity;   float fConfigImageAlphaScale;
+```
+
+`fLowerLimit` / `fUpperLimit` / `fConvertToLimit` are **limited-range (16–235)
+television output**; `uConfigMode` selects the transform. Read alongside the
+**50 resident 32³ grading LUTs** (above) and `HistogramCS` + `WhitePointCS`
+computing exposure and white point per frame, the whole colour chain is:
+
+> scene linear → histogram exposure + computed white point → tone curve →
+> per-zone 32³ grading LUT → **BT.709 OETF, optionally limited-range** → display
+
+**Every stage of that except the tone curve is a constant in our renderer.**
+`ToneMapPass` has a fixed `kDefaultExposure = 4.5`, `filmic.glsl` a fixed
+`kLinearWhite = 11.2` and a `pow(1/2.2)` encode, and there is no LUT at all.
+§11.3 ranks the LUT; the exposure and white point are arguably the better first
+move, because they are two magic numbers that a measurement can simply replace.
+
+#### Text and UI are textured quads — no distance fields anywhere
+
+The UI shader's entry point is **`PS2D`**, binding a single `primTex` and a
+`GUIConstant` buffer. **There is no MSDF, no SDF, and no distance-field decode
+anywhere in the frame.** Glyphs come from an atlas as ordinary textured
+quads — which is worth knowing given how much machinery this project has built
+around MSDF text (`cromwell/sdf/`, `common/sdf.glsl`, `msdf_text.fs.glsl`).
+
+RE ENGINE can afford that because a console-and-PC game ships a known set of UI
+sizes and can bake atlases per size; the MSDF argument is strongest where text
+scales continuously, which is exactly this project's case. **Not a technique to
+copy — a confirmation that the choice was a real fork with a real trade-off, and
+that shipped AAA sits on the other side of it.**
+
+What *is* worth noting is the constant buffer:
+
+```
+float4x4 guiViewMatrix, guiProjMatrix, guiWorldMat;
+float  guiIntensity, guiSaturation, guiSoftParticleDist, guiFilterParam;
+float4 guiScreenSizeRatio;   float2 guiCaptureSizeRatio, guiDistortionOffset;
+float  guiFilterMipLevel, guiStencilScale;
+int    guiDepthTestTargetStencil, guiShaderCommonFlag;
+```
+
+Three world matrices, a **soft-particle distance**, a **stencil depth-test
+target**, and a distortion offset. This is not a 2D overlay system — it is built
+to place UI **in the world**, depth-tested and soft-blended against geometry.
+And it renders **early in the frame**, into its own target well before the
+G-Buffer, rather than being composited last.
+
+#### Volumetric light shafts — screen-space, bilaterally blurred, not froxels
+
+The RPD main hall capture has a pronounced god-ray through the skylight, so the
+question was never *whether* RE2R does volumetric lighting. It was *how*.
+
+**Not with a froxel grid.** No compute pass in the frame writes a fog volume.
+The two small volume pairs that look like froxels are written by
+`PreCalculateLighting` and `CalculateGpuBillboardLighting` — they are a
+**32×32×16 lighting volume for GPU billboards**, a cheap way to light particles
+with real scene lighting, which is a nice technique and not fog. The other two
+volumes are untouched this frame.
+
+**The shafts are a screen-space chain, named in the shaders:**
+
+```
+MaskVS / MaskPS                    →  mask generation
+FullScreenTriangleVS / CombineCopyPS
+FullScreenTriangleVS / LightShaftBilateralBlurXPS
+FullScreenTriangleVS / LightShaftBilateralBlurYPS   ×4
+PreTonemapFullScreenTriangleVS / PreTonemap2_PS
+```
+
+A **separable bilateral blur**, X then Y, on a buffer that is explicitly called a
+light shaft. Bilateral means depth-aware — the blur is prevented from bleeding
+across geometry edges, which is the whole difficulty with cleaning up a
+screen-space volumetric.
+
+**And the choice of a *bilateral* blur is itself the clue to what feeds it.**
+A radial blur from the light's screen position is smooth by construction and
+needs no edge-aware filtering. A **per-pixel raymarch against the shadow map**
+is noisy and needs exactly this. The presence of a four-pass bilateral chain
+therefore points at a raymarched source rather than the classic cheap radial
+smear. **[inferred]** — the generating pass carries a generic entry point
+(`MaskPS`, or one of several literally called `main`), and confirming the march
+would need disassembly rather than a name.
+
+This is the correction §10 needs. That section inferred a froxel system from the
+existence of a per-light volumetric scattering parameter. **The parameter is
+real** — `DL_VolumetricScatteringColor` sits in `LightInfo` — **and the froxel
+volume is not there.** GDC 2019 naming *"light shafts"* as a Depth Bounds Test
+client fits: a screen-space pass with a bounded depth range is exactly what the
+above is. The `VolumetricFog` component the Autodesk article documents is
+therefore most likely a **Dragon's Dogma 2-era addition**, not something the
+remakes had.
+
+#### Other passes the frame names
+
+Identified while chasing the shafts, and worth recording because none of it is
+published:
+
+- **`VS_Cone2` / `DeferredProjectionSpotLightPS`** — spot lights are drawn as
+  **cone geometry** in a deferred pass, and "Projection" means they carry a
+  projected texture (a cookie/gobo). Twenty draws in the RPD hall, which is the
+  sconces.
+- **`VSGpuBillboard` / `PSGpuParticle`** — GPU-simulated particles, lit by the
+  billboard lighting volume above.
+- **`VfxVertexShader` / `VfxPixelShader`** — the general VFX path, interleaved
+  with the particles across a 74-draw transparent pass.
+- **`FullScreenTriangleVS`** — full-screen *triangle*, not a quad, for every post
+  pass. A quad's diagonal seam costs a second raster pass over the shared edge;
+  the triangle avoids it. Free, and this renderer draws quads.
+- **`NewBlending`**, **`PreTonemap2_PS`**, **`CombineCopyPS`** — the composite
+  chain ahead of `ScreenOutputPS`.
+
+#### Everything else the captures settle
+
+- **Occlusion culling** rasterises into a **`128×64` MSAA 4×** depth target
+  (469 draws at the gas station, 392 in the RPD hall). CEDEC 2018 published
+  **256×128** MSAA 4×.
+
+  **It is a fixed size, not a scaled one — and that is measured, not assumed.**
+  A seventh capture was taken at a different quality preset, which moved the
+  render target from `1129×635` to `1476×830`. The occlusion buffer stayed at
+  **`128×64`** across both. Two different render resolutions producing the same
+  cull buffer settles what a single native capture could not: **RE2R's occlusion
+  buffer is half CEDEC 2018's published figure in each dimension, and the
+  difference is a change, not a scaling artefact.**
+
+  For contrast, the things that *do* scale with render resolution behaved as
+  expected across the same pair: the AO deinterleave went `283×159` → `369×208`,
+  exactly a quarter of the render target each time. And the shadow array stayed
+  at `2048²×32` in both, so it is fixed too.
+- **The partial Z-prepass is real and measurable**: 348 depth-only draws against
+  2 154 in the G-Buffer at the gas station, so roughly **16% of geometry** gets
+  a prepass. That is "meshes close to the camera" quantified for the first time.
+- **Ambient occlusion is deinterleaved** — quarter-resolution `283×159` with
+  **16 array slices**, eight bound at once, then resolved through an
+  `R8_UNORM[16]`. Capcom have published nothing about RE ENGINE's AO.
+- **Bloom** is a seven-step `R11G11B10_FLOAT` pyramid, 564→282→141→70→35→17→8.
+- The engine emits **no debug markers** — RenderDoc shows raw D3D12 calls — so
+  the pass *names* remain unknown even though the pass *structure* does not.
+
+#### Resident Evil 4 (2023)
+
+Far less is published, and what exists is covered in depth elsewhere in this
+document: **RT reflections only, no RTGI, occlusion on plain SSAO/CACAO** (§4.4);
+**indirect lighting still probes + local cubemaps + IBL**, confirmed by RE4R's own
+hair talk (§4.3); the **shading-normal correction**, the only thing Capcom credit
+to RE4R's general shading (§2.2); **strand hair** with a full PS5 cost breakdown
+and **shell fur** for Leon's collar (§7); **screen-space SSS**, cut entirely on
+PS4 (§2.3).
+
+The one incidental glimpse of its opaque shadowing is an aside in the hair talk:
+its original approach was screen-space pixel-dither sampling *"as with opaque
+objects"* — so **RE4R's opaque geometry takes its shadows through a dithered
+stochastic sample**. Capcom never elaborate.
+
+RE4R's runtime additionally carries `MeshSignedDistanceField`, `GlobalSDFResolution`,
+`GlobalSDFClipmapNum`, `ShrinkShadowmap`, `MultiSignedDistanceField`,
+`LightProbeRelighting`, `ProbeVisibilityResource` and `GIPointCloud` **[tool]** —
+but **a symbol existing proves the code shipped in the binary, not that RE4R uses
+it**, and the SDF talk is framed around open worlds with a moving sun.
+
 ---
 
 ## 3. Shadows — three systems, and one of them is ours
@@ -290,12 +912,40 @@ That is the right call, and Capcom's 3.2 ms is the evidence for it. Do not
 
 ### 3.2 Baked, compressed directional shadow maps — "Sparse Shadow Tree"
 
-For static sun shadow over large worlds, RE:2/DMC5 bake the directional light's
-depth at **16K² or 32K²** and compress it with a **quadtree over Morton-ordered
-blocks**, where a leaf stores depth plus DDX/DDY gradients at 16-bit precision
-and interior nodes store child indices. Shipping assets are **2.15 MB to
-70.7 MB** LZ4-compressed, and the shadow pass drops **36 ms → 20 ms** on a
-GTX 1070 Ti. **[CEDEC18]**
+For static sun shadow over large worlds, the directional light's depth is baked
+at **16K² or 32K²** and compressed with a **quadtree over Morton-ordered
+blocks** — 128×128 tiles, max 7 levels — where a leaf stores depth plus DDX/DDY
+gradients at 16-bit precision and interior nodes store child indices. Shipping
+engine assets are **2.15 MB to 70.7 MB** at 16K, and the shadow pass drops
+**36 ms → 20 ms** on a GTX 1070 Ti. **[CEDEC18]**
+
+> **This is very probably DMC5, not RE:2, and earlier revisions of this document
+> said "RE:2/DMC5" without qualification.** The deck's shadow section opens
+> 「**DevilMayCry5で特に問題となった**」 — *"this was a particular problem in
+> Devil May Cry 5"* — a directional light covering a wide area, a shadow cache
+> that flushes when the viewpoint moves, and vertex cost from drawing shadows
+> directly. **RE:2 is never named anywhere in the section**, and the 36 → 20 ms
+> slide carries no title, no resolution, and no statement of whether 36 ms is the
+> shadow pass or the frame. A 16K–32K directional map is least motivated by
+> RE2R's tight interiors. **[inferred]**
+
+**Two details worth correcting and keeping.** LZ4 is *not* the shipped format —
+it compresses the **intermediate authoring render** (1024×1024 chunks,
+`R32G8Typeless`), because raw depth is *"1 GB at 16K, 16 GB at 64K"*. The
+finished asset is the quadtree.
+
+And the runtime trick is better than "read a baked map": **the baked depth is
+copied in place of the shadow map's clear**, and the baked meshes are then
+excluded from the shadow render entirely. It costs a copy that was going to be a
+clear anyway, and buys the removal of every static caster's vertex work —
+「ベイクすることでDepthのClearの代わりに動作 … **代わりにメモリを利用**」, memory
+spent instead of vertices.
+
+The compression predicate is one line and worth having: a 2×2 group merges into a
+gradient leaf when `|A + D − B − C| < EPSILON`, i.e. when the four samples are
+coplanar, with `EPSILON = TILE_SIZE/2 * FLT_EPSILON / (MAXZ − MINZ)` and
+`TILE_SIZE = 128`. Leaves on the same plane across different branches are merged
+afterwards, and residual numerical error is minimised with **Nelder–Mead**.
 
 **Capcom's own name for this is `Sparse Shadow Tree`**, which the CEDEC 2018
 talk never says and the RE:2023 SDF talk does — closing a loop that was open in
@@ -326,16 +976,51 @@ ever grows.
 ### 3.3 Softness — and the absence where PCSS should be
 
 **Capcom have published nothing on contact hardening, PCSS, or an area-light
-shadow approximation, for any title at any date.** Given how much they publish,
-that absence is worth treating as informative rather than as a gap in the
-research.
+shadow approximation, for any title at any date** — and this has now been checked
+exhaustively rather than casually. "PCSS" appears **zero times** across GCC 2016,
+CEDEC 2016, CEDEC 2017, CEDEC 2018, every RE:2023 deck, REAC 2025, GDC 2026 and
+every available engine dump. So do `ソフトシャドウ` (soft shadow), `VSM`, `ESM`
+and `バリアンス` (variance). The single appearance of "PCF" in the entire corpus
+is a note about *reducing* its sample count inside Monster Hunter: World's
+volumetric light-injection shader — not the main shadow pass.
 
-What evidence exists points somewhere else entirely, and it is tooling-derived
-rather than Capcom's engineering word. RE ENGINE lights carry a
+**The engine's own filter enum names no kernel at all**: `via.render.ShadowFilter`
+has three values, `Custom` / `Fast` / `Default`. **[tool]**
+
+Weak counter-evidence, tooling-derived: RE ENGINE lights carry a
 **`ShadowVariance`** property, which the RELit modding documentation labels
-"Shadow Blur" while noting the label is wrong **[tool]**. A **variance**-based
-filter with a global softness scale is not PCSS — and light bleeding through
-thin occluders is the variance-shadow-map family's signature artefact.
+"Shadow Blur" while noting the label is wrong **[tool]**. A variance-based filter
+with a global softness scale is not PCSS.
+
+> **A tempting claim, and why it is not in this document.** A widely-repeated
+> report holds that a decompiled Monster Hunter Wilds `LightInfo` cbuffer
+> contains `DL_PCSS_KERNEL`, `DL_ContactShadow`, `Cascade_Bias1..3` and
+> `tetNumMinus1` — which would mean PCSS shipped without any talk mentioning it,
+> *and* that the RE7 tetrahedral probe network is still alive in 2025. It would
+> be the single most useful fact in this document if true.
+>
+> **It could not be corroborated, and the reason is structural rather than a
+> failed search.** There is no MH Wilds or DD2 engine dump available at all —
+> the newest is RE4 (2023), and the enum *values* everyone quotes are read from
+> a **RE2 2019** build. There are no shader decompiles of any kind. So the right
+> class of evidence simply does not exist in reach, and every symbol above
+> returns zero hits.
+>
+> Capcom's own `LightInfo` — the one in the GDC 2026 code listing — is a
+> per-light record in an SRV array indexed by the world-space light grid, which
+> is a *different structure entirely* from a per-frame cascade constant buffer.
+> The shared name corroborates nothing. **Treat the report as unverified.**
+
+**What RE ENGINE actually ships for soft shadows is the SDF, not PCSS**, and
+Capcom say so plainly **[COC23]**: *"Cascade Shadow Map for near view and SDF
+Shadow for far view… Since the SDF shadow is designed to be used for distant
+scenery, it's a fuzzy shadow that's using the low-precision SDF. **The soft
+shadows are not rough when viewed from a distance, but they are not suitable for
+close-ups.** Cascade Shadow Map is used in the foreground instead."*
+
+So the softness split is by *distance*, and the near field — where contact
+hardening would matter — is an ordinary cascaded shadow map with an unnamed
+filter.
 
 There is a second, weaker signal from the opposite direction. The RE4R hair talk
 mentions in passing that its *original* approach to shadowing hair was
@@ -412,6 +1097,77 @@ already a voxel field.** It is now the third time that observation has paid.
 ~1 ms/frame covers only the *tracing*, on CPU, round-robined over 8 frames. The
 sampling cost is separate and Capcom's figure is the one to budget against.
 
+**Capcom's own verdict on this system, from the same deck** — unusually blunt,
+and every complaint is one we would inherit **[CEDEC16]**:
+
+> 「ネットワーク構築は超遅い – 綺麗なＢＳＰツリーを作るのは困難 … プローブ間の
+> 補間が美しくない（**まるで頂点カラー**） – ライトリーク • 現状プローブの位置を
+> 移動することで回避」
+
+Network construction is *"super slow"*, clean BSP trees are hard, interpolation
+between probes is *"not beautiful — **just like vertex colours**"*, and light
+leaks are worked around by **moving the probe by hand**. Note that the last two
+are the two failures §11.2 would be buying into, and note equally that **both are
+consequences of irregular probe placement in a triangle world** — interpolation
+across a tetrahedron is what looks like vertex colour, and hand-moving a probe is
+what you do when you cannot say exactly which cell a probe belongs to. On a
+regular lattice neither applies.
+
+### 4.1.1 Where it went next — and it is a better model for us than RE7's
+
+Monster Hunter: World's 2017 talk shows the same system a year later, simplified
+in exactly the directions that suit us. **[CEDEC17]**
+
+> 「**Irradiance(放射照度）のみ** • **3次SH**（球面調和関数）で圧縮 [Sloan08] •
+> 時間変化は係数間の**線形補間** • プローブネットワーク [Cupisz12] …
+> Gaussian、HanningまたはLancsoz の**窓関数**」
+
+Four decisions worth having:
+
+- **Irradiance only.** Not radiance, not a specular term — the probe answers one
+  question.
+- **Third-order SH**, rather than RE7's four directional colours.
+- **Time of day is a linear interpolation between coefficient sets.** A day-night
+  cycle costs one lerp, because SH coefficients are linear in the lighting.
+- **A window function** — Gaussian, Hanning or Lanczos — to kill ringing, which
+  is the HDR failure mode of SH and the reason naive SH probes flash dark rims
+  around bright sources.
+
+And the structural retreat: probe placement moved **from automatic voxelisation
+to hand-authoring in the DCC tool**, stored in a **uniform AABB grid**, with the
+tetrahedra hit-tested against each cell. **The BSP tree is gone.** Runtime becomes
+a grid lookup then a short loop over the cell's tetrahedra, made cheap because
+the AABB is wave-uniform so the loads are scalar.
+
+**Read that as a warning about §11.2's shape, not its substance.** Capcom
+abandoned automatic placement and abandoned the BSP — the two most elaborate
+parts of the RE7 design — and kept SH-compressed irradiance on a uniform grid.
+That is *nearly exactly* what a lattice-aligned probe grid here would be, arrived
+at by an engine that started from the sophisticated end and retreated. We would
+be starting where they finished.
+
+The open question it raises: **SH3 versus RE7's four directions.** Third-order SH
+is 9 coefficients per channel — 27 floats against 4×R11G11B10's 16 bytes. §11.2
+picks four directions on size, which is right, but the MHW line means SH is the
+direction the same team moved *toward*, with windowing as the price of admission.
+
+### 4.1.2 Does the probe system survive to the modern titles?
+
+**Symbolically, yes — into RE4 at least.** The engine's type system carries
+`LightProbes` with a `LightProbesType { Indoor, Outdoor, Sparse }`,
+`LightProbesInterpolatable`, `IrradianceFilter`, `LocalCubemap`, `ProbesResource`,
+and a `CubemapCapture::BASIS { SH_ORDER1, SH_ORDER2, FC3_BASIS, AMBIENTCUBE_BASIS }`
+— i.e. the probe storage basis is still selectable and still SH. RE2RT and RE4
+add `LightProbeRelighting`, `ProbeVisibilityResource` and `GIPointCloud`; RE8
+onward adds `LightProbeBlocker` and `LightProbeBlockerHole`, which are exactly
+what you would build to stop leaks after complaining about them in 2016.
+**[tool]**
+
+**But nothing establishes it is still *tetrahedral*.** No symbol in any available
+dump contains "tetra", "Delaunay" or "simplex". `LightProbesInterpolatable` hints
+and proves nothing. So: the probe system demonstrably survives to 2023; its
+interior structure after 2017 is unpublished and unverified.
+
 ### 4.2 Local cubemaps, relit at runtime
 
 Baked cubemaps are stored **256×256 BC6H** on disk and expanded at runtime to a
@@ -463,8 +1219,30 @@ Here is the slide, verbatim, from *Is Rendering Still Evolving?* slide 14,
 > handle occlusion properly, so multi-bounce can be represented correctly."
 
 So the *bake* moved from rasterising cubemaps and interpolating them to tracing
-rays. The probe network is the consumer of that bake and is untouched by the
-change. Capcom attach **no date and no title** to the switch.
+rays. The fault is specific and worth naming: **the first pass's bake was
+interpolated by the second pass, and that interpolation could not occlude
+properly, so multi-bounce light penetrated geometry.** The probe network is the
+consumer of that bake and is untouched by the change. Capcom attach **no date
+and no title** to the switch.
+
+**The local cubemap turns up alive twenty-odd slides later in the same deck**,
+which is about as direct a refutation of "retired" as the source can give. Under
+bindless applications **[COC23]**:
+
+> "Mostly used to reduce Video Memory • **Local Cube map (Reflection Probe)** •
+> Local Cube maps don't need to be copied to Texture Array etc. during runtime •
+> Arbitrary resolution can be retained"
+
+Not merely surviving — being *improved*, and improved in a way that removes the
+copy-into-an-array step and lets each probe keep its own resolution. That is a
+system being invested in, not one being wound down.
+
+**Stated as a confirmed absence, because it matters:** across the whole RE:2023
+corpus there is **no statement retiring an RE7-era irradiance probe volume**. The
+words "irradiance volume", "probe volume" and "SH probe" do not appear. The only
+runtime-probe discussion in those decks is the slide about *Lumen* — Epic's
+system, not Capcom's. Whatever happened to the tetrahedral network, Capcom have
+not said it happened.
 
 **Direct evidence that probes were alive in RE4R**, from the RE4-specific hair
 talk, slide 43, "Indirect Lighting" — again official English **[COC23]**:
@@ -552,7 +1330,7 @@ That last clause is worth keeping. **The best-looking shadows in these games are
 partly hand-tuned per cinematic shot**, which is a content answer to a technical
 problem and not one a systemic renderer can copy.
 
-### 4.4 Street Fighter 6 — ray tracing used as a *baker*
+### 4.6 Street Fighter 6 — ray tracing used as a *baker*
 
 SF6 bakes **direct lighting into static lightmaps using ray tracing**, alongside
 ambient occlusion, on selected stage sections. **[COC23]**
@@ -687,56 +1465,265 @@ nearly free for a game whose world is already a voxel grid.**
 We cannot run any of this. It is recorded because the *ordering* of what Capcom
 ray-traced, and why, is informative.
 
-**The arc.** DMC5 SE (RT v1: GI, reflections) → RE Village and the RE remakes
-(v2: GI, reflections, AO) → v3 (denoiser rework, mirrors, area lights) → RE
-Requiem and PRAGMATA (full path tracing, direct lighting included). **[COC23]**,
-**[GDC26]**
+**The arc.** DMC5 SE (v1: GI, reflections) → Village and the remakes (v2) → v3
+(denoiser rework, mirrors, area lights) → Requiem and PRAGMATA (full path
+tracing, direct lighting included). **[COC23]**, **[GDC26]**
+
+But "v2" hides how differently each title used it, and the differences are the
+interesting part **[COC23]**:
+
+| title | version | ray traced |
+|---|---|---|
+| DMC5 Special Edition | 1 | GI, reflections — *"Acceleration Structures for characters and backgrounds as much as possible"* |
+| Resident Evil Village | 2 | GI, reflections, AO — but *"limited to using it for backgrounds only"* |
+| Resident Evil 2 / 3 / 7 | 2 | GI, reflections, AO, *"including characters"* |
+| Resident Evil 4 | 2 | **reflections only** |
+| Exoprimal | 2 | *"supports it only in cutscenes"* |
+
+Capcom's summary of the pattern: *"**Each title decides what to use Ray Tracing
+for, depending on the performance at runtime and what is being represented.**"*
+Three versions exist concurrently *"to keep released titles stable"* — a shipped
+engine carrying three generations of denoiser at once, rather than migrating.
+
+### 6.1 Ray-traced shadows did not exist before v3, and the evidence is a rejection
+
+This was an open question in earlier revisions of this document, because the
+"Light Probes" slide says *"by using shadow rays, you can achieve shadows that
+are more stable than that of a shadow map and can be produced faster"* — which
+reads like a runtime feature. **It is not. It is about the offline bake**, and
+three things in the same deck settle it **[COC23]**:
+
+1. The preceding sentence is *"When baked with Ray Tracing, it is just light
+   tracing"*. "Also, by using shadow rays…" continues that subject.
+2. The two neighbouring slides are lightmap baking (*"Lightmaps used in
+   background in some stages in Street Fighter 6"*) and SDF baking.
+3. The section closes: *"Hardware Ray Tracing is a useful feature not only for
+   the game at runtime, but also **as a development tool**."*
+
+**No runtime ray-traced shadow appears in v1 or v2 at all.** The per-title table
+lists only GI, reflections and AO. The first is the **v3 area-light shadow**.
+
+**And shadow maps were never going anywhere.** The proof is lovely because it is
+a *reason a technique was abandoned*: the "guiding light position" idea was
+dropped because *"it needs shadow rays to check if small geometry lights are
+reachable. **Geometry lights don't have shadow maps.**"* That sentence only
+makes sense in an engine where directional, punctual and area lights *do* — so
+the rasterised shadow map is alive and is what makes buffered lights cheap. The
+lens-flare talk corroborates it from the other side, sampling a shadow map per
+frame on PS5 to occlude off-screen light sources.
+
+**Dragon's Dogma 2 makes the division explicit, and it is the clearest single
+sentence on this in any Capcom source** **[REAC25]**:
+
+> "Dragon's Dogma 2 uses raytracing for global illumination. **GI lighting reuses
+> shadow map for shadows. Unable to represent shadows outside field of vision.**"
+
+A ray-traced-GI title, in 2024, taking its shadows from the shadow map — and
+hitting the obvious wall, that a shadow map only covers what the camera can see.
+Their fix is worth knowing: **inject the previous frame's ray-hit positions into
+the shadow map** to extend its coverage beyond the frustum. A shadow map fed by
+ray hits rather than only by a rasterised pass.
 
 **Indirect first, direct last.** For five years ray tracing did indirect
-illumination only; direct lighting stayed on shadow maps. Path tracing is
-described as the point where *"direct lighting runs through the path tracer
-instead of shadow maps"*, and the stated motivation is removing the visual
-discontinuity between gameplay and cinematics. **[NV]** The GI-before-shadows
-ordering matches `source2_rendering.md` §10's ranking, arrived at independently.
+illumination only. The RT deck states the substitution target precisely: enabling
+RT *"replaces the traditional approximation functionality — Replaces **Indirect
+Illumination of Opaque Meshes**, etc."* Not shadows. Direct lighting moved only
+at path tracing **[NV]**, and the stated motivation was removing the
+gameplay/cinematic discontinuity. The GI-before-shadows ordering matches
+`source2_rendering.md` §10's ranking, arrived at independently.
 
-**RT GI cost, PS5, v3** **[COC23]**:
+### 6.2 Cost
 
-| stage | cost |
-|---|---|
-| tracing (diffuse + specular) | 1 583 + 609 µs |
-| ray generation and sorting | 122 + 69 µs |
-| shading (diffuse + specular) | 596 + 148 µs |
-| spatial denoise | ~512 µs |
-| **total ray tracing** | **~4.7 ms** |
+**PS5, v2 denoiser — and this is Village-era, restated from GDC 2021.** An
+earlier revision of this table labelled it v3, which was wrong. **[COC23]**
 
-**Path tracing cost, Dec 2025** **[GDC26]**: 8.78 ms at 1080p on an RTX 4070 Ti,
-20.09 ms at 4K; 24.20 / 67.93 ms on an RTX 3060.
+| group | stage | cost |
+|---|---|---|
+| preparation | linear depth / geometry, motion, disocclusion history | **376 µs** |
+| tracing | generate ray direction 122, sort 69 | **2 481 µs** |
+| | trace diffuse 1 583, specular 609 (overlapped 1 665) | |
+| | shade diffuse 596, specular 148 (overlapped 625) | |
+| accumulation | spatial diffuse 512, specular 128 (overlapped 612); firefly 49; moment 75; temporal 307 | **1 043 µs** |
+| filtering | copy 117, wavelet 32–200, bilateral 172, composite 290 | **650–838 µs** |
+| | **total** | **~4.7 ms** |
 
-**The denoiser is most of the work.** The v3 talk is largely about GI denoising
-under sparse diffuse samples: a moment buffer carrying geometry change against a
-guided colour buffer carrying light-field change, disocclusion rays at 120×67
-upscaled to 960×540, guided-direction accumulation over up to 500 frames,
-spherical-harmonic projection for the final upscale. Machine learning was
-evaluated and rejected as too expensive for current consoles. **[COC23]**
+Narrated as: *"ray tracing in total cost 4.7ms. Tracing and shading cost 2.3ms.
+Others like generate ray direction and sorting cost 0.2ms. Denoiser cost 2.2ms."*
+Sub-items do not sum to their group totals because several are marked
+"(Overlapped)" — async, concurrent.
 
-**Sampling structures worth knowing even without RT** **[GDC26]**:
+**v3 deltas, PS5:** spatial denoise steps **+1.3 ms**, wavelet filtering removed
+**−0.8 ms**, net **+0.5 ms** on the 2.2 ms v2 denoiser baseline, plus
+disocclusion rays at **~25% of trace-and-shade cost**. (The deck's own body says
++1.3 while its speaker note says "about 1ms" for the same item; the +0.5 net is
+consistent in both. Recorded unresolved rather than smoothed.)
 
-- Punctual lights are culled into a **world-space 16×128×128 3D texture holding
-  light IDs as a bitmask**, giving O(1) light sampling. If this project ever
-  grows past a handful of local lights, a world-space light grid over the lattice
-  is the same idea and the lattice is already the grid.
-- Emissive polygons are sampled by **Walker's alias method**, pre-generated into
-  a buffer (4 096 samples/frame, 32 RIS candidates) because doing it at runtime
-  was too expensive.
-- **Screen-space alpha test**: instead of a per-ray texture fetch for cutout
-  geometry, project the ray hit onto the rasteriser's depth buffer and test
-  there — *"an inverse shadow map"*. **[GDC26]**
+**Path tracing, Dec 2025** **[GDC26]**: 8.78 ms @1080p / 20.09 ms @4K on an
+RTX 4070 Ti; 24.20 / 67.93 ms on an RTX 3060.
 
-**IBL had to be excluded from RIS candidates indoors**, because a high-intensity
-environment map produces extreme variance where little of it is visible.
-**[GDC26]** A sealed interior receiving strong sky light is a pathology in
-Capcom's sampler for the same reason it is an artefact in our analytic ambient —
-different symptom, same underlying error.
+### 6.3 The denoiser — corrected, and the part worth reading
+
+**The resolution ladder is three rungs, not an upscale from one buffer to
+another.** An earlier revision said "disocclusion rays at 120×67 upscaled to
+960×540", which garbled it **[COC23]**:
+
+| buffer | resolution | carries |
+|---|---|---|
+| colour / average direction | **120×67**, 16–64 rays/px | low-frequency **light** |
+| moment / shadow | **960×540**, 1 ray/px | medium-frequency **visibility** |
+| normal | **4K** | high-frequency **geometry** |
+| → final colour | **4K** | via spherical-harmonic projection |
+
+Consoles run every rung checkerboarded. The reasoning is the transferable part:
+*"Light contribution for GI is propagated diffusely and continuously. After
+propagation, only low frequency output remain which means it can be compressed
+in low dimension. On the other hand, visibility term is high frequency geometry
+information. And it is critical to the final image quality."* **Separate the
+signal by frequency and spend resolution only where the frequency is** — which
+is a principle, not a ray-tracing technique, and it is why 67p at 64 rays beats
+540p at 1 ray: *"67p's image is substantially clearer and easier to propagate."*
+
+**A correction to an earlier claim in this document.** "Guided-direction
+accumulation over up to 500 frames" was recorded here as a v3 feature. The quote
+is real — *"Guided history can accumulate up to 500 frames"* — but it belongs to
+one of six *candidate* ideas, and the deck closes it with *"You can't guide
+direction if you don't have history. So, as previously mentioned, we try to
+solve noise only using one frame data. **That doesn't help for this purpose.**"*
+It exists as code and it does not answer the problem v3 was solving. **Do not
+cite it as shipped.**
+
+**What Capcom rejected is more useful to us than what they built**, since we can
+run none of it:
+
+- **Machine learning** — *"the best fit for denoiser"*, rejected because
+  *"current generation consoles can't afford the cost"*, and then, unusually
+  frankly: *"I don't have enough time and budget to implement machine learning
+  framework in RE ENGINE."*
+- **Probes, i.e. Lumen** — *"they improved this method to the extreme.
+  Performance and quality are balanced… **In my opinion, it won't be easy to go
+  beyond what they've already accomplished.**"* An engineer at Capcom declining
+  to compete with Epic's radiance cache, in print.
+- **Delaunay triangulation** — 2D triangles give *"disfigured results"* against
+  3D geometry; 3D is too slow.
+
+**The other headline v3 change is removing a Reinhard curve** — filtering was
+happening in non-linear space, causing ghosting. Removing it fixed the emissive
+brightness *"issue that artists tend to complain about"*, and broke every
+artist-tuned light balance in every shipped title: *"**this feature can only be
+used for new titles.**"* That is the clearest illustration in this document of
+why a renderer change is sometimes gated by content rather than by code.
+
+### 6.4 Path tracing — where direct lighting finally moved
+
+**The transition, stated plainly** **[GDC26]**: *"In path tracing, the Lighting
+pass replaces all existing rendering passes, **including direct lighting**. In
+ray tracing, direct lighting is handled the same way as in rasterization. Ray
+tracing is applied only to indirect lighting."* Both modes share one pipeline and
+`RayQuery`, and evaluate the same bindless materials — PT is not a separate
+renderer, it is the same one with the lighting pass swapped.
+
+**Whether shadow maps survive in PT mode is genuinely unresolved, and this
+document will not pretend otherwise.** The strongest evidence they are gone is an
+artefact report: strand hair shadows mismatch under PT *"because [RT and
+rasterization] render Strand depth onto the Shadow Map"* — i.e. PT uses shadow
+rays where the others use a map. But the BVH slide lists async build running
+*"alongside Visibility Buffer, G-Buffer, and **Shadow Casting passes**"*, and the
+pipeline diagram shows no shadow pass for either mode. Capcom never say. Recorded
+as unknown.
+
+### 6.5 Sampling structures worth knowing even without RT
+
+**[GDC26]**, and the first item needs a correction to an earlier revision of this
+document.
+
+- **Punctual lights are culled into a world-space 16×128×128 3D texture holding
+  light IDs as a bitmask.** This document previously said that gives "O(1) light
+  sampling". **It does not, and the deck never claims it does.** The shader is
+  `while (mask) { id = firstbitlow(mask); … }` — cost is proportional to the
+  number of lights *set in that cell*. The grid's purpose is stated narrowly: to
+  shrink the candidate set before RIS. **O(1) is claimed only for Walker's alias
+  method**, below. If this project ever grows past a handful of local lights, a
+  world-space light grid over the lattice is still the right idea — and the
+  lattice is already the grid — but the win is a smaller candidate set, not
+  constant time.
+- One neat detail in that shader: `WaveActiveBitOr(mask)` ORs the wave's lanes
+  and iterates the union, so divergent lanes share one light-fetch loop.
+- **Emissive polygons are sampled by Walker's alias method**, which *is* O(1),
+  over a two-level structure: triangles within a sub-mesh weighted by area and
+  built once at startup, then sub-meshes weighted by area × emissive intensity
+  and rebuilt only on frames where the weights change. **4 096 samples are
+  pre-generated per frame, each by a 4-candidate RIS**, and **32 candidates are
+  used per NEE at shading time.** An earlier revision here merged those two
+  numbers into "4 096 samples/frame, 32 RIS candidates" — they are different
+  counts at different stages.
+- **Shadow ray budget: 2 or 3 on the first bounce** (directional gets its own;
+  punctual and emissive share one through RIS; IBL sometimes a third),
+  **1 on later bounces.**
+- **Screen-space alpha test**, for cutout geometry the BVH still contains: project
+  the any-hit position through the instance's BVH matrix and the view-projection,
+  and if it lands on screen *behind* the rasteriser's depth, `IgnoreHit()`. Capcom
+  describe it as the inverse of a shadow map — in the Japanese, it *"grants
+  permission to pass through"* rather than making shadows. Same depth comparison,
+  opposite conclusion. Note it is screen-space and therefore silently does
+  nothing off-screen; the deck does not discuss that. **[inferred]**
+
+**IBL is excluded from RIS candidates indoors**, and the mechanism is sharper
+than "little of it is visible". **Streaming RIS generates candidates without
+evaluating visibility**, so a bright IBL swamps the candidate set — and then
+indoors the IBL is occluded, so those candidates all die at the shadow-ray stage
+and the variance is enormous. Excluded IBL is then *evaluated independently* of
+the scene light list, not dropped. **[GDC26]**
+
+A sealed interior receiving strong sky light is a pathology in Capcom's sampler
+for the same reason it is an artefact in our analytic ambient — different
+symptom, same underlying error: **a bright environment term applied without
+asking whether it can be seen.**
+
+### 6.6 The denoiser is the architecture, and it constrains everything upstream
+
+**DLSS Ray Reconstruction is the only denoiser named in the entire deck** — no
+NRD, no SVGF, no in-house filter, no fallback. That has a consequence Capcom
+never state in one sentence but spend ten slides on:
+
+**Anything that changes a surface's appearance without changing a guide buffer
+gets denoised away.** Shader-animated normals on rain puddles; translucent
+raindrops; animated projector cookies; animated emissive on holograms;
+screen-space subsurface blur. Every one produced artefacts, and every fix is the
+same shape — write the change into some buffer the denoiser watches. The SSS fix
+is the whole recipe in one line: **the guide is `luminance(after) −
+luminance(before)`**, one channel, fed to RR.
+
+That is a real architectural lesson about temporal reconstruction generally, and
+it is why this project's 2× supersample — which reconstructs from nothing and
+knows nothing — has no equivalent failure mode and no equivalent tuning burden.
+
+Two other candid notes worth keeping. **Shader Execution Reordering was tried and
+shelved**: *"We tried Shader Execution Reordering. Currently, it is not enough of
+a performance gain."* And the **shadow-terminator fix is cutscenes only**, because
+the data it needs is not in the G-Buffer so it costs an extra trace — a cleanly
+stated quality-for-cost boundary.
+
+**Cost** **[GDC26]**, measured 12 December 2025 on Resident Evil Requiem, and
+note the table is headed *DLSS Performance* — so these are output resolutions
+with the tracer running at roughly half-linear, which Capcom imply but never
+state. **[inferred]**
+
+| GPU | 1080p | 1440p | 4K |
+|---|---|---|---|
+| RTX 2070 Super | 29.95 ms | 42.76 ms | 99.72 ms |
+| RTX 3060 | 24.20 ms | 38.38 ms | 67.93 ms |
+| RTX 4060 Ti | 13.64 ms | 19.00 ms | 34.39 ms |
+| RTX 4070 Ti | 8.78 ms | 11.70 ms | 20.09 ms |
+| RTX 5060 Ti | 11.98 ms | 16.64 ms | 30.78 ms |
+
+Capcom's own caveat: *"This is based on materials from the Resident Evil Requiem
+development team in December. Under the development environment at that time,
+performance trends looked like this."* No per-stage breakdown exists anywhere in
+the deck — not one millisecond figure outside this table, and no buffer format
+for anything.
+
+**And the scale of the effort**: *"From start to ship, two developers worked for
+roughly 1.5 years."*
 
 ---
 
@@ -810,6 +1797,15 @@ both). Adding a **64³ 3D LUT sampled after the tone curve** is a small change
 that costs ~nothing, gives a real grading control surface, and is exactly what
 Capcom ship. It also composes with the dither item rather than competing with it.
 
+> **§2.5 measures the shipped end of this chain, and it differs from the talk in
+> two ways worth carrying.** RE2R holds **fifty 32³ grading LUTs resident** and
+> blends them per zone — the deck's 64³ is the *baked RRT+ODT*, a different job
+> from an artist's per-room look, and a renderer can want both sizes for both
+> reasons. And the final encode is the **BT.709 OETF**, not sRGB and not a gamma
+> constant, applied in a configurable output stage that also supports
+> limited-range television output. Exposure and white point are computed per
+> frame by `HistogramCS` and `WhitePointCS` rather than authored.
+
 ---
 
 ## 9. GPU-driven rendering, bindless, visibility buffer
@@ -852,7 +1848,12 @@ is missing is a pass that wants it.**
   **[COC23]**
 - **Visibility buffer with deferred texturing** is the stated direction: store
   primitive and instance IDs, reconstruct vertex data from bindless resources,
-  merge dissimilar meshes and materials into a single draw. **[COC23]**
+  merge dissimilar meshes and materials into a single draw. **[COC23]** —
+  **and it stopped being a direction and became a shipped pipeline.** The
+  REAC 2025 talk is 71 slides on RE ENGINE's meshlet rendering pipeline,
+  visibility-buffer deferred, for the DD2 / MH Wilds generation. **[REAC25]**
+  Still not something a 24×24 board needs, but the doc should not go on calling
+  it a plan.
 - **VRS was tried and shelved** — Tier 1 at 2×2 makes polygon edges visibly
   low-resolution; a software VRS via MSAA and material-ID distribution looked
   better but the per-attachment manual resolve cost more than it saved.
@@ -1072,21 +2073,56 @@ two pieces of work are independent.
 cover shadows, probes, SDFs, hair, ray tracing, colour and culling, and skip the
 participating medium entirely. What exists is tool-level description:
 
-- Fog volumes are **box-bounded**, can be given **wind-driven flow and
-  gradients**, and can be made to **conform to terrain**. **[tool]**
-- Cloud shadows are **not** cast for real. A `ShadowProjectionTexture` projects
-  cloud patterns to attenuate sunlight — explicitly because real cloud shadowing
-  "would consume excessive processing power". **[tool]**
+- A **`VolumetricFog`** component. Fog volumes are **box-bounded**, can be given
+  **wind-driven flow and gradients**, and can be made to **conform to terrain**.
+  **[tool]**
+- **`CloudScape`** for the sky, and cloud shadows that are **not** cast for real:
+  a **`ShadowProjectionTexture`** *pseudo-projects* the cloud pattern to weaken
+  sunlight, "instead of casting onto the ground as normal, **which risks taking
+  up too much processing power**". **[tool]**
 - Lights carry a **Volumetric Scattering Intensity** parameter, per light.
   **[tool]**
-- Rain has a full lifecycle — falling, wetting, puddle ripples, drying — gated
-  indoors by a **`DepthOcclusion`** shielding system first shipped in RE7.
-  **[tool]**
+- Rain has a full lifecycle — "**it falls, wets the environment, creates puddles
+  that ripple in the rainfall, and slowly dries out**", with the aside that
+  "**puddles don't form on inclines or where any mesh is bent**". Gated indoors
+  and in caves by a **`DepthOcclusion`** shielding system, and the continuity is
+  stated outright: DepthOcclusion "**already proved effective in Capcom's
+  Resident Evil 7**". **[tool]**
+
+**Provenance, because the tier matters here.** All of the above comes from an
+Autodesk-published article on Dragon's Dogma 2's tooling, quoting Capcom's own
+lighting artist. It is a **staff interview in English translated from a Japanese
+original**, not an engineering talk — so the feature *names* are reliable and
+nothing about the implementation behind them is. It also describes **DD2**, not
+the remakes; only the DepthOcclusion lineage is explicitly traced back to RE7.
 
 Per-light volumetric scattering intensity strongly implies a froxel injection
 pass, since that is the parameter such a pass needs and no other architecture
 wants it. **[inferred]** But it is an inference, and no format, resolution or
 cost is public.
+
+**One scrap of Capcom's actual engineering word does exist**, and it is the only
+one: GDC 2019 states the **Depth Bounds Test is used "in RE ENGINE … for decals
+and light shafts"**, to skip pixels fully occluded by a wall. **[GDC19]** That
+is not a description of the volumetric system, but it does establish that **light
+shafts are a distinct screen-space pass with a bounded depth range** rather than
+something falling out of a froxel march — which is a small argument *against* the
+froxel inference above, or at least for the two coexisting. Capcom say nothing
+more.
+
+> **Measurement has now settled this, and the froxel inference was wrong.**
+> §2.5 walks an RE2R frame containing a pronounced god-ray. There is **no fog
+> volume** — but there *is* a named screen-space chain:
+> **`LightShaftBilateralBlurXPS` → `LightShaftBilateralBlurYPS`**, a separable
+> depth-aware blur over a buffer Capcom themselves call a light shaft.
+>
+> So the per-light parameter this section reasons from is real
+> (`DL_VolumetricScatteringColor` sits in `LightInfo`), the volumetrics are real
+> and visible, and **the froxel grid the parameter seemed to imply does not
+> exist.** The Depth Bounds Test note above turns out to describe the actual
+> architecture rather than a detail of it. The `VolumetricFog` component the
+> Autodesk article documents is most likely a **Dragon's Dogma 2-era addition**,
+> not something the remakes had.
 
 **Conclusion for this project: nothing changes.**
 [`rdr2_atmospherics.md`](rdr2_atmospherics.md) remains the blueprint for the
@@ -1132,6 +2168,87 @@ Ordered by change-on-screen per unit of work, against the current renderer.
 >    §1's — that geometry is the right thing to cache — not Capcom's range.
 >
 > The original text of each item follows unchanged.
+
+### 11.0 Why the remakes look as good as they do
+
+The question this whole document exists to answer, so it is worth stating
+plainly. **There is no exotic technique. Every individual piece is ordinary, and
+most of it is more than a decade old.** What is exceptional is integration — and,
+more than anyone likes to admit, the fit between the technology and the content.
+
+**First, what it is *not*, because each of these is a plausible guess that the
+sources rule out:**
+
+| not this | evidence |
+|---|---|
+| ray tracing | RE2R and RE3R shipped with none; RE4R has reflections only and no RT GI (§4.4) |
+| shadow filtering | no PCSS, contact hardening or soft-shadow technique published anywhere, at any date; `ShadowFilter` has three values and names no kernel; RE4R's opaque shadows are a **dithered stochastic sample** (§3.3) |
+| shadow resolution | the shadow array's default is **1024²**, 32 slices (§3.1) |
+| a novel GI algorithm | the probe network is Cupisz 2012 / Valient 2014, and Capcom's own verdict on its interpolation was *"just like vertex colours"* with leaks fixed by moving probes **by hand** (§4.1) |
+
+**What it actually is — five things, none glamorous:**
+
+**1. One lighting model, stated as a goal rather than an outcome.** *"All shaders
+use one identical lighting model: Lambert + Cook-Torrance (GGX)"* — so a static
+background and a dynamic character are interchangeable under the same lights.
+There is no "character shader". Most renderers that look worse than their assets
+deserve have exactly this seam, and it reads as characters being *pasted onto*
+environments rather than standing in them.
+
+**2. An architecture that makes many shadow-casting lights affordable.** This is
+the big one. The shadow cache (static cached per light, dynamic composited in only
+when something is actually inside that light's frustum) plus clustered culling at
+**512 lights** means an artist can place a practical light in every fixture of the
+RCPD without a budget conversation. **Light count is the single biggest lever on
+how a scene reads, and their architecture spends its complexity buying it.**
+Compare this renderer, where the ceiling is one directional sun (§0).
+
+**3. The relit cubemap, which fixes the most common "wrong" look in real-time
+rendering.** `luma(ProbeDiffuse) * luma(cube(r,mip)) / luma(cube(n,lowestMip))`
+(§4.2). Without it, a cubemap baked in daylight and sampled in shadow keeps its
+specular bright while diffuse goes dark — and *everything reads as metal*. In a
+game that is mostly dim interiors with wet, glossy surfaces, getting this right is
+worth more than any amount of filtering.
+
+**4. Material economy that puts the exotic cases inside the standard material.**
+Translucency shares one scalar with metalness; subsurface is **three bits** next to
+occlusion (§2). Lampshades, leaves and skin are therefore *material settings*, not
+architecture — which means artists reach for them constantly instead of requesting
+a new shader. Add G-buffer decals, which modify the surface *before* lighting so
+grime takes the surface's own shadow and probe, and the wetness/rain parameter
+sets (§6.4), and you get walls that are dirty, damp and worn everywhere at no
+per-instance cost. RE2R's police station is carried by this.
+
+**5. Colour.** ACES through AP1 with grading authored in **DaVinci Resolve against
+a live feed of the running game**, baked to a 64³ LUT at 0.4 ms (§8). Nothing
+about geometry or light transport, and it does more for "does this look like a
+film" than anything else on this list.
+
+**And then the part that is not technique at all.** NVIDIA's 2026 Q&A, looking
+back at exactly this generation: shadow-map limitations were *"less noticeable in
+cinematics due to **manually tuned shadows**"* **[NV]**. Some of the shots that
+sell the look are hand-authored per camera. A systemic renderer cannot copy that,
+and should not be judged against it.
+
+#### The uncomfortable conclusion, and the useful one
+
+**RE2R looks extraordinary partly because its content is the best possible case
+for its technology.** Bounded interiors. Static geometry. No time of day. Many
+small local lights. A camera that rarely sees a long vista. Every one of those is
+a condition under which cached shadow maps and a baked probe network are at their
+strongest — and every one of them is a condition their *own* engine later failed
+to satisfy. When Capcom moved to an open world with a moving sun, this
+architecture stopped working and they had to build SDF shadows and ray-traced
+probe bakes to replace it (§3.2, §5).
+
+**That is the transferable lesson, and it is not "copy RE ENGINE".** It is:
+their renderer is excellent because it was aimed precisely at bounded interiors
+with many static lights and no day/night cycle — and **this project's world is
+bounded, its geometry is a lattice, and its sun barely moves.** We are closer to
+RE2R's problem than Dragon's Dogma 2 is. The techniques worth taking are the ones
+that exploit that (many cheap local lights, cached static shadows, a lattice-shaped
+probe grid, relit cubemaps, a grading LUT) — not the ones Capcom built *after*
+their content outgrew them.
 
 ### 11.1 Build the SDF. It is the largest single win. — §5
 
@@ -1183,6 +2300,58 @@ of it.
 Cheap, shipped, artist-facing, and it fits beside the dither and exposure items
 already on the list. 2.2 ms → 0.4 ms is Capcom's measurement of doing the
 expensive part once into a LUT rather than per pixel.
+
+### 11.3.1 Octahedral probe storage — the measurement solves a stated blocker
+
+`common/environment.glsl` records a limitation as though it were a fact of life:
+
+> "there is no prefiltered mip chain to sample (**rlgl cannot build one for a
+> cubemap**), so rather than hand a rough surface a mirror-sharp reflection it
+> never could produce, the result slides back to the analytic sky as roughness
+> rises."
+
+That is why `environmentSpecular` fades probes out across roughness 0.12→0.55,
+and why every mid-rough metal in this game reflects a blue gradient instead of a
+room.
+
+**RE2R does not store its probes as cubemaps.** The capture shows a
+`512×512` **2D array of 128 slices with 5 mips** in `R11G11B10_FLOAT` — octahedral
+maps — alongside the `256×256×6` BC6H cubemaps they were baked from (§2.5). RE7's
+deck says the same thing and this document quoted it in §4.2 without noticing what
+it was worth: *"expanded at runtime to a 512×512 × 8 mip R11G11B10Float
+**octahedral** map"*.
+
+**An octahedral map is an ordinary 2D texture**, so it mips like anything else —
+which is why RE ENGINE can prefilter and we assumedly could not.
+
+> **But do not start there, and the reason is a correction to this section's
+> first draft.** The blocker as stated — "rlgl cannot build a mip chain for a
+> cubemap" — is true of *rlgl* and irrelevant here, because
+> `ReflectionProbeSet.cpp` **already bypasses rlgl and calls raw GL**; it is the
+> one file licensed to. `glGenerateMipmap(GL_TEXTURE_CUBE_MAP_ARRAY)` is core GL
+> 4.0, `textureLod(samplerCubeArray, …)` is valid GLSL, and
+> `GL_TEXTURE_CUBE_MAP_SEAMLESS` is already enabled in `create()`. So the mip
+> chain can be had by allocating levels and generating them — roughly thirty
+> lines, no format change, and **no octahedral seam to solve at all**.
+>
+> The honest ordering is therefore:
+>
+> 1. **Mip the existing cubemap array and sample by a roughness-derived LOD.**
+>    Cheap, removes the roughness fade, and is most of the visible win.
+> 2. **A real GGX prefilter**, if step 1's box-filtered mips read as too sharp
+>    at mid roughness. Hardware mip generation averages; it does not integrate
+>    the specular lobe.
+> 3. **Octahedral storage**, only if step 2 wants per-mip control that a cubemap
+>    array makes awkward — which is the actual reason to prefer it, not the mip
+>    chain.
+>
+> Recording the wrong first draft on purpose: the interesting failure was reading
+> a header comment as a hard constraint without checking whether the file it
+> sits in was still bound by it.
+
+Octahedral's known cost, for when step 3 arrives: naive bilinear across the
+octahedron boundary produces a visible cross, so edges need handling. RE7 names
+its answer — "edge-fix filtering" — and does not describe it. **[inferred]**
 
 ### 11.4 Relit cubemaps, when cubemaps happen — §4.2
 
@@ -1254,9 +2423,29 @@ read the tag.
 | RRT+ODT analytic → LUT | 2.2 → 0.4 ms @1080p | PS4 | **[COC23]** |
 | shell fur, 16 layers, MDI | 1.0 ms @1080p | PS4 | **[COC23]** |
 | RT lens flare ghosts | 4.3 → 0.4 ms @960×540 | PS5 | **[COC23]** |
-| ray-traced GI total (v3) | ~4.7 ms | PS5 | **[COC23]** |
-| strand hair raster + lighting | ~3.7 + 2.25 ms | PS5 | **[COC23]** |
-| full path tracing | 8.78 ms @1080p | RTX 4070 Ti | **[GDC26]** |
+| ray-traced GI total | ~4.7 ms — trace+shade 2.3, denoise 2.2, ray gen+sort 0.2 | PS5, **Village**, restated from GDC 2021 | **[COC23]** |
+| RT trace resolution | 960×540 @ 1 ray/px, halved again on console | — | **[COC23]** |
+| RT disocclusion rays | 120×67 @ 64 rays | — | **[COC23]** |
+| denoiser v2 → v3 | 2.2 ms, then +1.3 spatial, −0.8 wavelet | PS5 | **[COC23]** |
+| strand hair raster | 3.653 ms @1920p CBR / 4.008 ms @2160p CBR | PS5, 23 115 strands | **[COC23]** |
+| strand hair lighting | 1.32 ms no shadow map / 2.25 ms with | PS5, 10 spotlights | **[COC23]** |
+| guide-hair lighting | 0.12 / 0.18 ms — about 1/10 | PS5, 1 420 strands | **[COC23]** |
+| shell fur VRAM | 0 MB instanced / 3.18–7.72 MB MDI | — | **[COC23]** |
+| grading LUT format | 64³ R10G10B10A2Unorm; artist LUT FP16 33³ | — | **[COC23]** |
+| bindless, CPU side | 10.3 → 8.2 ms; G-Buffer cmdlist 3.3 → 2.1 ms | **Xbox One**, Village | **[COC23]** |
+| full path tracing | 8.78 ms @1080p, 20.09 ms @4K | RTX 4070 Ti | **[GDC26]** |
+| full path tracing | 24.20 ms @1080p, 67.93 ms @4K | RTX 3060 | **[GDC26]** |
+
+> **Two traps in this table.**
+>
+> The ray-traced GI figure is **Resident Evil Village on PS5**, restated from the
+> GDC 2021 talk. It is not an RE2R, RE3R or RE4R measurement, and RE4R does not
+> run ray-traced GI at all (§4.4).
+>
+> More generally: **Capcom have published no per-pass GPU millisecond figure for
+> any of the three remakes.** Every number above is Village, or engine-generic on
+> PS4, or CPU-side on Xbox One. Anyone calibrating against "what RE4R spends on
+> lighting" is calibrating against a number that does not exist publicly.
 
 ---
 

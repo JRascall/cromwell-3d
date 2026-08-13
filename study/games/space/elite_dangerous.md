@@ -15,6 +15,10 @@ reason this game is worth reading rather than just admiring.
 > instructive contrast. SE stores a diff against a generator; ED stores nothing
 > at all, and pays for that in a different currency. §4.3 and §9 read them
 > against each other directly.
+> [`kerbal_space_program.md`](kerbal_space_program.md) — the **same planet
+> topology reached independently three years earlier** (cube → quadtree →
+> spherify), then split: KSP keeps the generator on the CPU because it has to
+> collide with the result. That note's §7.7 reads the two against each other.
 > [`map_scale.md`](../../topics/scale/map_scale.md) is the note about *extent* rather than count,
 > which is the family this belongs to.
 > [`rdr2_atmospherics.md`](../rendering/rdr2_atmospherics.md) for participating media, which

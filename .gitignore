@@ -53,6 +53,11 @@ unigine_extracted/
 # D:\r6_extracted, passed via -Out. This entry stays because the script's default
 # is still a path inside the repo, and a sweep run without -Out would land here.
 r6_extracted/
+# SimCity 3000, decoded by tools/sc3k/sc3k_extract.ps1. Same rule again: Maxis'
+# art is read for reference and never shipped. Small by the standards of this
+# list (~1.6 GB) because a 1999 isometric game's whole library is 233 MB of
+# 16-bit sprites - which is itself the point of the study.
+sc3k_extracted/
 
 # Scratch for the extraction tools (tools/xcom2/xcom_bulk.ps1, xcom_audio.ps1,
 # xcom_extract.ps1, build_test_kit.ps1): raw package dumps, bank staging and
