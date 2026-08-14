@@ -1,0 +1,28 @@
+# window — clear glass.
+#
+# `blend translucent` is the ONLY thing that puts this surface in the
+# transparent pass. No C++ names it, no shader is written for it.
+
+blend               translucent
+
+roughness           0.08    # a clean pane is nearly smooth
+metalness           0.0
+
+# ---- opacity ------------------------------------------------------------
+# A dielectric reflects ~4% head-on and approaches 100% edge-on, and what is
+# not reflected is transmitted — so this Fresnel curve IS the opacity curve.
+# Nearly clear looking through it, a bright sheet at a grazing angle.
+
+baseOpacity         0.08
+edgeFalloff         4.0     # exponent on the ramp
+edgeMaxOpacity      1.0     # ceiling
+opacityScale        1.0     # 0 disables the angle dependence entirely
+edgeThickness       0.0     # offsets N.V; "treat me as thicker than I am"
+edgeColour          1.0 1.0 1.0
+
+# ---- light passed through from the far side -----------------------------
+# Not a BRDF lobe: the fraction the material passes. Slightly cool, which is
+# what stops a lit room behind a pane reading as a hole.
+
+transmissionColour  0.72 0.86 1.00
+transmissionAmount  0.0     # raise to make the pane glow when backlit

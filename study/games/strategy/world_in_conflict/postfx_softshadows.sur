@@ -1,0 +1,653 @@
+Version 2
+
+DefaultTextures
+{
+	texture ex_3dview		noRepeat
+	texture wi3d_postfx_blur1	noRepeat
+	texture wi3d_postfx_blur2	noRepeat
+	texture surfaces/dummy		noRepeat
+	texture surfaces/dummy		noRepeat
+}
+
+
+Config Normal PS2.0
+{
+	NormalPass	// There has to be a NormalPass
+	{
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			struct VSOutput
+			{
+			};
+			float4 main (VSOutput aVSOut) : COLOR0
+			{
+				return half4(1,0,0,1);
+			}
+		}
+	}
+	
+	DownsamplePass
+	{
+		blend = off
+		textureRemap = (0)
+		
+		setConstant[2] = CUSTOM2	// .rgb = shadow color .a = shadow intensity
+		setConstant[3] = CUSTOM3	// .rgb = shadow color .a = shadow intensity
+
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			#define NO_AUTO_ALPHATEST
+
+			struct VSOutput
+			{
+				half4	myColor			: COLOR0;
+				half2	myUV0			: TEXCOORD0;
+			};
+			
+
+			// Shadow (from ex_3dview.a)
+			// Input: 0.0=noShadow, 0.5=penumbra, 1.0=umbra
+			// Output: 1.0=noShadow, 1.0=penumbra, 0.0=umbra
+			// Remove penumbra with math
+
+			float4 main (VSOutput aVSOut) : COLOR0
+			{
+				half sub = 1.0 / 16.0;
+				half mul = 1.0 / (1 - 1.0 / 16.0);
+				half tex0 = saturate(tex2D(sampler0, aVSOut.myUV0.xy+float2(setConstant3.x, setConstant3.y)).a - sub) * mul;
+				half tex1 = saturate(tex2D(sampler0, aVSOut.myUV0.xy+float2(-setConstant3.x, setConstant3.y)).a - sub) * mul;
+				half tex2 = saturate(tex2D(sampler0, aVSOut.myUV0.xy+float2(-setConstant3.x, -setConstant3.y)).a - sub) * mul;
+				half tex3 = saturate(tex2D(sampler0, aVSOut.myUV0.xy+float2(setConstant3.x, -setConstant3.y)).a - sub) * mul;
+				
+				half shadowStrength = (tex0 + tex1 + tex2 + tex3)*0.25;
+				
+				half4 final;
+				
+				//
+				// For shadow blurring
+				//
+				final.a = 1.0 - shadowStrength;
+				
+				//
+				// Bake shadow with color and region so we can used wi3d_postfx_blur1
+				// for shadowing transparent objects with ONE texture sample
+				// also used by roads.sur
+				//
+				shadowStrength *= setConstant2.a * aVSOut.myColor.a;				// shadow *= shadowStrength * fade
+				final.rgb = lerp(half3(1,1,1), setConstant2.rgb, shadowStrength);
+				
+				return saturate(final);
+			}
+		}
+	}
+	
+	DownsamplePass2
+	{
+		blend = off
+		textureRemap = (0)
+		
+		setConstant[2] = CUSTOM2	// .rgb = shadow color .a = shadow intensity
+		setConstant[3] = CUSTOM3	// .rgb = shadow color .a = shadow intensity
+
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			#define NO_AUTO_ALPHATEST
+
+			struct VSOutput
+			{
+				half4	myColor			: COLOR0;
+				half2	myUV0			: TEXCOORD0;
+			};
+			
+
+			// Shadow (from ex_3dview.a)
+			// Input: 0.0=noShadow, 0.5=penumbra, 1.0=umbra
+			// Output: 1.0=noShadow, 1.0=penumbra, 0.0=umbra
+			// Remove penumbra with math
+
+			float4 main (VSOutput aVSOut) : COLOR0
+			{
+				half4 tex0 = tex2D(sampler0, aVSOut.myUV0.xy);
+				
+				half shadowStrength = tex0.a;
+				
+				float4 final;
+				final.a = shadowStrength*setConstant2.a;
+				final.rgb = lerp(half3(1,1,1), setConstant2.rgb, shadowStrength);
+				
+				return saturate(final);
+			}
+		}
+	}
+	
+	3x3KernelPass
+	{
+		blend = off
+		textureRemap = (0,1)	// NOTE: This is changed to (0,2) from code when sampling wi3d_postfx_blur2
+		colorWrite = (0,0,0,1)
+		
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			#define NO_AUTO_ALPHATEST
+
+			struct VSOutput
+			{
+				float4	myColor				: COLOR0;		//dx10 filling
+				float4	myUV0				: TEXCOORD0;
+				float4	myUV1				: TEXCOORD1;
+				float4	myUV2				: TEXCOORD2;
+				float4	myUV3				: TEXCOORD3;
+				float4	myUV4				: TEXCOORD4;
+			};			
+
+			half4 main (VSOutput aVSOut) : COLOR0
+			{
+				half upperLeft, lowerLeft, upperRight, lowerRight;
+				
+				half4 t4 = tex2D(sampler1, aVSOut.myUV2.xy);
+				
+				#define USE4SAMPLES true
+					
+				if (USE4SAMPLES)
+				{
+					half4 t0 = tex2D(sampler1, aVSOut.myUV0.xy);
+					half4 t2 = tex2D(sampler1, aVSOut.myUV1.xy);
+					half4 t6 = tex2D(sampler1, aVSOut.myUV3.xy);
+					half4 t8 = tex2D(sampler1, aVSOut.myUV4.xy);
+			
+					upperLeft = t0.a;
+					lowerLeft = t6.a;
+					upperRight= t2.a;
+					lowerRight= t8.a;
+				}
+				else
+				{
+					half4 t0 = tex2D(sampler1, aVSOut.myUV0.xy);
+					half4 t1 = tex2D(sampler1, aVSOut.myUV0.wz);
+					half4 t2 = tex2D(sampler1, aVSOut.myUV1.xy);
+					half4 t3 = tex2D(sampler1, aVSOut.myUV1.wz);
+					half4 t5 = tex2D(sampler1, aVSOut.myUV2.wz);
+					half4 t6 = tex2D(sampler1, aVSOut.myUV3.xy);
+					half4 t7 = tex2D(sampler1, aVSOut.myUV3.wz);
+					half4 t8 = tex2D(sampler1, aVSOut.myUV4.xy);
+	
+					upperLeft = (t0.a + t1.a + t3.a + t4.a) * 0.25;
+					lowerLeft = (t3.a + t4.a + t6.a + t7.a) * 0.25;
+					upperRight= (t1.a + t2.a + t4.a + t5.a) * 0.25;
+					lowerRight= (t4.a + t5.a + t7.a + t8.a) * 0.25;
+				}
+
+				// Mask blur for shadow (don't blur outside shadow region)
+				float4 mask = tex2D(sampler0, aVSOut.myUV2.xy);
+				float allShadow = saturate(mask.a*2.0);
+				
+				half minRes = min(upperLeft, lowerLeft);
+				minRes = min(minRes, upperRight);
+				minRes = min(minRes, lowerRight);
+				minRes = min(minRes, t4.a);
+				
+				if (!USE4SAMPLES)
+					minRes = lerp(t4.a, minRes, allShadow);
+								
+				return saturate( half4(0,0,0,minRes) );
+			}
+		}
+	}
+	
+	SoftShadowToScreenPass
+	{
+		blend = alphaBlend
+		//blend = alphaBlend
+		textureRemap = (0,2)	// NOTE: This can be changed from code depending on number of blurs
+		
+		// v0.a = shadow intensity
+		// t0.a = 1.0=umbra, 0.5=penumbra, 0.0=noShadow
+		
+		setConstant[2] = CUSTOM2
+		
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			#define NO_AUTO_ALPHATEST
+
+			struct VSOutput
+			{
+				half4	myColor				: COLOR0;
+				half4	myUV0				: TEXCOORD0;
+				half4	myUV1				: TEXCOORD1;
+			};			
+
+			half4 main (VSOutput aVSOut) : COLOR0
+			{
+				half4 tex0 = tex2D(sampler0, aVSOut.myUV0.xy);			// .rgb = scene, .a = shadow mask
+				half4 tex1 = tex2D(sampler1, aVSOut.myUV1.xy);			// .a = blurred shadow
+
+				half umbra = saturate((tex0.a - (1.0/16.0)) * 2);
+
+				half shadowStrength = saturate(saturate(tex0.a * 16) * setConstant2.a);
+				half blurredStrength = 1.0 - (tex1.a);				//  = 1.0 - blurredShadow
+				blurredStrength = saturate(blurredStrength + umbra);
+				shadowStrength = shadowStrength * aVSOut.myColor.a;		// Fade out shadows by distance approximation (higher screenspace = larger distance)
+				
+				shadowStrength = saturate(shadowStrength * blurredStrength);		// shadowContribution *= invBlurredShadow
+				
+				half4 temp3;
+				temp3.rgb = lerp(tex0.rgb, tex0.rgb * setConstant2, shadowStrength);
+
+				temp3.a = shadowStrength;
+				
+				return temp3;
+			}
+
+			//ps_2_0
+			//
+			//def c3, 2,1,0,1
+			//def c4, 0.333, 0.333, 0.333, 1
+			//
+			//dcl v0.rgba
+			//dcl t0.xy			// texcoords[0]
+			//dcl t1.xy			// texcoords[1]
+			//
+			//dcl_2d s0			// back buffer
+			//dcl_2d s1			// blurred texture
+			//
+			//texld_pp r2, t0, s0
+			//texld_pp r3, t1, s1
+			//
+			//mov_sat_pp r1.a, r2.a		// noShadow=0.0, umbra=0.5, penumbra=1.0
+			//mul_sat_pp r1.a, r1.a, c3.x	// *= 2.0
+			//
+			//mul_sat_pp r1.a, r1.a, c2.a	// r1.a = shadowStrength
+			//sub_sat_pp r5.a, c3.w, r3.a	// r5.a = 1.0 - blurredShadow
+			//
+			//mul_sat_pp r1.a, r1.a, v0.a	// Fade out shadows by distance approximation (higher screenspace = larger distance)
+			//
+			//mul_sat_pp r1.a, r1.a, r5.a	// shadowContribution *= invBlurredShadow
+			//
+			//sub_pp r4.a, c3.y, r1.a		// = 1.0 - r1.a 
+			//mul_sat_pp r1.rgb, r2, r4.a	// r1 = scene * lightContribution
+			//
+			//mul_sat_pp r0, r2, c2		// scene * ambience
+			//mul_sat_pp r0, r0, r1.a		// *= shadowContribution
+			//
+			//add_sat_pp r0, r0, r1
+			//
+			////mov_pp r0.a, c3.a		// reset alpha for later use? (needs colorWrite = (1,1,1,1))
+			//mov_pp r0.a, r1.a		// shadow contribution to alpha
+			//
+			//mov oC0, r0
+		}
+	}
+	
+	SoftShadowToScreenAndCloudShadowPass
+	{
+		//blend = alphablend
+		//blend = alphaBlend
+		textureRemap = (0,2,3,4)	// NOTE: This can be changed from code depending on number of blurs
+		
+		// v0.a = shadow intensity
+		// t0.a = 1.0=umbra, 0.5=penumbra, 0.0=noShadow
+		
+		setConstant[2] = CUSTOM2
+		setConstant[3] = CUSTOM3		//worldspace pos of camera
+		setConstant[4] = CUSTOM4		//ortogonal direction to sunlightdir
+		setConstant[5] = CUSTOM5		//ortogonal direction to sunlightdir
+		setConstant[6] = CUSTOM6		//worldspace center of shadow texture
+		setConstant[7] = CUSTOM7		//fog stuff1
+		setConstant[8] = CUSTOM8		//fog stuff2
+		setConstant[9] = CUSTOM9		//fog color
+		
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			#define NO_AUTO_ALPHATEST
+
+			float fog(float dist, float2 fogC1, float3 thresInvThresExp)
+			{
+				float temp = dist * fogC1.x + fogC1.y;
+				temp = lit(temp, temp, thresInvThresExp.z).z;
+				return temp * thresInvThresExp.y + thresInvThresExp.x;
+			}
+			
+			struct VSOutput
+			{
+				half4	myColor				: COLOR0;
+				half4	myUV0				: TEXCOORD0;
+				half4	myUV1				: TEXCOORD1;
+				half4	myUV2				: TEXCOORD2;		//worldspace direction of pixel
+			};			
+
+			half4 main (VSOutput aVSOut) : COLOR0
+			{
+				half4 tex0 = tex2D(sampler0, aVSOut.myUV0.xy);
+				half4 tex1 = tex2D(sampler1, aVSOut.myUV1.xy);
+				float depth = tex2D(sampler2, aVSOut.myUV0.xy).r * 10000 ;
+
+				float3 worldPos = setConstant3 + aVSOut.myUV2.xyz * depth;
+				
+				float3 relWorldPos = worldPos - setConstant6.xyz;
+				float2 shadowCoords = float2(dot(setConstant4, relWorldPos) * 0.00025 + 0.5, dot(setConstant5, relWorldPos) * 0.00025 + 0.5);
+				half4 tex3 = tex2D(sampler3, shadowCoords);
+				
+				float shadowStrength = saturate(tex0.a * 16);
+				half blurredStrength = 1.0 - (tex1.a);				//  = 1.0 - blurredShadow
+				half umbra = saturate((tex0.a - (1.0/16.0)) * 2);
+				blurredStrength = saturate(blurredStrength + umbra);
+				
+				//shadowStrength = shadowStrength * aVSOut.myColor.a;			// Fade out shadows by distance approximation (higher screenspace = larger distance)
+				shadowStrength *= saturate((400-depth) * 0.005);					// Non aproximated version when we have depthtexture anyway
+				
+				shadowStrength = saturate(shadowStrength * blurredStrength);				// shadowContribution *= invBlurredShadow
+				shadowStrength*= shadowStrength;
+				
+				float cloudShadowStrength = saturate(tex3.r+tex3.g*saturate((tex3.a+0.05 - worldPos.y * (1.0 / 255.0)) * 20));
+				cloudShadowStrength *= setConstant6.a*saturate((2000-depth)*0.001);
+				cloudShadowStrength *= 2;
+				cloudShadowStrength *= cloudShadowStrength;
+				
+				shadowStrength = saturate(1-(1-shadowStrength) * (1-cloudShadowStrength)) * setConstant2.a * setConstant2.a;		//add cloudshadow to shadow
+				
+				float4 shadowColor = setConstant2;
+				shadowStrength *= saturate(fog(depth, setConstant7.xy, setConstant8.xyz));
+				//shadowColor.rgb = lerp(setConstant9.rgb, shadowColor.rgb,	saturate(fog(depth, setConstant7.xy, setConstant8.xyz)));
+				
+				float4 temp3;
+				temp3.rgb = tex0.rgb * shadowColor;//lerp(tex0.rgb, tex0.rgb * shadowColor, shadowStrength);
+				temp3.a = shadowStrength;
+				
+				return temp3;
+			}
+		}
+	}
+	
+	//Copy of SoftShadowToScreenAndCloudShadowPass, but with some other writing of the result
+	SoftShadowToScreenAndCloudShadowPassToBlur
+	{
+		//blend = alphablend
+		//blend = alphaBlend
+		textureRemap = (0,2,3,4)	// NOTE: This can be changed from code depending on number of blurs
+		
+		// v0.a = shadow intensity
+		// t0.a = 1.0=umbra, 0.5=penumbra, 0.0=noShadow
+		
+		setConstant[2] = CUSTOM2
+		setConstant[3] = CUSTOM3		//worldspace pos of camera
+		setConstant[4] = CUSTOM4		//ortogonal direction to sunlightdir
+		setConstant[5] = CUSTOM5		//ortogonal direction to sunlightdir
+		setConstant[6] = CUSTOM6		//worldspace center of shadow texture
+		setConstant[7] = CUSTOM7		//fog stuff1
+		setConstant[8] = CUSTOM8		//fog stuff2
+		setConstant[9] = CUSTOM9		//fog color
+		
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			#define NO_AUTO_ALPHATEST
+
+			float fog(float dist, float2 fogC1, float3 thresInvThresExp)
+			{
+				float temp = dist * fogC1.x + fogC1.y;
+				temp = lit(temp, temp, thresInvThresExp.z).z;
+				return temp * thresInvThresExp.y + thresInvThresExp.x;
+			}
+			
+			struct VSOutput
+			{
+				half4	myColor				: COLOR0;
+				half4	myUV0				: TEXCOORD0;
+				half4	myUV1				: TEXCOORD1;
+				half4	myUV2				: TEXCOORD2;		//worldspace direction of pixel
+			};			
+
+			half4 main (VSOutput aVSOut) : COLOR0
+			{
+				half4 tex0 = tex2D(sampler0, aVSOut.myUV0.xy);
+				half4 tex1 = tex2D(sampler1, aVSOut.myUV1.xy);
+				float depth = tex2D(sampler2, aVSOut.myUV0.xy).r * 10000 ;
+
+				float3 worldPos = setConstant3 + aVSOut.myUV2.xyz * depth;
+				
+				float3 relWorldPos = worldPos - setConstant6.xyz;
+				float2 shadowCoords = float2(dot(setConstant4, relWorldPos) * 0.00025 + 0.5, dot(setConstant5, relWorldPos) * 0.00025 + 0.5);
+				half4 tex3 = tex2D(sampler3, shadowCoords);
+				
+				float shadowStrength = 0; // Removed because of shadow artifacts at borders - saturate(tex0.a * 16);
+				half blurredStrength = 1.0 - (tex1.a);				//  = 1.0 - blurredShadow
+				half umbra = saturate((tex0.a - (1.0/16.0)) * 2);
+				blurredStrength = saturate(blurredStrength + umbra);
+				
+				//shadowStrength = shadowStrength * aVSOut.myColor.a;			// Fade out shadows by distance approximation (higher screenspace = larger distance)
+				shadowStrength *= saturate((400-depth) * 0.005);					// Non aproximated version when we have depthtexture anyway
+				
+				// Removed because of shadow artifacts at borders
+				//shadowStrength = saturate(shadowStrength * blurredStrength);				// shadowContribution *= invBlurredShadow
+				//shadowStrength*= shadowStrength;
+				// End
+				
+				float cloudShadowStrength = saturate(tex3.r+tex3.g*saturate((tex3.a+0.05 - worldPos.y * (1.0 / 255.0)) * 20));
+				cloudShadowStrength *= setConstant6.a*saturate((2000-depth)*0.001);
+				cloudShadowStrength *= 2;
+				cloudShadowStrength *= cloudShadowStrength;
+				
+				shadowStrength = saturate(1-(1-shadowStrength) * (1-cloudShadowStrength)) * setConstant2.a;		//add cloudshadow to shadow
+				
+				float4 shadowColor = setConstant2;
+				shadowStrength *= saturate(fog(depth, setConstant7.xy, setConstant8.xyz));
+				//shadowColor.rgb = lerp(setConstant9.rgb, shadowColor.rgb,	saturate(fog(depth, setConstant7.xy, setConstant8.xyz)));
+				
+				float4 temp3;
+				//temp3.rgb = tex0.rgb * shadowColor;//lerp(tex0.rgb, tex0.rgb * shadowColor, shadowStrength);
+				//temp3.a = shadowStrength;
+
+				temp3.a = shadowStrength;
+				temp3.rgb = lerp(half3(1,1,1), shadowColor, shadowStrength);
+
+				return temp3;
+			}
+		}
+	}
+
+	LightShaftPass
+	{
+		blend = one invSrcAlpha
+		textureRemap = (0,2,3,4)
+		
+		// v0.a = shadow intensity
+		// t0.a = 1.0=umbra, 0.5=penumbra, 0.0=noShadow
+		
+		setConstant[2] = CUSTOM2
+		setConstant[3] = CUSTOM3		//worldspace pos of camera
+		setConstant[4] = CUSTOM4		//ortogonal direction to sunlightdir
+		setConstant[5] = CUSTOM5		//ortogonal direction to sunlightdir
+		setConstant[6] = CUSTOM6		//worldspace center of shadow texture
+		setConstant[7] = CUSTOM7		//fog stuff1
+		setConstant[8] = CUSTOM8		//fog stuff2
+		setConstant[9] = CUSTOM9		//fog color
+		
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			#define NO_AUTO_ALPHATEST
+
+			float fog(float dist, float2 fogC1, float3 thresInvThresExp)
+			{
+				float temp = dist * fogC1.x + fogC1.y;
+				temp = lit(temp, temp, thresInvThresExp.z).z;
+				return temp * thresInvThresExp.y + thresInvThresExp.x;
+			}
+			
+			struct VSOutput
+			{
+				half4	myColor				: COLOR0;
+				half4	myUV0				: TEXCOORD0;
+				half4	myUV1				: TEXCOORD1;
+				half4	myUV2				: TEXCOORD2;		//worldspace direction of pixel
+			};			
+
+			half4 main (VSOutput aVSOut) : COLOR0
+			{
+				float depth = tex2D(sampler2, aVSOut.myUV0.xy);
+				depth = clamp(depth,0,0.18);
+				float worldPosY = setConstant3.y + aVSOut.myUV2.y * depth * 10000;
+				float wpClamped = clamp(worldPosY, 0, setConstant3.w+200);
+				if(wpClamped > setConstant3.w)
+					wpClamped = setConstant3.w - 100 + sqrt(wpClamped + 100 - setConstant3.w) * 10;
+				depth -= ((worldPosY - wpClamped) / aVSOut.myUV2.y) * 0.0001;
+				float3 worldPos = setConstant3 + aVSOut.myUV2.xyz * depth * 10000;
+				
+				float3 relWorldPos = worldPos - setConstant6.xyz;
+				float2 shadowCoords = float2(dot(setConstant4, relWorldPos) * 0.00025 + 0.5, dot(setConstant5, relWorldPos) * 0.00025 + 0.5);
+				float4 tex3 = tex2D(sampler3, shadowCoords);
+				float fog = saturate(fog(depth*10000+10, setConstant7.xy, setConstant8.xyz));
+				
+				float add = (tex3.r - aVSOut.myUV1.y) * (1-fog) * setConstant6.w * aVSOut.myUV1.x;
+				float sub = (-(tex3.r - aVSOut.myUV1.y)) * (1-fog) * setConstant6.w * aVSOut.myUV1.x;
+				return float4(add,add,add,sub);
+			}
+		}
+	}
+
+	ViewPenumbraPass
+	{
+		blend = off
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			struct VSOutput
+			{
+				half4	myColor			: COLOR0;
+				half2	myUV0			: TEXCOORD0;
+			};
+			float4 main (VSOutput aVSOut) : COLOR0
+			{
+				half4 tex0 = tex2D(sampler0, aVSOut.myUV0.xy);
+				
+				half temp = tex0.a * 2 - 1;
+				temp = temp * temp;
+				return 1-temp;
+			}
+
+//			ps_1_1
+//			tex t0
+//			// Show penumbra only
+//			mov r0.a, t0_bx2.a
+// 			mul_sat r0.a, r0.a, r0.a
+//			mov r0, 1-r0.a
+		}
+	}
+	
+	ViewBlurredShadowPass
+	{
+		textureRemap = (0,2)	// NOTE: This can be changed from code depending on number of blurs
+		
+		blend = off
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			struct VSOutput
+			{
+				half2	myUV1			: TEXCOORD1;
+			};
+			float4 main (VSOutput aVSOut) : COLOR0
+			{
+				half4 tex1 = tex2D(sampler1, aVSOut.myUV1.xy);
+				
+				return tex1.a;
+			}
+
+//			ps_1_1
+//			tex t1
+//			mov_sat r0, t1.a		// blurred shadow
+		}
+	}
+}
+
+
+Config Lowend PS1.1
+{
+	NormalPass
+	{
+		Code
+		{
+			ps_1_1
+			def c2, 1,0,0,1
+			mov r0, c0
+		}
+	}
+
+	DownsamplePass
+	{
+		Code
+		{
+			ps_1_1
+			def c2, 1,0,0,1
+			mov r0, c0
+		}
+	}
+
+
+	DownsampleAnd3x3BlurPass
+	{
+		Code
+		{
+			ps_1_1
+			def c2, 1,0,0,1
+			mov r0, c0
+		}
+	}
+
+	3x3KernelPass
+	{
+		Code
+		{
+			ps_1_1
+			def c2, 1,0,0,1
+			mov r0, c0
+		}
+	}
+
+
+	SoftShadowToScreenPass
+	{
+		Code
+		{
+			ps_1_1
+			def c2, 1,0,0,1
+			mov r0, c0
+		}
+	}
+
+	ViewPenumbraPass
+	{
+		Code
+		{
+			ps_1_1
+			def c2, 1,0,0,1
+			mov r0, c0
+		}
+	}
+	
+	ViewBlurredShadowPass
+	{
+		Code
+		{
+			ps_1_1
+			def c2, 1,0,0,1
+			mov r0, c0
+		}
+	}
+}

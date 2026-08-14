@@ -58,6 +58,32 @@ r6_extracted/
 # list (~1.6 GB) because a 1999 isometric game's whole library is 233 MB of
 # 16-bit sprites - which is itself the point of the study.
 sc3k_extracted/
+# Mercenaries: Playground of Destruction, ripped and decoded by
+# tools/mercs/mercs_extract.ps1. Same rule again: Pandemic's art and audio are
+# read for reference and never shipped. ~2 GB ripped from a 4.37 GB PS2 disc,
+# plus the decoded audio, which expands - PS-ADPCM to .wav is roughly 3.5x, so
+# the ~475 MB of banks and streams lands nearer 1.6 GB. The _tools/ directory
+# underneath it holds vgmstream, fetched not vendored.
+mercs_extracted/
+# World in Conflict, decoded by tools/wic/wic_extract.ps1. Same rule again:
+# Massive's art and audio are read for reference and never shipped. Measured at
+# 7.3 GB from a 6.2 GB install before textures are converted to PNG, and the
+# audio kind is not in the default sweep. Unusually cheap to justify - this is
+# the one library on
+# this list whose *text* is the point. WiC ships its shaders as commented
+# plain text (130 .sur files with inline HLSL), its 2,187 particle effects as
+# key-value files, and its gameplay layer as Python 2.3 bytecode that
+# decompiles cleanly, so what gets read here is the engine describing itself.
+# See study/games/strategy/world_in_conflict/.
+wic_extracted/
+# Broken Arrow, decoded by tools/ba/ba_extract.ps1. Same rule again: Steel
+# Balalaika's art and audio are read for reference and never shipped. The
+# largest sweep on this list by some way - the install is 40 GB and 27 GB of
+# that is a Granite virtual-texture megatexture that decodes to more than it
+# stores - so like r6_extracted the library actually lives off this drive,
+# passed via -Out. This entry stays because the script's default is still a
+# path inside the repo, and a sweep run without -Out would land here.
+ba_extracted/
 
 # Scratch for the extraction tools (tools/xcom2/xcom_bulk.ps1, xcom_audio.ps1,
 # xcom_extract.ps1, build_test_kit.ps1): raw package dumps, bank staging and

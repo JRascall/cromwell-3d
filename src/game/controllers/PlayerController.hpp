@@ -134,7 +134,7 @@ public:
     Vector2 panInput()   const { return panInput_; }
     bool    panFast()    const { return panFast_; }
     bool    isOrbiting() const { return orbiting_; }
-    Vector2 orbitDelta() const { return orbitDelta_; }
+    Vec2 orbitDelta() const { return orbitDelta_; }
 
     /* Returns the accumulated wheel movement and clears it. Consume-once: a
      * notch must be applied exactly once, so reading is taking. */
@@ -182,7 +182,12 @@ private:
     void buildPreviewFor(std::optional<int> destination);
     void updateDecalPreview();
     void commitDecalPreview();
-    void handleClick();
+    /* THE CURSOR IS PASSED IN, not re-read. It used to call GetMousePosition()
+     * a second time, which is both a raylib dependency and a subtly different
+     * answer: updatePointer has already scaled the pointer to surface pixels
+     * and decided whether it is inside this view, and a fresh read would be in
+     * logical units and unarbitrated. One sample per frame, shared. */
+    void handleClick(Vec2 cursor);
     void clearPreview() { preview_.clear(); route_.clear(); }
 
     GameState& state_;
@@ -203,7 +208,7 @@ private:
 
     /* Held camera intent, rebuilt from FrameInput every frame. */
     Vector2 panInput_{};
-    Vector2 orbitDelta_{};
+    Vec2 orbitDelta_{};
     float   pendingZoom_ = 0.0f;
     bool    panFast_  = false;
     bool    orbiting_ = false;

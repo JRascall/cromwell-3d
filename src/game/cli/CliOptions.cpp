@@ -36,6 +36,15 @@ CliOptions CliOptions::parse(int argc, char** argv)
             } else {
                 options.computeSelfTestPath = std::string();
             }
+        } else if (!std::strcmp(arg, "--renderer") && hasValues(i, 1)) {
+            options.useRhiRenderer = !std::strcmp(argv[++i], "rhi");
+        } else if (!std::strcmp(arg, "--device-selftest")) {
+            /* Optional path, exactly as --compute-selftest above. */
+            if (hasValues(i, 1) && argv[i + 1][0] != '-') {
+                options.deviceSelfTestPath = argv[++i];
+            } else {
+                options.deviceSelfTestPath = std::string();
+            }
         } else if (!std::strcmp(arg, "--log") && hasValues(i, 1)) {
             options.logPath = argv[++i];
         } else if (!std::strcmp(arg, "--log-level") && hasValues(i, 1)) {
@@ -77,6 +86,12 @@ CliOptions CliOptions::parse(int argc, char** argv)
             for (float& value : options.freeCamera)
                 value = static_cast<float>(std::atof(argv[++i]));
             options.cameraPreset = CameraPreset::Free;
+        } else if (!std::strcmp(arg, "--no-cutaway")) {
+            options.keepWalls = true;
+        } else if (!std::strcmp(arg, "--fov") && hasValues(i, 1)) {
+            options.cameraFov = static_cast<float>(std::atof(argv[++i]));
+        } else if (!std::strcmp(arg, "--ortho") && hasValues(i, 1)) {
+            options.cameraOrthoHeight = static_cast<float>(std::atof(argv[++i]));
         } else if (!std::strcmp(arg, "--mouse") && hasValues(i, 2)) {
             options.mouseX = std::atoi(argv[++i]);
             options.mouseY = std::atoi(argv[++i]);

@@ -32,7 +32,7 @@ cited source, **[inferred]** reasoned rather than sourced.
 
 ---
 
-## 2. The three shortcuts currently in the tree
+## 2. The four shortcuts currently in the tree
 
 These are the "baked in" items the brief warns about. Do not build on top of
 them; replace them.
@@ -55,6 +55,31 @@ It also blocks the whole glossy path — FidelityFX's classification step routes
 rough pixels to the prefiltered cubemap *instead of* tracing, which requires
 the cubemap to actually be prefiltered. **[VENDOR]**
 
+**MEASURED AFTER BUILDING IT, 2026-08-14:** the prefiltered chain landed on the
+rhi path and is **visually indistinguishable** on this board — old fade against
+new chain, **max 3/255 across the whole frame, not one pixel over 8**.
+**[VERIFIED]**
+
+That is not a failure of the prefilter and it was predictable from the two
+sections either side of this one. Ambient specular is
+`environmentSpecular(...) * environmentBRDF(f0, roughness, nDotV)`, every surface
+on this board is a dielectric at f0 = 0.04 (§2.2), and that factor is small — and
+smaller still at the roughness where a prefiltered chain differs most from a
+flat gradient. The chain changes what the term CONTAINS; it cannot change how
+little the term is worth on an all-dielectric board.
+
+Where it pays off, in order:
+
+1. **Metals**, whose f0 is their albedo rather than 0.04. Blocked on §2.2.
+2. **SSR classification** (§5.6) — rough pixels skip tracing entirely and take
+   the prefiltered probe, which requires a chain that is actually prefiltered.
+   This is the real unlock and the reason it is stage one.
+3. Varied authored roughness, once materials carry textures (§4.7 of MIGRATION.md).
+
+**The lesson worth keeping:** a correct term that is multiplied by something
+small is invisible, and "I built the right thing" is not the same claim as "you
+will see a difference". Measure the delta before promising one.
+
 ### 2.2 The G-buffer has no F0
 
 Roughness lives in the normal target's alpha. There is no albedo and no
@@ -72,6 +97,77 @@ avoid. **The engine must carry full RGB F0**; see §4.
 ### 2.3 There is no scene colour buffer
 
 SSR has nothing to sample and water has nothing to refract. **[VERIFIED]**
+
+### 2.4 The outdoor probe's parallax box is the whole board
+
+Added 2026-08-14, after a reported bug: geometry behind the camera appeared on
+the **wrong side** of an exterior window on the rhi path while the raylib path
+was correct. **[VERIFIED** by moving the outdoor capture point onto the reported
+viewpoint, which fixed it**]**
+
+`ProbePlacement.cpp` gives every interior room a room-sized parallax box and
+gives the outdoor volume the **entire world**, with one capture point in the
+middle of the map. The reasoning was that the outdoors really is that big. Size
+was never the question.
+
+**What every engine actually does.** A cubemap is by definition an environment
+at infinity, and parallax correction exists to fix exactly that. The correction
+is only as good as the box: "the common point of every parallax-correction
+technique is to define an approximation of the geometry surrounding the local
+cubemap, and the simpler the approximation, the more efficient the algorithm
+will be **at the price of accuracy**" **[PAPER** Lagarde 2012**]**. Unity's Box
+Projection says to "set the size to match the dimensions of the room"
+**[VENDOR]**; Source's parallax-corrected cubemaps take a bounding-box **brush**
+an artist draws round the local geometry **[VDC]**; Source 2 ships
+parallax-corrected cubemaps as standard **[VDC**, `source2_rendering.md` §4**]**.
+
+A board-sized box round a street is the degenerate case of that approximation:
+the ray travels twenty tiles to the box before being re-aimed from a capture
+point ten tiles from the surface, so the re-aim points into the wrong half of
+the world. Turning correction OFF (an environment at infinity) is not the fix
+either — that is the default state parallax correction was invented to repair,
+and measurement confirmed it: moving the capture point 3.7 tiles with correction
+off changed the pane by a mean of 2.44/255, because with no correction the
+capture point only alters cubemap *contents*, not the lookup direction.
+
+**What replaces it.** Exterior probes with **local boxes** — a box per street
+block, sized to the geometry around it, with correction ON. Shipped as a 3x3
+grid over the outdoor volume plus a board-sized fallback for the seams, 13 of
+16 layers on the demo map. **[VERIFIED** confirmed correct on the reported
+viewpoint**]**
+
+**AND THE GRID IS A STAND-IN FOR AUTHORED PLACEMENT.** Source 2 does not
+generate these: `env_cubemap_box` is an entity a level designer places, with a
+rectangular volume they size by hand — "in a simple cuboid room, you'd want the
+volume bounds to meet the walls, floor and ceiling". **[VDC]** The placement
+guidance is far tighter than any grid: a cubemap serving a glass pane goes "in
+the center of the brush 16 units away from the face meant to receive the
+reflection", and one serving the player's eye goes 64 units above the ground.
+**[VDC]** That is a probe per reflective surface, not per region.
+
+A grid is the right answer here only because this map is generated. The day maps
+are authored, placement should come from the map data and this becomes the
+fallback for anything unplaced.
+
+**Two things Source 2 has that this selection rule does not** **[VDC]**:
+
+- **Volumes may OVERLAP**, and
+- **priority is EXPLICIT** — the designer sets which volume wins.
+
+Ours derives priority from box volume (smallest wins), which cannot express
+"this one overrides that one" and forces the boxes not to overlap, because two
+equal volumes tie and `selectProbes` breaks the tie by array index rather than
+by which box the fragment sits deeper inside. That is why block seams currently
+crossfade through the board-sized fallback instead of into the neighbouring
+block. An explicit priority field plus depth-inside tie-breaking is the fix, and
+it is a change to the selection rule rather than to placement.
+
+**What SSR does and does not fix here.** §5.6 routes smooth pixels to a trace
+and rough ones to the probe, so a smooth pane would normally trace. It would not
+have helped this report: the reflected boxes were **behind the camera**, and
+screen-space rejection falls back to the probe for exactly that case
+**[VENDOR]**. Off-screen reflections are the probe's job permanently, which is
+why the box matters even after stage three lands.
 
 ---
 
@@ -313,6 +409,11 @@ that hit them, and collected here because a new chat will hit the same ones.
 
 ## Sources
 
+- [Image-based Lighting approaches and parallax-corrected cubemap — Lagarde 2012](https://seblagarde.wordpress.com/2012/09/29/image-based-lighting-approaches-and-parallax-corrected-cubemap/)
+- [Parallax Corrected Cubemaps — Valve Developer Community](https://developer.valvesoftware.com/wiki/Parallax_Corrected_Cubemaps)
+- [env_cubemap_box — Valve Developer Community](https://developer.valvesoftware.com/wiki/Env_cubemap_box)
+- [Cubemaps (Source 2) — Valve Developer Community](https://developer.valvesoftware.com/wiki/Cubemaps_(Source_2))
+- [Troubleshooting reflections (Box Projection) — Unity](https://docs.unity3d.com/Manual/AdvancedRefProbe.html)
 - [Efficient GPU Screen-Space Ray Tracing — McGuire & Mara, JCGT 2014](https://jcgt.org/published/0003/04/04/paper.pdf)
 - [Stochastic Screen-Space Reflections — Frostbite](https://www.ea.com/frostbite/news/stochastic-screen-space-reflections)
 - [AMD FidelityFX Stochastic Screen-Space Reflections](https://gpuopen.com/fidelityfx-sssr/)

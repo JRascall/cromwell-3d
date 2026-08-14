@@ -1,0 +1,188 @@
+Version 2
+
+DefaultTextures
+{
+	texture surfaces/dummy
+	texture surfaces/dummy
+	texture ex_heightmap norepeat
+	texture particle_detail
+	texture ex_depthtexture
+}
+
+SurfaceSettings
+{
+	sort
+}
+
+DefineText CommonSettings
+{
+	alphatest = greater 1
+	blend = alphaBlend
+	zWrite = off
+	
+	setConstant[1] = CUSTOM5
+	setConstant[2] = CUSTOM6
+}
+
+
+DefineText HLSLCode
+{
+	struct VSOutput
+	{
+		half  myFog			: FOG;			//dx10 filling
+		half4 myDiffuse		: COLOR0;
+		half4 mySun2		: COLOR1;
+		half3 myUV0			: TEXCOORD0;
+		half2 myUV1			: TEXCOORD1;
+		half2 myUV2			: TEXCOORD2;
+		half4 mySun1		: TEXCOORD3;
+		half4 myPos			: TEXCOORD4;
+		half2 myPos01		: TEXCOORD5;
+		half2 myDetUV		: TEXCOORD6;
+	};
+
+	half4 main(VSOutput aVSOut) : COLOR0
+	{
+		// lightcalc
+		half4 tex0 = tex2D(sampler0, aVSOut.myUV0);
+		half3 tex1 = tex2D(sampler1, aVSOut.myUV1);
+	
+		half lightdot = dot(aVSOut.mySun1.rgb, tex0.rgb) + dot(aVSOut.mySun2.rgb, tex1.rgb);	//light from sun
+		lightdot *= aVSOut.mySun1.a;															//normalized light from sun
+		half3 lightcolor = lightdot * setConstant1.rgb + setConstant2.rgb;						//final light color
+
+		#ifdef DETAILTEX
+			half2 detail = tex2D(sampler3, aVSOut.myDetUV * setConstant6.x).xy;
+			detail = setConstant5.xy + detail * setConstant5.zw;
+		#endif
+		
+		half alpha = aVSOut.myDiffuse.w * tex0.w;
+		
+		#ifdef ZFEATHER
+			half zfeather = 1;
+			@ifdef DX9_RENDER
+				half4 groundy = tex2D(sampler2, aVSOut.myPos01.xy);
+				half hsample = dot(groundy, half4(0.25,0.25,0.25,0.25)) * 128.0;
+				zfeather = saturate((aVSOut.myPos.y - hsample)*setConstant4.x);
+			@else
+				@ifdef DX10_RENDER
+					float sceneDepth = texload2D(sampler4, int3(aVSOut.myPosition.x, aVSOut.myPosition.y, 0));
+					float myDepth = aVSOut.myPos.w;
+					zfeather = saturate(10000 * setConstant4.x * (sceneDepth- myDepth));
+				@endif
+			@endif
+			alpha *= zfeather;
+		#endif
+
+		#ifdef DETAILTEX
+			half4 retValue = half4(aVSOut.myDiffuse.xyz*lightcolor.xyz * detail.x, alpha * detail.y);
+		#else
+			half4 retValue = half4(aVSOut.myDiffuse.xyz*lightcolor.xyz, alpha);
+		#endif
+			//return float4(0,0,0,0);
+			return retValue;
+	}
+}
+
+Config Normal PS2.0
+{
+	NormalPass
+	{
+		$insertText CommonSettings
+		
+		textureRemap = (0,1)
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			$insertText HLSLCode
+		}
+	}
+
+	TexDetailPass
+	{
+
+		$insertText CommonSettings
+
+		setConstant[5] = CUSTOM1
+		setConstant[6] = CUSTOM2
+		
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			#define DETAILTEX
+
+			$insertText HLSLCode
+		}
+	}
+
+	ZFeatherPass
+	{
+		$insertText CommonSettings
+
+		setConstant[4] = CUSTOM4
+		
+		@ifdef DX9_RENDER
+			// We don't remap for DX10 because we would need to redefine the 
+			// texture binding in the C++ or something.
+			textureRemap = (0,1,2)
+		@endif
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			#define ZFEATHER
+
+			$insertText HLSLCode
+		}
+	}
+
+	ZFeatherTexDetailPass
+	{
+		$insertText CommonSettings
+
+		setConstant[4] = CUSTOM4
+		setConstant[5] = CUSTOM1
+		setConstant[6] = CUSTOM2
+		
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			#define DETAILTEX
+			#define ZFEATHER
+
+			$insertText HLSLCode
+		}
+	}
+}
+
+Config Normal PS1.1
+{
+	NormalPass
+	{
+		$insertText CommonSettings
+		
+		textureRemap = (0,1,2)
+		Code
+		{
+			ps_1_1
+			
+			tex t0
+			tex t1
+			tex t2
+			texcoord t3
+			
+			dp3 r0.rgba, t0, t3				; light contribution from first 3 dirs
+			dp3 r1.rgba, t1, v1				; light contribution from next 3 dirs
+			
+			add r0.rgb, r0.a, r1.a			; total light from sun
+			mul r0.rgb, r0, t3.a			; multiply with InvTotalSun value (also contains cluster lighting if active)
+			mad r0.rgb, r0, c1, c2			; multiply with suncolor and add ambience
+			
+			mul r0.rgb, r0, v0				; multiply with diffuse color
+			+mul r0.a, t0.a, v0.a			; alpha from texture * vertex alpha
+		}
+	}
+}

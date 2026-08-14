@@ -386,4 +386,38 @@ Camera3D Camera::toRaylib() const
     return makeCamera(position_, target_, projection_, lens_, up_);
 }
 
+/* ---- the matrices ---------------------------------------------------------
+ *
+ * Built from the engine's own Mat4 rather than raylib's MatrixLookAt — see the
+ * header. The difference is not stylistic: these produce clip depth in 0..1 and
+ * raylib's produce -1..1, and the two must not be mixed in one frame. */
+
+Mat4 Camera::viewMatrix() const
+{
+    return Mat4::lookAt(position_, target_, up_);
+}
+
+Mat4 Camera::projectionMatrix(float aspect, float nearPlane, float farPlane) const
+{
+    /* A degenerate aspect comes from a target that is one pixel wide, or from a
+     * window mid-resize reporting zero height. Both are transient and neither
+     * is worth a division by zero that puts NaN through every vertex for the
+     * rest of the frame. */
+    const float safeAspect = aspect > 1.0e-4f ? aspect : 1.0f;
+
+    if (projection_ == Projection::Orthographic) {
+        /* THE LENS IS A HEIGHT HERE, in world units — the trap this class
+         * exists to close. Width follows from the aspect so the framing matches
+         * the perspective case. */
+        const float halfHeight = lens_ * 0.5f;
+        const float halfWidth  = halfHeight * safeAspect;
+        return Mat4::orthographic(-halfWidth, halfWidth, -halfHeight, halfHeight,
+                                  nearPlane, farPlane);
+    }
+
+    /* AND A VERTICAL ANGLE HERE, in degrees. Mat4 wants radians. */
+    constexpr float kDegreesToRadians = 3.14159265358979323846f / 180.0f;
+    return Mat4::perspective(lens_ * kDegreesToRadians, safeAspect, nearPlane, farPlane);
+}
+
 }  // namespace cromwell

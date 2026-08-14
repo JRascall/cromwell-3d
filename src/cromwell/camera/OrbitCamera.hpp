@@ -40,7 +40,7 @@ public:
 
     /* Mouse delta in pixels. Pitch is clamped so the rig never goes under the
      * floor. */
-    void orbit(Vector2 mouseDelta);
+    void orbit(Vec2 mouseDelta);
 
     /* `direction` is a unit-ish vector in rig space: +x right, +z forward.
      * Speed scales with zoom distance so it feels the same close in and far

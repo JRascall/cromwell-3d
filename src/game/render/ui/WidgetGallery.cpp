@@ -113,13 +113,18 @@ float WidgetGallery::heading(const ui::UiRect& column, float y, const char* text
     return lineY + px(kHeadingGap);
 }
 
-void WidgetGallery::draw(GameUi& gameUi, const Camera3D& camera)
+void WidgetGallery::draw(GameUi& gameUi, const ui::UiInput& input,
+                         const cromwell::Camera& camera)
 {
     if (!visible_) {
         return;
     }
 
-    context_ = &gameUi.begin();
+    /* THE ONE CONVERSION, here rather than in the signature — see the header.
+     * Both world-space sections want a projection and nothing else does. */
+    const Camera3D rig = camera.toRaylib();
+
+    context_ = &gameUi.begin(input);
 
     /* A scrim over the scene, so the widgets are judged against a flat ground
      * rather than against whatever happens to be behind them. The blur still
@@ -161,8 +166,8 @@ void WidgetGallery::draw(GameUi& gameUi, const Camera3D& camera)
     drawTypeSpecimen(ui::UiRect{ content.x, content.y + content.height * 0.52f,
                                  content.width, content.height * 0.48f });
 
-    drawWorldAnchors(camera);
-    drawMsdfSample(camera);
+    drawWorldAnchors(rig);
+    if (worldTextSample_) drawMsdfSample(rig);
 
     gameUi.end();
     context_ = nullptr;
@@ -300,7 +305,7 @@ void WidgetGallery::drawGauges(ui::UiRect col)
 
         /* The bar previews; committing is the caller's, which is the split the
          * widget's header argues for. */
-        if (result.hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (result.hovered && context_->mousePressed()) {
             segmentValue_ = result.previewValue;
         }
 
@@ -326,7 +331,7 @@ void WidgetGallery::drawGauges(ui::UiRect col)
             const ui::UiRect bounds{ x, y, size.x, size.y };
             ui::drawLabel(*context_, ui::UiContext::id("gallery.tag", index), bounds, device);
 
-            if (context_->isHovered(bounds) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            if (context_->isHovered(bounds) && context_->mousePressed()) {
                 selectedTag_ = index;
             }
             x += size.x + px(6.0f);

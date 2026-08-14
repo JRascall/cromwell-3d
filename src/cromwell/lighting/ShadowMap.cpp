@@ -3,7 +3,10 @@
 #include "raymath.h"
 #include "rlgl.h"
 
+#include "cromwell/diag/DepthDump.hpp"
 #include "cromwell/gpu/ShaderLibrary.hpp"
+
+#include <cstdlib>
 
 namespace cromwell {
 
@@ -98,6 +101,22 @@ ShadowMap::Scope::~Scope()
     /* Flush anything still batched while the light matrices are current — the
      * caller's next draw belongs to the camera, not to the sun. */
     rlDrawRenderBatchActive();
+
+    /* TEMPORARY DIAGNOSTIC, matching the one in the device backend: dump this
+     * map once when XC_DUMP_SHADOW_RAYLIB names a file, so the two renderers'
+     * shadow maps can be compared as images rather than as outputs. Delete with
+     * its opposite number in OpenGlRenderDevice::endPass. */
+    {
+        static bool dumped = false;
+        const char* path = std::getenv("XC_DUMP_SHADOW_RAYLIB");
+        if (!dumped && path != nullptr) {
+            dumped = true;
+            float minimum = 0.0f;
+            float maximum = 0.0f;
+            diag::dumpDepthTexture(map_.depthTexture().id, kResolution, path,
+                                   minimum, maximum);
+        }
+    }
 
     rlDisableDepthTest();
     rlSetMatrixProjection(MatrixIdentity());

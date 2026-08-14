@@ -13,6 +13,27 @@
  * transparent, and worse, the parallax correction is what makes it read that
  * way — uncorrected, the same leak is a distant blur nobody would question.
  *
+ * AND THE OUTDOOR VOLUME KEPT THE OLD ARRANGEMENT, WHICH KEPT THE OLD BUG.
+ * Every interior got a room-sized box; the outdoors was left correcting against
+ * the whole board from one capture point in the middle of it, on the grounds
+ * that it is the one volume genuinely that big. That reasoning confuses the box
+ * being the right SIZE with the box being a usable PROXY. It is not one: a
+ * window on a building's east wall is ten tiles from the capture point, its
+ * reflection ray runs twenty tiles to the far edge before being re-aimed, and
+ * re-aiming that from the map's centre points it at the opposite half of the
+ * world. Geometry behind the camera then appears in the pane on the WRONG SIDE.
+ *
+ * That looks exactly like a mirrored cubemap and is not one — all six faces are
+ * correct, and it is the lookup INTO them that is aimed wrong. It survived
+ * review because the paragraph above had already been written and read as
+ * though it covered the outdoor case; it does cover it, and the outdoor case
+ * was the one exception nobody re-read it against.
+ *
+ * So the outdoor volume now sets `parallax = false` and is sampled as an
+ * environment at infinity, which is what a board-sized capture from a single
+ * point actually is. This is the same sentence as above, applied to the one
+ * volume that was exempted from it.
+ *
  * TWO VOLUMES PER PROBE, AND THEY ARE NOT THE SAME BOX. This is the part both
  * Source 2 (env_cubemap_box) and Unreal (reflection captures) get right and a
  * naive port misses:
@@ -65,14 +86,21 @@ struct ProbeVolume {
      * a flicker rather than as a room change. */
     float transition = 0.5f;
 
-    /* Smaller volumes win. A room inside the outdoor volume has to override
-     * it, and "override" is decided by which box is tighter — the same
-     * ordering rule Unreal uses when it composites captures smallest-last. */
+    /* WHICH VOLUME WINS WHERE TWO CONTAIN THE SAME POINT. HIGH WINS, ties
+     * broken by depth inside the box, so volumes may OVERLAP and crossfade.
+     * Designer-set rather than derived from box size — see the long note on
+     * DeviceProbeSet::Volume::priority. */
     float priority = 0.0f;
 
     /* False for the room that IS the outdoors, which is the fallback every
      * fragment outside every interior lands on. */
     bool interior = true;
+
+    /* WHETHER THE BOX IS A GOOD ENOUGH PROXY TO AIM AT. Off for the outdoor
+     * volume, which is sampled as an environment at infinity instead — see the
+     * long note on DeviceProbeSet::Volume::parallax, and the paragraph added
+     * to this file's header. */
+    bool parallax = true;
 };
 
 class ReflectionProbeSet {

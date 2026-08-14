@@ -11,6 +11,8 @@ source. The layout:
 | [`hd2/`](hd2/) | Helldivers 2 (Stingray) extraction |
 | [`r6/`](r6/) | Rainbow Six: Siege (AnvilNext 2) extraction |
 | [`ruse/`](ruse/) | R.U.S.E. (IRISZOOM) readers — the only Python 2 in the tree |
+| [`wic/`](wic/) | World in Conflict (MassTech) — `RYS` archives, headerless textures, Python 2.3 gameplay bytecode |
+| [`ba/`](ba/) | Broken Arrow (Unity 2022 / IL2CPP) — addressable bundles, encrypted FMOD banks, Granite virtual textures |
 | [`unigine/`](unigine/) | UNIGINE 2 texture decoding |
 | [`asset_browser/`](asset_browser/) | search, preview and channel-split across *every* extracted library |
 | [`fonts/`](fonts/) | icon header/CSS generation and MSDF atlas baking from the licensed font packs |
@@ -657,7 +659,7 @@ to XCOM's `MovementBorder_Line` (see `study/README.md`).
 
 | script | job |
 |---|---|
-| `asset_browser.py` | catalogue, search, software mesh render, texture channel split |
+| `asset_browser.py` | catalogue, search, mesh render (GPU or software), animation playback, texture channel split |
 | `asset_browser_ui.py` | the tkinter front end; import it from the above, not directly |
 
 ```powershell
@@ -682,12 +684,44 @@ Flat, normal-shaded and textured modes. `.obj` (XCOM, Siege) and `.glb`
 **Orbit camera**: drag to orbit, right-drag or shift-drag to pan, wheel to zoom,
 double-click or `R` to reset.
 
-It swaps renderer during a gesture rather than turning one down, and the reason
-is worth knowing before touching it: the triangle rasteriser is a Python loop
+**Animation**: select any rigged `.glb` and a clip list appears beside the
+preview. Clips come from two places - the ones inside the file, and the
+standalone `.anim` library `mercs_anim.py` wrote, bound to the skeleton **by
+joint name**. That second source is what matters: every human in Mercenaries
+shares one skeleton, so all 88 of them play the same 1,639 clips without the
+export duplicating ~10 GB of identical curves. The three `_anim.glb` under
+`gltf/animated/` carry their clips inline for Blender's sake; in the browser
+they look the same as the rest.
+
+A clip is offered when it and the skeleton overlap by 75% of the **smaller**
+joint set. Measuring against the clip instead rejects every 25-joint soldier
+against a 36-joint merc animation at 69%, which is exactly the case the feature
+exists for. The rule still keeps a 4-joint flag clip away from a character: an
+Apache is offered **0** clips, a flag its 5, and the artillery its single
+`nk_veh_type66artillery_fire`. Click a clip to play it, `repeat` to loop, `bind pose` to
+stop. The list has a filter box because a merc carries 1,639 clips, all of them
+sharing the one human skeleton. Skinning runs on the CPU (3 ms for a 36-joint
+character) and the posed vertices go to whichever renderer is live.
+
+**Install `moderngl` if you can.** It is an optional import and it changes the
+viewer's character completely. The numpy triangle rasteriser is a Python loop
 over *faces*, so its cost tracks triangle count and dropping the resolution buys
-almost nothing. Measured on an 18,009-triangle mesh - full shaded render
-**1,094 ms**, half-resolution barely better. While the camera moves it splats
-vertices instead, fully vectorised:
+almost nothing - 202 ms for a 3,216-triangle character, 1,094 ms for an
+18,009-triangle mesh, at any size. That is why every moving frame used to swap
+to scattered samples, and why dragging lost the texture and the surface detail.
+The GPU path draws the same picture - same projection constants, same shading,
+**0.97 silhouette IoU** against the software render across angles and zooms - in
+**3.9 ms**, so one renderer now serves the still frame, the drag and animation
+playback alike.
+
+| | numpy | GPU |
+|---|---|---|
+| 3,216-tri character, shaded | 202 ms (5 fps) | **3.9 ms (257 fps)** |
+| 2,556-tri Apache, shaded | 186 ms (5 fps) | **3.7 ms (269 fps)** |
+| skinned + textured playback | splat only | **5.6 ms (177 fps)** |
+
+Without moderngl the old behaviour is intact: splat while moving, shaded on
+release. The preview says which renderer drew it.
 
 | mesh | drag (points) | release (shaded) |
 |---|---|---|

@@ -26,10 +26,15 @@
 
 #include "raylib.h"
 
+#include "cromwell/camera/Camera.hpp"   /* FrameView::camera - named rather than
+                                       * relied on arriving transitively, which
+                                       * is how an include removed somewhere
+                                       * unrelated breaks this file */
 #include "cromwell/decal/Decal.hpp"
 #include "cromwell/overlay/RenderEffects.hpp"
 #include "cromwell/overlay/ViewLayers.hpp"
 #include "cromwell/ribbon/RibbonRenderer.hpp"
+#include "cromwell/ui/core/UiContext.hpp"
 #include "game/movement/search/PathPoint.hpp"
 #include "game/render/ribbon/RibbonTuning.hpp"
 #include "game/render/scene/CutawayView.hpp"
@@ -203,6 +208,16 @@ struct FrameView {
      * rather than two that drift. Non-const because the panel writes through it;
      * Application still owns it and the keyboard path still writes it directly. */
     ViewSettings* settings = nullptr;
+
+    /* THE FRAME'S UI INPUT, sampled once by the loop.
+     *
+     * Here rather than read by the widget kit itself, for the reason GameUi.cpp
+     * sets out: a second sample means the interface and the world can disagree
+     * about whether a click happened on the frame the button changed, and the
+     * raw pointer is in logical units while everything else works in surface
+     * pixels — which on a high-DPI display puts every hit test out by the scale
+     * factor. Application fills it beside the FrameInput, from the same poll. */
+    ui::UiInput ui;
 
     SteamStatus steam;
 

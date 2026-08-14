@@ -11,7 +11,7 @@ namespace cromwell {
  * `at().lookingAt()` re-aims after a move (what orbit and zoom want, since both
  * move the eye around a fixed target). */
 
-void OrbitCamera::orbit(Vector2 mouseDelta)
+void OrbitCamera::orbit(Vec2 mouseDelta)
 {
     const Vec3 target = camera_.target();
     const Vec3 offset = camera_.position() - target;

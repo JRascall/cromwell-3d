@@ -106,6 +106,23 @@ struct Aabb {
     Vec3 size() const { return max - min; }
     Vec3 halfExtents() const { return (max - min) * 0.5f; }
 
+    /* HOW MUCH SPACE THIS BOX ENCLOSES. Clamped per axis rather than trusting
+     * the bounds, because an INVERTED box — max below min on some axis, which
+     * is what `empty()` reports and what a default-constructed or degenerate
+     * one is — would otherwise multiply two negatives into a plausible positive
+     * volume. A box that contains nothing must measure zero, not a number that
+     * compares favourably against a real one.
+     *
+     * Wanted wherever boxes are ranked against each other: the reflection
+     * probes used it to decide which of two overlapping volumes described a
+     * point more tightly, and any broadphase or LOD that prefers the smaller of
+     * two candidates asks the same question. */
+    float volume() const
+    {
+        const Vec3 span = size();
+        return std::max(span.x, 0.0f) * std::max(span.y, 0.0f) * std::max(span.z, 0.0f);
+    }
+
     bool empty() const { return max.x < min.x || max.y < min.y || max.z < min.z; }
 
     bool contains(Vec3 point) const

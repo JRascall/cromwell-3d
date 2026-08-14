@@ -6,6 +6,7 @@
 #include "game/events/GameEvents.hpp"
 #include "game/ui/state/UIStateMachine.hpp"
 #include "cromwell/debug/DebugDraw.hpp"
+#include "cromwell/diag/Logger.hpp"
 #include "cromwell/diag/Profile.hpp"
 #include "cromwell/platform/ModalLoopPump.hpp"
 #include "cromwell/gpu/GpuProfiler.hpp"
@@ -23,6 +24,7 @@
 #include "game/movement/search/PathReconstructor.hpp"
 #include "game/render/dev/DecalDemo.hpp"
 #include "cromwell/gpu/compute/ComputeSelfTest.hpp"
+#include "cromwell/rhi/RenderDeviceSelfTest.hpp"
 #include "cromwell/gpu/ShaderLibrary.hpp"
 #include "game/render/Palette.hpp"
 #include "cromwell/ribbon/RibbonConstants.hpp"
@@ -57,6 +59,11 @@ Application::Application(CliOptions options)
 {
     state_.setMoveBudget(options_.moveBudget);
     state_.setIsoLevel(options_.isoLevel);
+
+    /* MANUAL KEEPS EVERY WALL. Dynamic strips the facings the camera looks
+     * through, which is a play affordance and a reproduction hazard — see
+     * CliOptions::keepWalls. */
+    if (options_.keepWalls) state_.setCutawayMode(CutawayMode::Manual);
     state_.setLosMode(options_.losMode);
     state_.selectIndex(options_.selectedUnit);
     view_.debugView = options_.debugView % ViewSettings::ViewSettings::kDebugViewCount;
@@ -126,6 +133,23 @@ FrameView Application::buildFrameView()
         case SteamAvatar::State::Failed:   view.steam.avatarState = steamAvatar_.error(); break;
         default:                           view.steam.avatarState = "idle"; break;
     }
+    /* THE SAME POLL THE WORLD SAW. Built here rather than by the widget kit so
+     * the interface and the world cannot disagree about a click, and so the
+     * pointer is in surface pixels like everything else. GameUi fills in the
+     * one field it owns - the font atlas scale. */
+    view.ui.mousePosition = deviceInput().pointerPosition();
+    view.ui.mouseDown     = deviceInput().down(cromwell::MouseButton::Left);
+    view.ui.mousePressed  = deviceInput().pressed(cromwell::MouseButton::Left);
+    view.ui.mouseReleased = deviceInput().released(cromwell::MouseButton::Left);
+    view.ui.timeSeconds   = clock().elapsed();
+    view.ui.deltaSeconds  = clock().unscaledDelta();
+    {
+        int width = 0;
+        int height = 0;
+        surface().size(width, height);
+        view.ui.screenSize = { static_cast<float>(width), static_cast<float>(height) };
+    }
+
     view.status          = controller_.status();
     view.cameraArgs      = controller_.cameraArguments();
     return view;
@@ -441,7 +465,8 @@ int Application::run()
      * a human gets the front end. */
     const bool scripted = options_.screenshotPath.has_value() ||
                           options_.webSelfTestPath.has_value() ||
-                          options_.computeSelfTestPath.has_value();
+                          options_.computeSelfTestPath.has_value() ||
+                          options_.deviceSelfTestPath.has_value();
 
     /* BEFORE InitWindow, and it has to be: the overlay hooks itself into the
      * graphics context when the first frame is presented, and a context created
@@ -468,10 +493,42 @@ int Application::run()
      * hang. The window is revealed below, AFTER the first frame has been drawn
      * and presented, so the first thing that appears on screen is the splash
      * rather than a blank frame that then becomes the splash. */
-    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_HIDDEN |
-                   (options_.screenshotPath ? 0 : FLAG_WINDOW_RESIZABLE));
-    InitWindow(kWindowWidth, kWindowHeight, "xcom-c - XCOM 2 tile lattice");
-    SetTargetFPS(60);
+    PlatformDesc platformDesc;
+    platformDesc.applicationName = "xcom-c - XCOM 2 tile lattice";
+    platformDesc.width           = kWindowWidth;
+    platformDesc.height          = kWindowHeight;
+    platformDesc.resizable       = !options_.screenshotPath.has_value();
+    platformDesc.startHidden     = true;
+    platformDesc.targetFrameRate = 60;
+
+
+
+    /* THE PLATFORM OWNS THE WINDOW, THE CONTEXT AND THE DEVICE from here. This
+     * used to be SetConfigFlags/InitWindow/SetTargetFPS inline, which meant the
+     * construction ORDER — flags before the window, the window before the
+     * device, the device before any resource — lived in this file and would
+     * have had to be reproduced, correctly, in every port. It is now stated
+     * once in the backend; see RaylibPlatform.hpp. */
+    platform_ = IPlatform::create(platformDesc);
+    if (!platform_) {
+        std::fprintf(stderr, "FATAL: could not bring up the platform - "
+                             "no display, or no GPU meeting the feature level\n");
+        return 1;
+    }
+
+    /* THE RENDERER BEING BUILT, if it was asked for. Constructed here because
+     * it borrows the platform's device, and only when selected so the raylib
+     * path costs nothing while it remains the real one. */
+    if (options_.useRhiRenderer) {
+        /* THE ONE SUN, borrowed from the renderer that owns it — so the dev
+         * panel's sliders and the sun-nudge keys, which both write to that
+         * instance, move the device path's lighting too. See the constructor's
+         * note on why this is a reference and not a second SunLight. */
+        rhiRenderer_ = std::make_unique<RhiFrameRenderer>(*platform_, renderer_.sun(),
+                                                         renderer_.ui());
+        LOGGER.warn("renderer: rhi path selected - it is under construction and "
+                    "draws only what has been converted so far");
+    }
 
     /* The GPU profiler's context, immediately after the GL one exists and on
      * the thread that owns it — both are requirements, and both fail quietly
@@ -490,7 +547,7 @@ int Application::run()
     if (!renderer_.initialise(kWindowWidth, kWindowHeight, options_, state_)) {
         std::fprintf(stderr, "FATAL: could not load assets/shaders - "
                              "run from the project root\n");
-        CloseWindow();
+        releasePlatform();
         return 1;
     }
 
@@ -536,12 +593,51 @@ int Application::run()
      * is the only way a screenshot run can have it, having no F1 to press. */
     renderer_.setupDevView(state_.world().lattice().storeys());
     if (options_.forceDevView) renderer_.setDevViewVisible(true);
-    if (options_.forceUiGallery) renderer_.toggleUiGallery();
+
+    /* BOTH RENDERERS, because only one of them draws and which one is a startup
+     * argument. Toggling just the raylib path's gallery is what made
+     * `--renderer rhi --ui-gallery` do nothing at all — the switch was being
+     * routed to a renderer that was not drawing the frame. */
+    if (options_.forceUiGallery) {
+        renderer_.toggleUiGallery();
+        if (rhiRenderer_) rhiRenderer_->toggleUiGallery();
+    }
 
     /* Diagnostic mode: prove the compute path and leave. Before the web test
      * and before the camera, because it depends on nothing but a live GL
      * context and its answer is a precondition for anything built on compute.
      * Exit code follows the result, so a build script can gate on it. */
+    /* Diagnostic mode: prove the rhi backend and leave.
+     *
+     * THE PLATFORM'S OWN DEVICE, whichever backend that is. Nothing here names
+     * OpenGL — run this on a console build and it runs that backend's device
+     * through the identical stages, which is the entire reason the suite takes
+     * an interface. */
+    if (options_.deviceSelfTestPath) {
+        int exitCode = 1;
+        {
+            const rhi::SelfTestResult result = rhi::runRenderDeviceSelfTest(platform_->device());
+            std::fputs(result.report.c_str(), stderr);
+
+            if (!options_.deviceSelfTestPath->empty()) {
+                if (std::FILE* file = std::fopen(options_.deviceSelfTestPath->c_str(), "w")) {
+                    std::fputs(result.report.c_str(), file);
+                    std::fclose(file);
+                }
+            }
+            exitCode = result.passed ? 0 : 1;
+        }
+
+#if XC_HAVE_WEB
+        renderer_.setWebPanel(nullptr);
+        if (web_) web_->stop();
+        web_.reset();
+#endif
+        renderer_.shutdownDevView();
+        releasePlatform();
+        return exitCode;
+    }
+
     if (options_.computeSelfTestPath) {
         const std::string report = runComputeSelfTest(*options_.computeSelfTestPath);
         std::fputs(report.c_str(), stderr);
@@ -554,7 +650,7 @@ int Application::run()
         web_.reset();
 #endif
         renderer_.shutdownDevView();
-        CloseWindow();
+        releasePlatform();
         return passed ? 0 : 1;
     }
 
@@ -578,7 +674,7 @@ int Application::run()
         if (web_) web_->stop();
         web_.reset();
         renderer_.shutdownDevView();
-        CloseWindow();
+        releasePlatform();
         return 0;
     }
 #endif
@@ -594,6 +690,24 @@ int Application::run()
                                 options_.freeCamera[2] })
                           .lookingAt({ options_.freeCamera[3], options_.freeCamera[4],
                                        options_.freeCamera[5] });
+
+            /* AND THE LENS, which a pose alone does not carry. Without this
+             * `--cam` reproduced where the camera stood and not what it saw,
+             * and the difference reads as the camera being too far forward —
+             * so the reader goes looking at the coordinates, which are right.
+             * See CliOptions::cameraFov. */
+            /* setLens, NOT switchTo. switchTo changes PROJECTION and early
+             * returns when the projection already matches — and it deliberately
+             * transfers framing rather than the number it is passed, because a
+             * lens value means different things either side of that switch. So
+             * `switchTo(Perspective, 40)` on an already-perspective camera is a
+             * no-op, silently. Caught by checking that three fields of view
+             * produced three different pictures; they produced one. */
+            if (options_.cameraOrthoHeight > 0.0f)
+                pawn_.camera().switchTo(cromwell::Projection::Orthographic)
+                              .setLens(options_.cameraOrthoHeight);
+            else if (options_.cameraFov > 0.0f)
+                pawn_.camera().setLens(options_.cameraFov);
             break;
         case CameraPreset::Staircase:
             pawn_.camera().at({ 21.0f, 5.5f, 11.5f }).lookingAt({ 13.5f, 2.2f, 17.0f });
@@ -646,7 +760,25 @@ int Application::run()
             steam_.tick();
         }
 
-        FrameInput input = input_.sample(options_.mouseX, options_.mouseY);
+        /* THE PLATFORM, SAMPLED ONCE, IN THIS ORDER. Events before input,
+         * because polling before pumping reads last frame's state; the clock
+         * last, so its delta includes the time the other two took rather than
+         * excluding it. The same order IPlatform::beginFrame will own once the
+         * window moves behind it — written here in the meantime rather than
+         * left implicit. */
+        surface().pumpEvents();
+        deviceInput().poll();
+        clock().tick();
+
+        /* A DRAG OR RESIZE IS A TIME DISCONTINUITY: Windows blocks inside its
+         * own modal loop, so the frame after one measures however long the
+         * player held the mouse. Clamping turns that into one slow frame;
+         * discarding is what it actually wants. */
+        if (clock().hitched()) clock().skipNextDelta();
+
+        FrameInput input = input_.sample(deviceInput(), clock(), surface(),
+                                         options_.mouseX, options_.mouseY);
+
 
         /* AGES THE DEBUG QUEUE AT THE TOP OF THE FRAME, before anything can add
          * to it. That ordering is what makes the default lifetime mean "one
@@ -660,7 +792,10 @@ int Application::run()
         DebugDraw::get().advance(input.deltaSeconds);
 
         if (input.toggleDevView) renderer_.toggleDevView();
-        if (input.toggleUiGallery) renderer_.toggleUiGallery();
+        if (input.toggleUiGallery) {
+            renderer_.toggleUiGallery();
+            if (rhiRenderer_) rhiRenderer_->toggleUiGallery();
+        }
 
 #if XC_HAVE_WEB
         /* Before the frame that will draw it. The pointer and keyboard are
@@ -689,7 +824,7 @@ int Application::run()
             /* The stand-in second player looks around slowly — enough motion
              * to prove their pane is a live feed. A real player two replaces
              * this line with their own controller's intent. */
-            playerTwoRig_.orbit(Vector2{ 20.0f * input.deltaSeconds, 0.0f });
+            playerTwoRig_.orbit(Vec2{ 20.0f * input.deltaSeconds, 0.0f });
 
             /* The entity update cycle: every unit ticks, and its components
              * tick or think from there. */
@@ -778,7 +913,14 @@ int Application::run()
         if (steamAvatar_.poll() && steamAvatar_.isReady())
             renderer_.uploadSteamAvatar(steamAvatar_.bytes());
 
-        renderer_.render(buildFrameView());
+        /* ONE RENDERER OR THE OTHER, chosen at startup. Both are built; the rhi
+         * path is being converted a pass at a time and is nowhere near parity,
+         * which is exactly why it has to be runnable — a converted pass that
+         * cannot be looked at beside the original is a pass nobody can review.
+         * See game/render/rhi/RhiFrameRenderer.hpp. */
+        const FrameView frameView = buildFrameView();
+        if (rhiRenderer_) rhiRenderer_->render(frameView);
+        else              renderer_.render(frameView);
 
         /* AFTER the swap that render() ends with, which is where the GPU
          * timestamp queries issued this frame become readable. The results
@@ -802,7 +944,7 @@ int Application::run()
          * noise; TakeScreenshot reads the framebuffer, which exists whether or
          * not the window is mapped - verified byte-identical either way. */
         if (!windowShown_ && !scripted) {
-            ClearWindowState(FLAG_WINDOW_HIDDEN);
+            surface().setVisible(true);
             windowShown_ = true;
         }
 
@@ -830,8 +972,13 @@ int Application::run()
      * as well as its own; during a drag the guard is what keeps a nested frame
      * from nesting again. */
     {
+        /* THE SURFACE'S CLOSE REQUEST, not WindowShouldClose(). raylib's call
+         * CONSUMES the request as a side effect of asking, so it can only be
+         * asked once a frame and its answer cannot be declined; the surface
+         * latches it in pumpEvents so a "really quit?" prompt the player backs
+         * out of is possible at all. See RaylibSurface.hpp. */
         ModalLoopPump pump(tickFrame);
-        while (running && !WindowShouldClose()) pump.tick();
+        while (running && !surface().closeRequested()) pump.tick();
     }
 
 #if XC_HAVE_WEB
@@ -845,7 +992,7 @@ int Application::run()
 #endif
 
     renderer_.shutdownDevView();
-    CloseWindow();
+    releasePlatform();
 
     /* AFTER the window, unlike CEF above. The overlay is injected into the
      * graphics context, so tearing Steam down first would pull it out from
@@ -853,6 +1000,23 @@ int Application::run()
      * it is written out because the ORDER is the point. */
     steam_.stop();
     return 0;
+}
+
+void Application::releasePlatform()
+{
+    /* THE RENDERER FIRST. It owns meshes, buffers and textures that live on the
+     * device, and the device is destroyed with the platform below — so anything
+     * still holding a handle when that happens is freeing GPU objects into a
+     * context that has already gone. The symptom is an access violation in a
+     * destructor, after main has printed its exit status and while there is
+     * nothing left on the stack to say what was being torn down. */
+    rhiRenderer_.reset();
+
+    /* THEN THE PLATFORM, which owns the window; releasing it closes the
+     * context, the device and everything under them, in the one order that
+     * works. Safe to call twice — a reset unique_ptr is null and a second reset
+     * does nothing — which matters because it sits on five different exits. */
+    platform_.reset();
 }
 
 }  // namespace game

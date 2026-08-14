@@ -19,8 +19,10 @@
  * lookRotation/forwardOf both have a convention that can be off by an axis or a
  * sign, and the only honest test of a convention is that it inverts.
  */
+#include "cromwell/math/Mat4.hpp"
 #include "cromwell/math/Quat.hpp"
 #include "cromwell/math/Vec3.hpp"
+#include "cromwell/math/Vec4.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -322,6 +324,203 @@ void testAxisAccessors()
           "identity faces forward");
 }
 
+/* ======================================================= Mat4 and Vec4 =====
+ *
+ * WHAT IS WORTH PINNING DOWN, and it is entirely the CONVENTIONS. Nobody writes
+ * a matrix multiply that is wrong in a way tests catch; what goes wrong is that
+ * storage order, vector convention or clip-space depth silently disagrees with
+ * the code on the other side, and the result is a plausible-looking wrong scene
+ * rather than a crash. Every check below pins one of those three down, so that
+ * a port which gets one wrong fails here rather than in a screenshot.
+ *
+ * The 0..1 depth range is the one to watch hardest — it is the deliberate
+ * choice Mat4.hpp argues for (Metal, Vulkan, D3D and the consoles all want it,
+ * GL is the odd one out and can be told), and a backend that quietly reverts to
+ * GL's -1..1 would halve the depth buffer's usable range without any other
+ * symptom. */
+
+void testMat4StorageIsColumnMajor()
+{
+    /* THE UPLOAD CONTRACT. A shader reads these sixteen floats straight out of
+     * a uniform buffer, so where the translation lands in memory IS the
+     * interface. Transposed, every object sits somewhere wrong and nothing
+     * reports it. */
+    const Mat4 t = Mat4::translation({ 1.0f, 2.0f, 3.0f });
+
+    CHECK(nearly(t.at(0, 3), 1.0f), "translation x lives at (row 0, column 3)");
+    CHECK(nearly(t.at(1, 3), 2.0f), "translation y lives at (row 1, column 3)");
+    CHECK(nearly(t.at(2, 3), 3.0f), "translation z lives at (row 2, column 3)");
+
+    /* Column-major means column 3 is the LAST four floats in memory. */
+    CHECK(nearly(t.data()[12], 1.0f), "column-major: translation starts at float 12");
+    CHECK(nearly(t.data()[13], 2.0f), "column-major: and runs contiguously");
+    CHECK(nearly(t.data()[14], 3.0f), "column-major: three floats, then w");
+    CHECK(nearly(t.data()[15], 1.0f), "the homogeneous w stays one");
+}
+
+void testCompositionAppliesRightToLeft()
+{
+    /* `translation * rotation` must rotate FIRST and then translate. The other
+     * order makes an object orbit the origin instead of spinning in place,
+     * which reads as an animation bug rather than a matrix one. */
+    const Quat quarterTurn = Quat::fromAxisAngle({ 0.0f, 1.0f, 0.0f }, kPi * 0.5f);
+    const Mat4 placed = Mat4::translation({ 10.0f, 0.0f, 0.0f }) * Mat4::rotation(quarterTurn);
+
+    const Vec3 out = placed.transformPoint({ 1.0f, 0.0f, 0.0f });
+
+    /* +X rotated a quarter turn about +Y goes to -Z, then translates to x=10. */
+    CHECK(nearly(out.x, 10.0f, 1e-4f), "translation applied after the rotation (x %.3f)", out.x);
+    CHECK(nearly(out.y, 0.0f, 1e-4f), "nothing moved in y (%.3f)", out.y);
+    CHECK(nearly(out.z, -1.0f, 1e-4f), "the point rotated to -z first (%.3f)", out.z);
+}
+
+void testTransformDirectionIgnoresTranslation()
+{
+    /* The bug this prevents is normals that move with the object. */
+    const Mat4 moved = Mat4::translation({ 100.0f, 100.0f, 100.0f });
+    const Vec3 direction = moved.transformDirection({ 0.0f, 1.0f, 0.0f });
+
+    CHECK(nearly(direction.x, 0.0f) && nearly(direction.y, 1.0f) && nearly(direction.z, 0.0f),
+          "a direction is unaffected by translation (%.2f %.2f %.2f)",
+          direction.x, direction.y, direction.z);
+}
+
+void testPerspectiveMapsDepthToZeroOne()
+{
+    /* THE DELIBERATE CHOICE, checked. Near must land on 0 and far on 1 — not
+     * -1 and 1, which is GL's convention and the one every other backend would
+     * then have to correct on every projection matrix forever. */
+    constexpr float kNear = 0.1f;
+    constexpr float kFar  = 100.0f;
+    const Mat4 projection = Mat4::perspective(kPi * 0.25f, 16.0f / 9.0f, kNear, kFar);
+
+    const Vec4 atNear = projection * Vec4::point({ 0.0f, 0.0f, -kNear });
+    const Vec4 atFar  = projection * Vec4::point({ 0.0f, 0.0f, -kFar });
+
+    CHECK(nearly(atNear.z / atNear.w, 0.0f, 1e-4f),
+          "the near plane maps to depth 0, not -1 (got %.4f)", atNear.z / atNear.w);
+    CHECK(nearly(atFar.z / atFar.w, 1.0f, 1e-4f),
+          "the far plane maps to depth 1 (got %.4f)", atFar.z / atFar.w);
+}
+
+void testReversedPerspectiveSwapsTheEnds()
+{
+    /* Reverse-Z is what the 0..1 choice exists to leave room for: near to 1,
+     * far to 0, so the float exponent's density near zero lands where precision
+     * is otherwise worst. */
+    constexpr float kNear = 0.1f;
+    constexpr float kFar  = 100.0f;
+    const Mat4 projection = Mat4::perspectiveReversed(kPi * 0.25f, 1.0f, kNear, kFar);
+
+    const Vec4 atNear = projection * Vec4::point({ 0.0f, 0.0f, -kNear });
+    const Vec4 atFar  = projection * Vec4::point({ 0.0f, 0.0f, -kFar });
+
+    CHECK(nearly(atNear.z / atNear.w, 1.0f, 1e-4f),
+          "reverse-Z: near maps to 1 (got %.4f)", atNear.z / atNear.w);
+    CHECK(nearly(atFar.z / atFar.w, 0.0f, 1e-4f),
+          "reverse-Z: far maps to 0 (got %.4f)", atFar.z / atFar.w);
+}
+
+void testOrthographicMapsDepthToZeroOne()
+{
+    const Mat4 projection = Mat4::orthographic(-10.0f, 10.0f, -10.0f, 10.0f, 1.0f, 50.0f);
+
+    const Vec4 atNear = projection * Vec4::point({ 0.0f, 0.0f, -1.0f });
+    const Vec4 atFar  = projection * Vec4::point({ 0.0f, 0.0f, -50.0f });
+
+    CHECK(nearly(atNear.z, 0.0f, 1e-4f), "ortho near maps to 0 (got %.4f)", atNear.z);
+    CHECK(nearly(atFar.z, 1.0f, 1e-4f), "ortho far maps to 1 (got %.4f)", atFar.z);
+}
+
+void testLookAtPutsTheTargetDownNegativeZ()
+{
+    /* Right-handed, looking down -Z in eye space. A backend or a shader that
+     * assumes +Z gets a mirrored world, which is uniquely hard to spot on
+     * symmetrical geometry. */
+    const Mat4 view = Mat4::lookAt({ 0.0f, 0.0f, 10.0f }, Vec3::zero(), { 0.0f, 1.0f, 0.0f });
+    const Vec3 target = view.transformPoint(Vec3::zero());
+
+    CHECK(nearly(target.x, 0.0f, 1e-4f) && nearly(target.y, 0.0f, 1e-4f),
+          "the target is centred in eye space (%.3f %.3f)", target.x, target.y);
+    CHECK(nearly(target.z, -10.0f, 1e-4f),
+          "and ten units down NEGATIVE z (got %.3f)", target.z);
+}
+
+void testInverseRoundTrips()
+{
+    const Quat spin = Quat::fromEuler(0.7f, -0.3f, 0.2f);
+    const Mat4 transform = Mat4::transform({ 3.0f, -4.0f, 5.0f }, spin, { 2.0f, 2.0f, 2.0f });
+    const Mat4 back = transform.inverse();
+
+    const Vec3 original{ 1.5f, -2.5f, 0.75f };
+    const Vec3 there = transform.transformPoint(original);
+    const Vec3 andBack = back.transformPoint(there);
+
+    CHECK(nearly(andBack.x, original.x, 1e-3f) && nearly(andBack.y, original.y, 1e-3f)
+              && nearly(andBack.z, original.z, 1e-3f),
+          "the general inverse round-trips through a scaled transform (%.4f %.4f %.4f)",
+          andBack.x, andBack.y, andBack.z);
+
+    /* THE PROJECTION CASE, which is the one screen-space passes need: SSAO and
+     * the decal projector both unproject a depth buffer, and inverseRigid would
+     * be confidently wrong on a projection matrix. */
+    const Mat4 projection = Mat4::perspective(kPi * 0.3f, 1.5f, 0.5f, 200.0f);
+    const Mat4 unproject = projection.inverse();
+    const Vec4 clip = projection * Vec4::point({ 2.0f, -1.0f, -8.0f });
+    const Vec3 eye = (unproject * clip).homogenised();
+
+    CHECK(nearly(eye.x, 2.0f, 1e-3f) && nearly(eye.y, -1.0f, 1e-3f)
+              && nearly(eye.z, -8.0f, 1e-3f),
+          "a projection inverts back to eye space (%.3f %.3f %.3f)", eye.x, eye.y, eye.z);
+}
+
+void testInverseRigidMatchesTheGeneralOneForAViewMatrix()
+{
+    /* The fast path is only correct for rotation-plus-translation. A view
+     * matrix is exactly that, and this is what licenses using it there. */
+    const Mat4 view = Mat4::lookAt({ 4.0f, 3.0f, 12.0f }, { 1.0f, 0.0f, 0.0f },
+                                   { 0.0f, 1.0f, 0.0f });
+    const Mat4 fast = view.inverseRigid();
+    const Mat4 general = view.inverse();
+
+    bool agree = true;
+    for (int i = 0; i < 16; i++) agree = agree && nearly(fast.m[i], general.m[i], 1e-3f);
+    CHECK(agree, "inverseRigid agrees with the general inverse on a view matrix");
+}
+
+void testSingularInverseDoesNotProduceNaN()
+{
+    /* A degenerate matrix is a bug upstream. Identity keeps the symptom local
+     * and visible; infinities spread through every fragment that samples the
+     * result and get blamed on the shader. */
+    Mat4 collapsed = Mat4::scaling({ 1.0f, 0.0f, 1.0f });
+    const Mat4 result = collapsed.inverse();
+
+    bool finiteAll = true;
+    for (int i = 0; i < 16; i++) finiteAll = finiteAll && std::isfinite(result.m[i]);
+    CHECK(finiteAll, "a singular matrix inverts to something finite rather than NaN");
+}
+
+void testVec4PointAndDirectionDifferOnlyInW()
+{
+    /* The pair that prevents "my normals translate with the object". */
+    const Vec3 v{ 1.0f, 2.0f, 3.0f };
+    CHECK(nearly(Vec4::point(v).w, 1.0f), "a point has w = 1, so translation applies");
+    CHECK(nearly(Vec4::direction(v).w, 0.0f), "a direction has w = 0, so it does not");
+}
+
+void testVec4HomogeniseSurvivesWWithNoDepth()
+{
+    /* w == 0 is a point at infinity — a real result for something on the eye
+     * plane — and dividing anyway spreads infinities. */
+    const Vec4 atInfinity{ 3.0f, 4.0f, 5.0f, 0.0f };
+    const Vec3 out = atInfinity.homogenised();
+
+    CHECK(nearly(out.x, 3.0f) && nearly(out.y, 4.0f) && nearly(out.z, 5.0f),
+          "w = 0 returns the direction rather than infinities (%.2f %.2f %.2f)",
+          out.x, out.y, out.z);
+}
+
 }  // namespace
 
 int main()
@@ -344,6 +543,19 @@ int main()
     testEulerRoundTrips();
     testEulerAtGimbalLock();
     testAxisAccessors();
+
+    testMat4StorageIsColumnMajor();
+    testCompositionAppliesRightToLeft();
+    testTransformDirectionIgnoresTranslation();
+    testPerspectiveMapsDepthToZeroOne();
+    testReversedPerspectiveSwapsTheEnds();
+    testOrthographicMapsDepthToZeroOne();
+    testLookAtPutsTheTargetDownNegativeZ();
+    testInverseRoundTrips();
+    testInverseRigidMatchesTheGeneralOneForAViewMatrix();
+    testSingularInverseDoesNotProduceNaN();
+    testVec4PointAndDirectionDifferOnlyInW();
+    testVec4HomogeniseSurvivesWWithNoDepth();
 
     if (g_failures == 0) {
         std::printf("math: all checks passed\n");

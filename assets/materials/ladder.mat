@@ -1,0 +1,9 @@
+# ladder — bare steel rungs.
+#
+# The one surface on this board that should read as a different substance from
+# the masonry around it: metal takes its colour from f0 and has no diffuse at
+# all, so it catches the sky instead of the sun.
+
+roughness   0.35    # not mirror-smooth; a used rung is not a mirror, and below
+                    # ~0.2 the highlight sparkles as the camera moves
+metalness   1.0

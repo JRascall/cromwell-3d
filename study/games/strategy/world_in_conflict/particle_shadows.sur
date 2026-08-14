@@ -1,0 +1,40 @@
+Version 2
+
+DefaultTextures
+{
+	texture surfaces/dummy
+}
+
+Config Highend PS2.0
+{
+	VertexShader
+	{
+		shader = NORMAL_MESH
+	}
+
+	NormalPass
+	{
+		alphatest = greater 1
+		blend = one invsrccolor
+		zWrite = off
+		colorwrite = (1,1,1,1)
+
+		
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			struct VSOutput
+			{
+				half4	myColor			: COLOR0;
+				half2	myUV0			: TEXCOORD0;
+				half2	myUV1			: TEXCOORD1;
+			};
+			float4 main (VSOutput aVSOut) : COLOR0
+			{
+				half4 tex = tex2D(sampler0, aVSOut.myUV0.xy);
+				return float4(0, tex.a * aVSOut.myColor.a, 0, aVSOut.myUV1.x);
+			}
+		}
+	}
+}

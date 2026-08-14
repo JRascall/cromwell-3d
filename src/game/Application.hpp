@@ -25,6 +25,10 @@
 #include "cromwell/camera/CameraDirector.hpp"
 #include "cromwell/input/FrameInput.hpp"
 #include "cromwell/input/InputHandler.hpp"
+#include "cromwell/platform/IPlatform.hpp"
+#include "cromwell/platform/ISurface.hpp"
+#include "cromwell/input/IInput.hpp"
+#include "cromwell/platform/IClock.hpp"
 #include "cromwell/input/PointerFocus.hpp"
 #include "cromwell/steam/SteamAvatar.hpp"
 #include "cromwell/steam/SteamClient.hpp"
@@ -33,6 +37,7 @@
 #include "game/ui/state/UIStateMachine.hpp"
 #include "game/cli/CliOptions.hpp"
 #include "game/render/FrameRenderer.hpp"
+#include "game/render/rhi/RhiFrameRenderer.hpp"
 #include "game/render/FrameView.hpp"
 #include "game/state/GameState.hpp"
 
@@ -200,6 +205,51 @@ private:
     bool windowShown_ = false;
 
     InputHandler input_;
+
+    /* ---- the machine, behind one door ----------------------------------
+     *
+     * THE WINDOW, THE CONTEXT, INPUT, TIMING, STORAGE AND THE RENDER DEVICE,
+     * all of it. Created in run() rather than at construction because it opens
+     * a window, and a constructed-but-not-run Application should not.
+     *
+     * NOTHING IN THIS CLASS NAMES A BACKEND ANY MORE. Which platform answers is
+     * a CMakeLists decision — see the two-axis note there — so a console port
+     * changes no line of this file. `platform_->surface()` is a console's
+     * display on one target and a resizable window on another, and the loop
+     * below cannot tell and does not ask.
+     *
+     * Held by pointer because IPlatform is an interface and the concrete type
+     * is deliberately not visible here. */
+    std::unique_ptr<IPlatform> platform_;
+
+    /* THE RENDERER BEING BUILT, when --renderer rhi selected it. Null on the
+     * raylib path, which is the default and stays so until parity. Created in
+     * run() because it borrows the platform. */
+    std::unique_ptr<RhiFrameRenderer> rhiRenderer_;
+
+    /* SHUT THE MACHINE DOWN, IN THE ONE ORDER THAT WORKS.
+     *
+     * The device renderer holds meshes, buffers and textures that only the
+     * device can free, and the device dies with the platform — so it has to be
+     * released first, every time, on every path out of run(). There are five of
+     * those: the normal exit and four early returns for a failed asset load and
+     * the three self-test modes.
+     *
+     * A FUNCTION AND NOT FIVE COPIES, because the first version was five copies
+     * of `platform_.reset()` and the renderer was added to none of them. The
+     * result was an access violation in a destructor after main had already
+     * printed its exit status — which is invisible when the game is launched
+     * from Explorer, and reads as "it crashes on quit sometimes" when it is
+     * not. Ordering rules that live in a comment get followed at four sites out
+     * of five; ordering rules that live in a function get followed. */
+    void releasePlatform();
+
+    /* Reads better than platform_->surface() at the dozen sites that want one,
+     * and keeps the null check in one place: past run()'s early return these
+     * are never null. */
+    ISurface& surface() { return platform_->surface(); }
+    IInput&   deviceInput() { return platform_->input(); }
+    IClock&   clock() { return platform_->clock(); }
 
     /* What the player and the dev panel have switched on. Written by
      * applyInput, and written directly by the dev panel — the renderer is

@@ -5,7 +5,7 @@
  */
 #pragma once
 
-#include "raylib.h"
+#include "cromwell/math/Vec2.hpp"
 
 namespace cromwell {
 
@@ -77,7 +77,7 @@ struct FrameInput {
 
     /* camera */
     bool    orbiting = false;
-    Vector2 mouseDelta{};
+    Vec2    mouseDelta{};
     float   panForward = 0.0f;
     float   panRight   = 0.0f;
     bool    panFast    = false;
@@ -89,7 +89,7 @@ struct FrameInput {
     float sunElevationRate = 0.0f;
 
     /* pointer */
-    Vector2 mousePosition{};
+    Vec2    mousePosition{};
     bool    leftPressed  = false;
     bool    leftReleased = false;
 

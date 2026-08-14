@@ -1,0 +1,28 @@
+{
+  // Extracted game content. Hundreds of thousands of files and tens of GB of
+  // it, none of it ours and none of it source — the same set .gitignore
+  // excludes. Left visible, every one of these costs three times over: the
+  // explorer tree, every Ctrl+Shift+F, and a file watcher per directory, which
+  // is what makes VS Code sit at 100% CPU after an extraction sweep.
+  //
+  // Globbed rather than listed one by one because the naming convention is the
+  // rule: tools/<game>/*_extract.ps1 writes <game>_extracted/, so the next
+  // sweep is covered without editing this file.
+  "files.exclude": {
+    "**/*_extracted": true,
+    "workbench": true
+  },
+
+  // Search and watch have to say it again — files.exclude hides from the
+  // explorer, it does not remove them from either of these.
+  "search.exclude": {
+    "**/*_extracted": true,
+    "workbench": true,
+    "builds": true
+  },
+  "files.watcherExclude": {
+    "**/*_extracted/**": true,
+    "workbench/**": true,
+    "builds/**": true
+  }
+}

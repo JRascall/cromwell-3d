@@ -23,6 +23,9 @@
  *   --los                   start with the visibility overlay on
  *   --stairs                the staircase camera preset
  *   --cam px py pz tx ty tz free camera
+ *   --no-cutaway            keep every wall - do not strip facings by angle
+ *   --fov degrees           its vertical field of view (perspective)
+ *   --ortho worldHeight     or make it orthographic, spanning this height
  *   --dev-view              start with the F1 dev panel open; the only way to
  *                           get it in a --shot, which has no F1 to press
  *   --minimap-realtime      capture the minimap every frame instead of five
@@ -93,6 +96,27 @@ struct CliOptions {
        report to the log only. See render/gpu/ComputeSelfTest.hpp. */
     std::optional<std::string> computeSelfTestPath;
 
+    /* --device-selftest [<log>]: run the rhi backend conformance suite —
+       resources, handle generations, clears, a depth-only pass, a shader and a
+       fullscreen draw, each verified by reading the pixels back. Opens a window
+       because a device needs a context, then exits without drawing a frame of
+       the game.
+
+       THE SAME SUITE RUNS AGAINST EVERY BACKEND, which is the point: it takes
+       an IRenderDevice rather than the GL one, so a console or Metal port has a
+       concrete list of failures to work down instead of "it compiles and the
+       screen looks wrong". See cromwell/rhi/RenderDeviceSelfTest.hpp. */
+    std::optional<std::string> deviceSelfTestPath;
+
+    /* --renderer rhi: draw through rhi::IRenderDevice instead of raylib.
+
+       TWO RENDERERS EXIST DURING THE PORT and this chooses between them. The
+       rhi path is being built one pass at a time and is nowhere near parity;
+       running it today gets a cleared backbuffer. It is selectable anyway,
+       because a converted pass that cannot be LOOKED at beside the original is
+       a pass nobody can review. See game/render/rhi/RhiFrameRenderer.hpp. */
+    bool useRhiRenderer = false;
+
     bool  ambientOcclusion = true;
 
     /* --no-steam clears this. ON by default because a Steam build that only
@@ -162,6 +186,18 @@ struct CliOptions {
     int   debugView    = 0;
     float moveBudget   = 6.0f;
     int   isoLevel     = kDefaultStoreyCount - 1;
+
+    /* KEEP EVERY WALL. The cutaway defaults to Dynamic, which removes the wall
+     * facings the camera is looking through so the player can see into a room.
+     * That is right for play and wrong for a reproduction: a screenshot taken
+     * to show "it looks wrong here" comes back with the walls of the room in
+     * question missing, and the thing being described is not in the picture.
+     *
+     * It is also the reason --cam alone was not enough to reproduce a view even
+     * once the lens travelled with it. Sets CutawayMode::Manual at startup,
+     * which keeps all facings; the storey cut is --iso and stays separate,
+     * because hiding a FLOOR and hiding a WALL are different questions. */
+    bool  keepWalls    = false;
     int   selectedUnit = 0;
 
     /* the sprint-hover STATE, which is both rings up with amber solid — not
@@ -171,6 +207,26 @@ struct CliOptions {
 
     CameraPreset        cameraPreset = CameraPreset::Default;
     std::array<float, 6> freeCamera{};   /* px py pz tx ty tz */
+
+    /* THE LENS, WITHOUT WHICH A POSE DOES NOT REPRODUCE A PICTURE.
+     *
+     * A camera is not just where it is and what it looks at. `--cam` restored
+     * the pose and left the lens at whatever the pawn's rig was built with, so
+     * pasting the dev panel's line back in reproduced a DIFFERENT framing
+     * whenever the view being described was not at that default — and the error
+     * reads as the camera standing too far forward or too far back, which sends
+     * you looking at the position it got right.
+     *
+     * Zero means "leave the rig's own lens alone", so a `--cam` from before
+     * this existed still behaves exactly as it did.
+     *
+     * TWO FIELDS BECAUSE THERE ARE TWO KINDS OF LENS, and conflating them is
+     * the trap Camera.hpp's header calls "the fovy trap": under perspective the
+     * number is a vertical ANGLE, under orthographic it is a visible HEIGHT in
+     * world units. One float carrying either would be raylib's Camera3D::fovy
+     * again, reintroduced at the command line. */
+    float cameraFov = 0.0f;         /* vertical degrees, perspective */
+    float cameraOrthoHeight = 0.0f; /* world units, switches to orthographic */
 
     std::optional<int> mouseX;
     std::optional<int> mouseY;

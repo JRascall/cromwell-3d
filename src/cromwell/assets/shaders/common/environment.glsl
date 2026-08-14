@@ -55,22 +55,47 @@ uniform vec4 uProbeInfluenceMax[MAX_PROBES];
  * for a wall's interior face, on the far side of that wall — so the lookup
  * returned geometry the wall was blocking and the wall read as transparent.
  * Correcting against the room the surface is actually IN means the ray can no
- * longer cross a wall to be corrected, because the wall is the box. */
+ * longer cross a wall to be corrected, because the wall is the box.
+ *
+ * AND THE OUTDOOR VOLUME IS EXEMPT FROM THE CORRECTION ENTIRELY, because it
+ * never got a room-sized box — it kept the board. Same bug, one volume,
+ * discovered later: geometry behind the camera appearing in a window on the
+ * wrong side. See ReflectionProbeSet.hpp. */
 vec3 probeDirection(int probe, vec3 reflection, vec3 worldPosition)
 {
+    /* AN ENVIRONMENT AT INFINITY, for a probe whose box is not a usable proxy
+     * for what it captured — which is what a board-sized capture from a single
+     * point actually is. Uncorrected the reflection is merely imprecise, and
+     * imprecise in a direction the eye reads as distance; corrected, it was
+     * precise and pointing the wrong way. */
+    if (uProbeParallaxMax[probe].w <= 0.0) return reflection;
+
     /* Guarded against a component of exactly zero — a reflection parallel to a
      * box face has no intersection with it, and 1/0 would poison the min. */
     vec3 safe = mix(reflection, vec3(1e-5), lessThan(abs(reflection), vec3(1e-5)));
     vec3 inverseRay = 1.0 / safe;
 
-    vec3 toMaximum = (uProbeParallaxMax[probe].xyz - worldPosition) * inverseRay;
-    vec3 toMinimum = (uProbeParallaxMin[probe].xyz - worldPosition) * inverseRay;
+    /* CLAMPED INTO THE BOX FIRST, because what follows is the box's EXIT
+     * intersection and that is only defined from INSIDE it. A fragment outside
+     * yields a NEGATIVE distance, and the hit then walks BACKWARDS along the
+     * reflection ray into a completely different part of the cubemap —
+     * silently, because a plausible wrong direction still returns a plausible
+     * colour. A pane sits astride a room boundary, so half its thickness is
+     * outside the box its inner face selects; the clamp moves the origin by at
+     * most that overhang and is the difference between defined and not. */
+    vec3 origin = clamp(worldPosition, uProbeParallaxMin[probe].xyz,
+                        uProbeParallaxMax[probe].xyz);
 
-    /* The forward intersection on each axis, then the nearest of the three. */
+    vec3 toMaximum = (uProbeParallaxMax[probe].xyz - origin) * inverseRay;
+    vec3 toMinimum = (uProbeParallaxMin[probe].xyz - origin) * inverseRay;
+
+    /* The forward intersection on each axis, then the nearest of the three,
+     * floored at zero for a fragment sitting exactly on a face with the ray
+     * pointing out of it — where rounding decides the sign. */
     vec3 furthest = max(toMaximum, toMinimum);
-    float distanceToBox = min(min(furthest.x, furthest.y), furthest.z);
+    float distanceToBox = max(min(min(furthest.x, furthest.y), furthest.z), 0.0);
 
-    vec3 hit = worldPosition + reflection * distanceToBox;
+    vec3 hit = origin + reflection * distanceToBox;
     return hit - uProbeCapture[probe].xyz;
 }
 
@@ -137,8 +162,9 @@ bool selectProbes(vec3 worldPosition, out int best, out int second,
     second = -1;
     blend  = 0.0;
 
-    float bestPriority   = 1e30;
-    float secondPriority = 1e30;
+    /* NEGATIVE infinity now, because high wins. */
+    float bestPriority   = -1e30;
+    float secondPriority = -1e30;
     float bestWeight     = 0.0;
     float secondWeight   = 0.0;
 
@@ -148,7 +174,14 @@ bool selectProbes(vec3 worldPosition, out int best, out int second,
 
         float priority = uProbeParallaxMin[i].w;
 
-        if (priority < bestPriority) {
+        /* HIGHER PRIORITY FIRST, then deeper inside. The second test is what
+         * makes overlapping volumes of equal priority usable: without it the
+         * winner is whichever the loop reached first, which is an array index
+         * and not a fact about where the fragment is. */
+        bool beatsBest = priority > bestPriority ||
+                         (abs(priority - bestPriority) < 1e-4 && weight > bestWeight);
+
+        if (beatsBest) {
             second         = best;
             secondPriority = bestPriority;
             secondWeight   = bestWeight;
@@ -156,7 +189,8 @@ bool selectProbes(vec3 worldPosition, out int best, out int second,
             best         = i;
             bestPriority = priority;
             bestWeight   = weight;
-        } else if (priority < secondPriority) {
+        } else if (priority > secondPriority ||
+                   (abs(priority - secondPriority) < 1e-4 && weight > secondWeight)) {
             second         = i;
             secondPriority = priority;
             secondWeight   = weight;
@@ -165,10 +199,24 @@ bool selectProbes(vec3 worldPosition, out int best, out int second,
 
     if (best < 0) return false;
 
-    /* The winner's own weight IS the blend: at 1 it is fully inside its room
-     * and owns the fragment outright; at 0.3 it is a third of the way into the
-     * doorway and the room behind should still be two thirds of the answer. */
+    /* ---- how much of the winner, and how much of the runner-up -----------
+     *
+     * TWO RULES, because the two cases mean different things.
+     *
+     * DIFFERENT PRIORITIES — a room inside the outdoors. The winner's own
+     * weight IS the blend: at 1 it is fully inside its room and owns the
+     * fragment outright; at 0.3 it is a third of the way into the doorway and
+     * the volume behind should still be two thirds of the answer.
+     *
+     * EQUAL PRIORITIES — two overlapping volumes a designer placed side by
+     * side. Neither is "behind" the other, so the split is PROPORTIONAL to how
+     * far inside each one the fragment is. Using the winner's raw weight here
+     * would fade a block out towards its neighbour and never fade the
+     * neighbour in, leaving a dark seam down the middle of the overlap. */
     blend = bestWeight;
+    if (second >= 0 && abs(bestPriority - secondPriority) < 1e-4)
+        blend = bestWeight / max(bestWeight + secondWeight, 1e-4);
+
     if (second < 0 || secondWeight <= 0.0) blend = 1.0;
 
     return true;

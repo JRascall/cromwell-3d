@@ -41,6 +41,7 @@
 #include "cromwell/post/PrepassShader.hpp"
 #include "cromwell/post/SkyPass.hpp"
 #include "cromwell/post/ToneMapPass.hpp"
+#include "cromwell/render/ISceneSource.hpp"
 #include "cromwell/ribbon/RibbonRenderer.hpp"
 #include "cromwell/ribbon/RibbonShader.hpp"
 #include "game/cli/CliOptions.hpp"
@@ -83,7 +84,16 @@ using namespace cromwell;
  * is what the render passes take. See cromwell/camera/Camera.hpp. */
 using cromwell::Camera;
 
-class FrameRenderer {
+/* IMPLEMENTS ISceneSource, which is what lets the engine's passes draw this
+ * game's world without naming any of it. The three submit* overrides are
+ * private and at the bottom of the class: nothing here calls them directly, the
+ * passes reach them through the interface, and keeping them unreachable by name
+ * is how they stay honest about using only what arrives on the PassContext.
+ *
+ * This class is still the whole renderer — the sequence, the targets and the
+ * shaders are all below. That is the next step and not this one; see
+ * cromwell/render/ISceneSource.hpp for where the line is being drawn. */
+class FrameRenderer : public ISceneSource {
 public:
     /* How many loops and edges each ring's border came out to. Reported rather
      * than kept private because the dev HUD shows them, and a ribbon that
@@ -232,6 +242,10 @@ public:
      * without this a click on one would be swallowed by the button AND ordered
      * as a move on the world beneath it. See GameUi::wantsMouse. */
     bool  uiWantsMouse()     const { return gameUi_.wantsMouse(); }
+
+    /* THE ONE UI SURFACE, for the renderer being built to paint through. See
+     * RhiFrameRenderer's constructor on why there is exactly one. */
+    GameUi& ui() { return gameUi_; }
     const RibbonStats& ribbonStats() const { return ribbonStats_; }
 
     SunLight&           sun() { return sun_; }
@@ -245,15 +259,49 @@ public:
 #endif
 
 private:
-    /* ---- passes, all reading view_ -------------------------------------- */
-    /* Both take the storey depth EXPLICITLY rather than reading the iso level
-     * themselves. The cutaway belongs to the camera, and a pass that reaches
-     * for it silently — as the shadow map used to — makes the lighting change
-     * when the player changes floor. The lit pass gets the cutaway; the sun
-     * and the probes get the whole lattice. */
-    void drawGeometry(const CutawayView& cutaway, const Material& material,
-                      bool castersOnly = false);
-    void drawGeometryLit(const CutawayView& cutaway);
+    /* ---- ISceneSource: this game's geometry, for any of the engine's passes -
+     *
+     * WRITTEN TO USE `pass` AND GAME STATE ONLY. Every one of these could reach
+     * for `layers()`, `materials_` or `prepass_` as members — they are members,
+     * this class still owns them — and every one of them takes the same things
+     * off the context instead. That restraint is the entire test: these three
+     * functions are what a second project writes, and if they compile only
+     * because they are sitting inside the renderer then the interface is a
+     * decoration and the next project finds out the hard way.
+     *
+     * The one thing they legitimately read from `this` is the game's own
+     * per-frame state — view_, statics_, props_, units_ — which is exactly what
+     * a project's own implementation would hold. */
+    void submitDepth(const PassContext& pass) override;
+    void submitLit(const PassContext& pass) override;
+    void submitTransparent(const PassContext& pass) override;
+
+    /* HOW MUCH OF THE WORLD THIS PASS MAY DRAW. The one place the engine's
+     * "is this a question about the world or about a camera" is turned into
+     * this game's answer — see PassContext::worldSpace and CutawayView.hpp.
+     * Every submission goes through it, so the sun and the probes cannot
+     * acquire the player's cutaway by a call site forgetting. */
+    CutawayView cutawayFor(const PassContext& pass) const;
+
+    /* A context with the shared shading state and the pass's identity filled
+     * in. The per-pass fields — material, camera, target size — are set by the
+     * call site, which is the only thing that knows them. */
+    PassContext passFor(PassKind kind, const ViewLayers& layers);
+
+    /* THE ROSTER, PLUS THE ONE BODY THAT IS NOT IN IT.
+     *
+     * A unit walking a path is drawn at an interpolated position rather than at
+     * its logical cell, so the sweep skips it and the caller places it
+     * afterwards. Every pass that draws units needs BOTH halves, and four of
+     * them used to carry their own copy of the pairing — a pass that remembered
+     * the sweep and forgot the placement would drop the moving soldier from
+     * that pass alone, which reads as a unit that stops casting a shadow, or
+     * stops occluding, for exactly as long as it is walking.
+     *
+     * `tag` runs immediately before each body, including the placed one, for a
+     * pass that needs to say something per object. */
+    void submitBodies(const Material& material, int maxStorey,
+                      const UnitRenderer::UnitTag& tag = {});
 
     /* THE WHOLE BOARD FROM ABOVE, into its own texture — the minimap, and the
      * standing proof that rendering from a second camera works.
@@ -308,7 +356,6 @@ private:
     /* Composites the pane textures onto the backbuffer, in the resolve slot
      * the fullscreen tonemap normally occupies. */
     void drawSplitScreen();
-    void drawGeometryPrepass();
     void drawOverlays();
     void drawShadowMap();
     void captureEnvironmentProbes();

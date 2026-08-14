@@ -30,6 +30,7 @@
 
 #include "cromwell/ui/core/UiContext.hpp"
 #include "cromwell/ui/paint/UiFontSet.hpp"
+#include "cromwell/ui/paint/IUiPainter.hpp"
 #include "cromwell/ui/paint/UiPainter.hpp"
 
 #include <memory>
@@ -54,7 +55,7 @@ public:
      *
      * Call it once per frame, on whichever path is running — the front end and
      * the in-game HUD are alternatives, never both. */
-    cromwell::ui::UiContext& begin();
+    cromwell::ui::UiContext& begin(const cromwell::ui::UiInput& input);
 
     /* Paints everything submitted since begin(). Call inside BeginDrawing. */
     void end();
@@ -78,11 +79,23 @@ public:
 
     const cromwell::ui::UiFontSet& fonts() const { return fonts_; }
 
+    /* PAINT THROUGH THIS INSTEAD, for the renderer being built. Null restores
+     * the built-in raylib painter, which is the default and stays so until
+     * parity.
+     *
+     * Borrowed, not owned: the device painter's lifetime is the device's, and
+     * the device is closed before this object is. A caller that sets one must
+     * clear it before that happens — see RhiFrameRenderer's destructor. */
+    void setPainter(cromwell::ui::IUiPainter* painter) { external_ = painter; }
+
 private:
     bool loaded_ = false;
 
     cromwell::ui::UiFontSet fonts_;
     cromwell::ui::UiPainter painter_;
+
+    /* Null on the raylib path. See setPainter. */
+    cromwell::ui::IUiPainter* external_ = nullptr;
 
     /* By pointer because the context takes the font set by reference at
      * construction, so the font set has to exist first. */

@@ -481,7 +481,14 @@ void FrameRenderer::drawSceneForView(const Camera3D& rig, const ViewLayers& requ
              * length: this buffer's ALPHA IS ROUGHNESS, not coverage, and
              * blending into it mixes two surfaces per pixel. */
             rlDisableColorBlend();
-            drawGeometryPrepass();
+
+            PassContext gbuffer = passFor(PassKind::Prepass, effective);
+            gbuffer.material    = &prepassMaterial();
+            gbuffer.camera      = &rig;
+            gbuffer.width       = width;
+            gbuffer.height      = height;
+            submitDepth(gbuffer);
+
             rlEnableColorBlend();
 
             EndMode3D();
@@ -556,7 +563,17 @@ void FrameRenderer::drawSceneForView(const Camera3D& rig, const ViewLayers& requ
      * one function draws both the orthographic and the perspective capture
      * without knowing which it is doing. */
     BeginMode3D(rig);
-    drawGeometryLit(cutaway);
+
+    /* THE GAME'S WORLD, THROUGH THE INTERFACE — opaque, then whatever has to
+     * blend over it. `cutaway` is not passed: the submission derives it from
+     * the pass kind, which is what stops a camera pass and a world pass from
+     * disagreeing about it. See PassContext::worldSpace. */
+    PassContext lit = passFor(PassKind::Lit, effective);
+    lit.camera      = &rig;
+    lit.width       = width;
+    lit.height      = height;
+    submitLit(lit);
+    submitTransparent(lit);
 
     /* THE PROBE BALLS, and deliberately NOT inside drawGeometryLit: that
      * function is also what the probe capture draws with, so a ball added
@@ -795,70 +812,195 @@ void FrameRenderer::resizeForWindow()
     resizeSceneTarget(GetScreenWidth(), GetScreenHeight());
 }
 
-void FrameRenderer::drawGeometry(const CutawayView& cutaway, const Material& material,
-                                 bool castersOnly)
+/* ======================================================= ISceneSource ======
+ *
+ * THIS GAME'S WORLD, FOR WHICHEVER OF THE ENGINE'S PASSES IS ASKING.
+ *
+ * Everything below reads its instructions off the PassContext rather than off
+ * this class — the layers, the material, the shader to feed, whether an object
+ * id is wanted. They are all members too, and reaching for them directly would
+ * compile; the point of not doing it is that these three functions are exactly
+ * what a second project writes, and one that only works from inside the
+ * renderer is an interface in name only.
+ *
+ * See cromwell/render/ISceneSource.hpp for the argument, and PassContext.hpp
+ * for what arrives. */
+
+CutawayView FrameRenderer::cutawayFor(const PassContext& pass) const
 {
-    if (layers().drawing(drawLayer::kStatics)) statics_->draw(cutaway, material, castersOnly);
-    if (layers().drawing(drawLayer::kProps))   props_.draw(material);
-    if (!layers().drawing(drawLayer::kUnits))  return;
-
-    const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
-    units_->drawRoster(view_.state->roster(), cutaway.maxStorey, animating, material);
-
-    if (animating) {
-        const PathPoint position = (*view_.animator).positionOn((*view_.preview));
-        const float offset = UnitRenderer::centreOffset(*animating);
-        units_->drawAt(*animating,
-                       position.x + (offset > 0.5f ? 0.5f : 0.0f),
-                       position.height,
-                       position.y + (offset > 0.5f ? 0.5f : 0.0f),
-                       material);
-    }
+    /* THE WHOLE RULE, IN ONE LINE, AND ONLY IN THIS LINE. The sun and the
+     * probes ask what the world is made of; every other pass asks what one
+     * camera can see. CutawayView.hpp is the long version, including the two
+     * bugs that came of deciding it per call site. */
+    return pass.worldSpace() ? CutawayView::whole() : view_.cutaway;
 }
 
-void FrameRenderer::drawGeometryLit(const CutawayView& cutaway)
+PassContext FrameRenderer::passFor(PassKind kind, const ViewLayers& layers)
 {
-    /* The lattice is baked; everything else is not. Props carry no lightmap
-     * UVs and units move, so both stay on the shadow map — which is exactly
-     * Source 2's split between lightmapped world and mesh entities. */
-    pbr_.setDebugView(view_.settings->debugView);
+    PassContext pass;
+    pass.kind      = kind;
+    pass.layers    = &layers;
+    pass.materials = &materials_;
+
+    /* ONLY THE SHADER THIS PASS ACTUALLY FEEDS. A context carrying all of them
+     * would let a submission push PBR uniforms during the G-buffer pass and
+     * appear to work — a shader that is not bound ignores them — right up
+     * until the pass ordering changes and they land on whatever reads them
+     * next. A null pointer says "not this pass" at the point of use. */
+    if (kind == PassKind::Lit || kind == PassKind::ProbeCapture) pass.pbr = &pbr_;
+    if (kind == PassKind::Prepass)                               pass.prepass = &prepass_;
+
+    return pass;
+}
+
+void FrameRenderer::submitBodies(const Material& material, int maxStorey,
+                                 const UnitRenderer::UnitTag& tag)
+{
+    const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
+    units_->drawRoster(view_.state->roster(), maxStorey, animating, material, tag);
+    if (animating == nullptr) return;
+
+    /* The walking body, at its interpolated position. Tagged first, so a pass
+     * numbering objects gives it an id of its own rather than inheriting the
+     * last one the sweep set. */
+    if (tag) tag(*animating);
+
+    const PathPoint position = (*view_.animator).positionOn((*view_.preview));
+    const float     offset   = UnitRenderer::centreOffset(*animating);
+    units_->drawAt(*animating,
+                   position.x + (offset > 0.5f ? 0.5f : 0.0f),
+                   position.height,
+                   position.y + (offset > 0.5f ? 0.5f : 0.0f),
+                   material);
+}
+
+/* ONE MATERIAL OVER EVERYTHING — the sun's depth pass, the G-buffer and the
+ * custom-depth target, which were three functions with the same shape and one
+ * real difference each.
+ *
+ * WHAT EACH ONE VARIES, and it is worth reading as a list because the list is
+ * short enough to justify the merge: the sun drops non-casters, the G-buffer
+ * pushes each surface's roughness so the buffer's alpha carries something, and
+ * the custom-depth target numbers what it draws and leaves the lattice out.
+ * Everything else — which layers, which cutaway, the roster and the walking
+ * body — was identical in all three and is now written once. */
+void FrameRenderer::submitDepth(const PassContext& pass)
+{
+    const CutawayView cutaway  = cutawayFor(pass);
+    const Material&   material = *pass.material;
+
+    /* THE LATTICE, FOR EVERY DEPTH PASS BUT THE OBJECT-ID ONE. An id exists to
+     * single a thing out — to outline the soldier under the cursor — and the
+     * world itself is not a thing anyone singles out. Drawing it there would
+     * cost a full static submission to fill a target with one repeated id. */
+    if (pass.kind != PassKind::CustomDepth && pass.drawing(drawLayer::kStatics)) {
+        /* PER MATERIAL for the G-buffer, in one sweep for everyone else. Same
+         * pass and the same shader either way; it just stops being blind to
+         * what it is drawing, so the alpha plane can carry roughness. */
+        if (pass.prepass != nullptr)
+            statics_->drawPrepass(cutaway, material, *pass.materials, *pass.prepass);
+        else
+            statics_->draw(cutaway, material, pass.castersOnly);
+    }
+
+    /* Props and units take ONE roughness each rather than one per material. A
+     * crate is not going to be a mirror, and threading per-model roughness
+     * through PropSet to serve a reflection nobody will see is not worth the
+     * plumbing; when a chrome prop exists, this is where it changes. */
+    if (pass.prepass != nullptr) pass.prepass->setRoughness(0.8f);
+
+    if (pass.drawing(drawLayer::kProps)) {
+        /* PER OBJECT, not per category — which is the whole reason an id is an
+         * integer rather than a channel. Props share a value because nothing
+         * distinguishes them yet; every unit gets its own below, so a later
+         * pass can outline one soldier without outlining the squad. */
+        if (pass.objectIds != nullptr) pass.objectIds->setStencil(kPropStencil);
+        props_.draw(material);
+    }
+
+    if (pass.prepass != nullptr)
+        pass.prepass->setRoughness(pass.materials->factorsOf(SurfaceKind::Body).x);
+
+    if (!pass.drawing(drawLayer::kUnits)) return;
+
+    if (pass.objectIds == nullptr) {
+        submitBodies(material, cutaway.maxStorey);
+        return;
+    }
+
+    /* 0 is reserved for "nothing was drawn", so ids start at 1 — the coverage
+     * bit in alpha makes that unnecessary, but leaving 0 unused means a
+     * consumer that forgets to check coverage fails visibly rather than
+     * subtly. */
+    int nextStencil = kFirstUnitStencil;
+    submitBodies(material, cutaway.maxStorey, [&pass, &nextStencil](const Unit&) {
+        pass.objectIds->setStencil(nextStencil++);
+    });
+}
+
+/* THE SHADED SUBMISSION — the lit scene AND every reflection probe face, which
+ * is the arrangement that keeps a lighting switch from half-working. Turning
+ * the sun off and watching it survive in the reflections is what a second
+ * implementation buys you. */
+void FrameRenderer::submitLit(const PassContext& pass)
+{
+    const CutawayView cutaway   = cutawayFor(pass);
+    MaterialLibrary&  materials = *pass.materials;
+    PbrShader&        pbr       = *pass.pbr;
+
+    pbr.setDebugView(view_.settings->debugView);
 
     /* HERE RATHER THAN ONCE PER FRAME, so the probe capture shades with the
      * same terms the scene does — this function is what draws both. Switching
      * the sun off and seeing it survive in the reflections would be a switch
      * that half works, which is worse than one that does not. */
-    pbr_.setLightingSuppress(view_.settings->effects.suppressMask());
-    pbr_.setLightmapEnabled(view_.settings->useBakedSun);
-    if (layers().drawing(drawLayer::kStatics))
-        statics_->drawLit(cutaway, materials_, pbr_,
+    pbr.setLightingSuppress(view_.settings->effects.suppressMask());
+
+    /* The lattice is baked; everything else is not. Props carry no lightmap
+     * UVs and units move, so both stay on the shadow map — which is exactly
+     * Source 2's split between lightmapped world and mesh entities. */
+    pbr.setLightmapEnabled(view_.settings->useBakedSun);
+    if (pass.drawing(drawLayer::kStatics))
+        statics_->drawLit(cutaway, materials, pbr,
                           /*includeTransparent=*/view_.settings->flatShading());
 
-    pbr_.setLightmapEnabled(false);
-    if (layers().drawing(drawLayer::kProps)) props_.drawLit(materials_, pbr_);
+    pbr.setLightmapEnabled(false);
+    if (pass.drawing(drawLayer::kProps)) props_.drawLit(materials, pbr);
 
     /* Every body is one material, so its factors go up once rather than per
      * unit; only the albedo tint changes between them, and that travels in the
      * material's diffuse colour. */
-    pbr_.setMaterialFactors(materials_.factorsOf(SurfaceKind::Body));
-    pbr_.setMaterialOptions(materials_.optionsOf(SurfaceKind::Body));
-    pbr_.setMaterialTransmission(
-        materials_.transmissionOf(materials_.handleOf(SurfaceKind::Body)));
-    const Material& bodyMaterial = materials_.material(SurfaceKind::Body);
+    pbr.setMaterialFactors(materials.factorsOf(SurfaceKind::Body));
+    pbr.setMaterialOptions(materials.optionsOf(SurfaceKind::Body));
+    pbr.setMaterialTransmission(materials.transmissionOf(materials.handleOf(SurfaceKind::Body)));
 
-    if (layers().drawing(drawLayer::kUnits)) {
-        const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
-        units_->drawRoster(view_.state->roster(), cutaway.maxStorey, animating, bodyMaterial);
+    if (pass.drawing(drawLayer::kUnits))
+        submitBodies(materials.material(SurfaceKind::Body), cutaway.maxStorey);
+}
 
-        if (animating) {
-            const PathPoint position = (*view_.animator).positionOn((*view_.preview));
-            const float offset = UnitRenderer::centreOffset(*animating);
-            units_->drawAt(*animating,
-                           position.x + (offset > 0.5f ? 0.5f : 0.0f),
-                           position.height,
-                           position.y + (offset > 0.5f ? 0.5f : 0.0f),
-                           bodyMaterial);
-        }
+/* WHAT COMES AFTER THE OPAQUE SET. Two passes want it and they want different
+ * things: the sun wants light SURVIVING a pane written into its transmission
+ * plane, the camera wants the pane itself blended over the room behind it. */
+void FrameRenderer::submitTransparent(const PassContext& pass)
+{
+    const CutawayView cutaway = cutawayFor(pass);
+
+    /* THE SUN'S GLASS, into the shadow target's colour plane. The caller has
+     * already turned depth WRITES off so a window never shadows what is behind
+     * it, and left the depth TEST on so glass already hidden behind a wall
+     * records nothing — light stopped by the wall never reached that window to
+     * be tinted. */
+    if (pass.kind == PassKind::Shadow) {
+        statics_->drawKind(cutaway, SurfaceKind::Window, *pass.material);
+        return;
     }
+
+    /* Already drawn solid, in the opaque pass — but only by the views that
+     * replace surface shading. The probe view is an ordinary frame with balls
+     * on top, so its glass blends normally. */
+    if (view_.settings->flatShading() || !pass.drawing(drawLayer::kStatics)) return;
+
+    pass.pbr->setLightmapEnabled(view_.settings->useBakedSun);
 
     /* Glass LAST. It blends against whatever is already in the colour buffer,
      * so everything it should be seen through — walls, floors, props, the
@@ -868,17 +1010,11 @@ void FrameRenderer::drawGeometryLit(const CutawayView& cutaway)
      * scaled the diffuse by opacity and deliberately left specular alone, so
      * the blender must add what it is given rather than scale it again — that
      * is what keeps a nearly-clear pane's sun glint at full strength instead
-     * of at six percent. */
-    /* Already drawn solid, in the pass above — but only by the views that
-     * replace surface shading. The probe view is an ordinary frame with balls
-     * on top, so its glass blends normally. */
-    if (view_.settings->flatShading() || !layers().drawing(drawLayer::kStatics)) return;
-
-    pbr_.setLightmapEnabled(view_.settings->useBakedSun);
-
-    /* BLENDING ON EXPLICITLY, because this function also runs inside a probe
-     * capture and the capture turns it OFF — "the capture replaces, nothing
-     * composites" is right for the opaque pass and wrong for this one.
+     * of at six percent.
+     *
+     * BLENDING ON EXPLICITLY, because this also runs inside a probe capture and
+     * the capture turns it OFF — "the capture replaces, nothing composites" is
+     * right for the opaque pass and wrong for this one.
      *
      * Unblended, a window REPLACES the world already drawn behind it with its
      * own premultiplied output: near-black rgb and a coverage alpha of about
@@ -890,11 +1026,19 @@ void FrameRenderer::drawGeometryLit(const CutawayView& cutaway)
      * Premultiplied blending keeps the coverage right instead: over an opaque
      * background alpha resolves to 0.06 + 1 x 0.94 = 1, so the texel stays
      * "there is world here" and carries the pane's tint over the street behind
-     * it. In the scene pass blending is already on and this changes nothing. */
+     * it. In the scene pass blending is already on and this changes nothing.
+     *
+     * THE STATE IS SET HERE RATHER THAN BY THE ENGINE AROUND THE CALL, and
+     * that is a deliberate holding position rather than the end state: the
+     * premultiplied convention is a property of what PbrShader writes, so it
+     * belongs with the shader once the shader moves. Bracketing the call
+     * engine-side today would re-enable colour blend inside a probe capture
+     * even on the frames this function returns early, which is a state change
+     * the capture spent a paragraph turning off. */
     rlEnableColorBlend();
     rlSetBlendFactors(RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD);
     BeginBlendMode(BLEND_CUSTOM);
-    statics_->drawTransparentLit(cutaway, materials_, pbr_);
+    statics_->drawTransparentLit(cutaway, *pass.materials, *pass.pbr);
     EndBlendMode();
 }
 
@@ -1082,8 +1226,17 @@ void FrameRenderer::drawShadowMap()
      * the player swung the camera round — a shadow that breathes with the
      * rotation key. A default CutawayView cuts nothing, so this pass gets the
      * world as it is without having to ask for it. */
+    /* NO CUTAWAY ARGUMENT ANY MORE, and that is the improvement rather than a
+     * detail lost in the move: this pass no longer STATES that it wants the
+     * whole lattice, it is a PassKind::Shadow and the answer follows from that.
+     * A call site cannot pass the player's view here by mistake, because there
+     * is no longer a place to pass one. */
     ShadowMap::Scope scope(shadows_, projection);
-    drawGeometry(CutawayView::whole(), depthMaterial_, /*castersOnly=*/true);
+
+    PassContext depth = passFor(PassKind::Shadow, layers());
+    depth.material    = &depthMaterial_;
+    depth.castersOnly = true;
+    submitDepth(depth);
 
     /* Then the glass, into the same target's colour plane. Depth WRITES off so
      * a window never shadows what is behind it, depth TEST on so glass already
@@ -1091,45 +1244,12 @@ void FrameRenderer::drawShadowMap()
      * reached that window to be tinted. */
     if (shadows_.valid()) {
         rlDisableDepthMask();
-        statics_->drawKind(CutawayView::whole(), SurfaceKind::Window,
-                           shadows_.transmitterMaterial());
+
+        PassContext glass = passFor(PassKind::Shadow, layers());
+        glass.material    = &shadows_.transmitterMaterial();
+        submitTransparent(glass);
+
         rlEnableDepthMask();
-    }
-}
-
-/* The G-buffer pass. Structurally the same submission drawGeometry makes, but
- * pushing each material's roughness so the buffer's alpha carries something —
- * the prepass shader is shared, so this stays ONE pass, it just stops being
- * blind to what it is drawing.
- *
- * Props and units take a single value each rather than one per material. A
- * crate is not going to be a mirror, and threading per-model roughness through
- * PropSet to serve a reflection nobody will see is not worth the plumbing;
- * when a chrome prop exists, this is where it changes. */
-void FrameRenderer::drawGeometryPrepass()
-{
-    const Material& material = prepassMaterial();
-
-    if (layers().drawing(drawLayer::kStatics))
-        statics_->drawPrepass(view_.cutaway, material, materials_, prepass_);
-
-    prepass_.setRoughness(0.8f);
-    if (layers().drawing(drawLayer::kProps)) props_.draw(material);
-
-    prepass_.setRoughness(materials_.factorsOf(SurfaceKind::Body).x);
-    if (layers().drawing(drawLayer::kUnits)) {
-        const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
-        units_->drawRoster(view_.state->roster(), view_.cutaway.maxStorey, animating, material);
-
-        if (animating) {
-            const PathPoint position = (*view_.animator).positionOn((*view_.preview));
-            const float offset = UnitRenderer::centreOffset(*animating);
-            units_->drawAt(*animating,
-                           position.x + (offset > 0.5f ? 0.5f : 0.0f),
-                           position.height,
-                           position.y + (offset > 0.5f ? 0.5f : 0.0f),
-                           material);
-        }
     }
 }
 
@@ -1207,7 +1327,12 @@ void FrameRenderer::captureEnvironmentProbes()
     const int slices = probes_.stale() ? probeFacesPerFrame_ * 4 : probeFacesPerFrame_;
     probes_.capture([this](Vector3 eye) {
         pbr_.updateEnvironment(sun_, shadows_, eye);
-        drawGeometryLit(CutawayView::whole());
+
+        PassContext face = passFor(PassKind::ProbeCapture, layers());
+        face.width  = static_cast<float>(ReflectionProbeSet::kFaceSize);
+        face.height = static_cast<float>(ReflectionProbeSet::kFaceSize);
+        submitLit(face);
+        submitTransparent(face);
     }, slices);
 }
 
@@ -1301,34 +1426,19 @@ void FrameRenderer::render(const FrameView& view)
         ClearBackground(BLANK);
         BeginMode3D(settings.camera);
 
-        /* PER OBJECT, not per category — which is the whole reason this is an
-         * integer rather than a channel. Props share a value because nothing
-         * distinguishes them yet; every unit gets its own, so a later pass can
-         * outline one soldier without outlining the squad.
-         *
-         * 0 is reserved for "nothing", so ids start at 1 — the coverage bit in
-         * alpha makes that unnecessary, but leaving 0 unused means a consumer
-         * that forgets to check coverage fails visibly rather than subtly. */
-        customDepth_.setStencil(kPropStencil);
-        props_.draw(customDepth_.material());
+        /* THE ONLY PASS THAT NUMBERS WHAT IT DRAWS, said by handing the
+         * submission somewhere to put the ids. Everything else about it — which
+         * layers, which cutaway, the roster and the walking body — is the same
+         * depth submission the sun and the G-buffer make, and used to be a
+         * third hand-written copy of it here in the middle of render(). */
+        PassContext ids = passFor(PassKind::CustomDepth, view_.camera->layers());
+        ids.material    = &customDepth_.material();
+        ids.camera      = &settings.camera;
+        ids.objectIds   = &customDepth_;
+        ids.width       = static_cast<float>(GetScreenWidth());
+        ids.height      = static_cast<float>(GetScreenHeight());
+        submitDepth(ids);
 
-        int nextStencil = kFirstUnitStencil;
-        const Unit* animating = (*view_.animator).isRunning() ? &view_.state->selectedUnit() : nullptr;
-        units_->drawRoster(view_.state->roster(), view_.cutaway.maxStorey, animating,
-                           customDepth_.material(),
-                           [this, &nextStencil](const Unit&) {
-                               customDepth_.setStencil(nextStencil++);
-                           });
-        if (animating) {
-            customDepth_.setStencil(nextStencil++);
-            const PathPoint position = (*view_.animator).positionOn((*view_.preview));
-            const float offset = UnitRenderer::centreOffset(*animating);
-            units_->drawAt(*animating,
-                           position.x + (offset > 0.5f ? 0.5f : 0.0f),
-                           position.height,
-                           position.y + (offset > 0.5f ? 0.5f : 0.0f),
-                           customDepth_.material());
-        }
         EndMode3D();
     }
 
@@ -1550,7 +1660,7 @@ void FrameRenderer::render(const FrameView& view)
     /* Under the dev panel, over everything else — it is a full-screen scrim and
      * the ImGui panel has to stay usable on top of it. Costs nothing when
      * hidden. */
-    uiGallery_.draw(gameUi_, settings.camera);
+    uiGallery_.draw(gameUi_, view_.ui, *view_.camera);
 
     /* THE PLAYER CAMERA'S OWN LAYERS, not the read-only active slot: the panel
      * edits these in place, and what it should edit is the main view — the same
@@ -1631,7 +1741,7 @@ void FrameRenderer::drawFrontEnd()
          * engine's own widget kit rather than with ImGui because this is
          * PRODUCT UI — the first thing anyone sees — and the dev panel's
          * toolkit has no business in it. */
-        drawSplashOverlay(gameUi_.begin(), view_.splashSeconds, view_.splashProgress);
+        drawSplashOverlay(gameUi_.begin(view_.ui), view_.splashSeconds, view_.splashProgress);
         gameUi_.end();
     }
 

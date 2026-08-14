@@ -13,6 +13,9 @@
 #include "raylib.h"
 
 #include "cromwell/geometry/SurfaceVertex.hpp"
+#include "cromwell/rhi/Descriptors.hpp"
+
+#include <cstdint>
 
 #include <vector>
 
@@ -60,6 +63,34 @@ public:
     /* Uploads and returns a Mesh owning copies of this buffer's data.
      * UnloadMesh frees them with RL_FREE, so they must come from MemAlloc. */
     Mesh uploadMesh() const;
+
+    /* ---- the device path -------------------------------------------------
+     *
+     * THE SAME VERTICES, INTERLEAVED. raylib wants one array per attribute and
+     * rhi::IRenderDevice wants one buffer with a stride, so the two differ in
+     * layout rather than in content — this produces the second form from the
+     * same source, which is what lets both renderers be fed without building
+     * the world twice.
+     *
+     * INTERLEAVED IS ALSO THE FASTER SHAPE. A vertex is read as a unit by the
+     * vertex stage, so its attributes want to share a cache line; five separate
+     * arrays means five streams and five cache lines per vertex. raylib's split
+     * is a consequence of its API, not a choice worth preserving.
+     *
+     * NO INDICES, and that is not an omission: the box emitter produces
+     * triangle soup, so a mesh made from this is non-indexed. See
+     * IRenderDevice::createMesh, which takes an optional index buffer for
+     * exactly this reason. */
+    std::vector<std::uint8_t> interleave() const;
+
+    /* WHAT interleave() PRODUCES, as the device needs it described. Static
+     * because it is a property of SurfaceVertex rather than of any one buffer,
+     * and because a pipeline has to be built with it before any geometry
+     * exists.
+     *
+     * The locations here and the `layout(location = N)` in the shaders are one
+     * contract read from two places — see assets/shaders/CONVENTIONS.md. */
+    static rhi::VertexLayout deviceLayout();
 
 private:
     std::vector<float>         positions_;

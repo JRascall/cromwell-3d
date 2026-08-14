@@ -186,7 +186,13 @@ void PbrShader::setEnvironmentProbes(const ReflectionProbeSet& probes) const
         parallaxMax[at + 0] = probe.parallaxMax.x;
         parallaxMax[at + 1] = probe.parallaxMax.y;
         parallaxMax[at + 2] = probe.parallaxMax.z;
-        parallaxMax[at + 3] = 0.0f;
+
+        /* AND THE THIRD W CHANNEL CARRIES WHETHER TO CORRECT AT ALL. Non-zero
+         * corrects against the box; zero is an environment at infinity, which
+         * is what the outdoor volume is — see ProbeVolume::parallax. This was
+         * spare padding until a board-sized box turned out to be the wrong
+         * thing to aim a reflection at. */
+        parallaxMax[at + 3] = probe.parallax ? 1.0f : 0.0f;
 
         influenceMin[at + 0] = probe.influenceMin.x;
         influenceMin[at + 1] = probe.influenceMin.y;

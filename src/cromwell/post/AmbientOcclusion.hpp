@@ -80,7 +80,7 @@ public:
         /* Deliberately short of 1. Full strength drives inside corners to
          * black, which on a tactical board hides the cover the player is
          * reading; this is contact darkening, not a second shadow. */
-        float strength = 0.9f;
+        float strength = 1.0f;
     };
 
     Tuning&       tuning()       { return tuning_; }

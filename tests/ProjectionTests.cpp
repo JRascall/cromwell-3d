@@ -17,7 +17,9 @@
  * MatrixLookAt cross two parallel vectors. The result is NaN in every vertex —
  * a black screen with nothing in the log.
  */
+#include "cromwell/camera/Camera.hpp"
 #include "cromwell/camera/Projection.hpp"
+#include "cromwell/math/Vec4.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -129,6 +131,63 @@ void testMatchFramingPreservesTheView()
           "a same-projection convert is a no-op");
 }
 
+/* ================= the Mat4 the rhi renderer draws through =================
+ *
+ * TWO CONVENTIONS EXIST IN THIS TREE AT ONCE during the port: raylib's passes
+ * build their own matrices with GL's -1..1 clip depth, and Camera's produce
+ * 0..1 for the device. Mixing them in one frame is a depth test against the
+ * wrong range — geometry that vanishes or z-fights wholesale — so what is
+ * checked here is that Camera's really are the 0..1 kind, and that the lens is
+ * read in the right unit for each projection. */
+
+void testCameraDepthRangeIsZeroToOne()
+{
+    cromwell::Camera camera = cromwell::Camera::perspective(60.0f);
+    camera.at({ 0.0f, 0.0f, 0.0f }).lookingAt({ 0.0f, 0.0f, -1.0f });
+
+    constexpr float kNear = 0.1f;
+    constexpr float kFar  = 100.0f;
+    const Mat4 projection = camera.projectionMatrix(16.0f / 9.0f, kNear, kFar);
+
+    const Vec4 atNear = projection * Vec4::point({ 0.0f, 0.0f, -kNear });
+    const Vec4 atFar  = projection * Vec4::point({ 0.0f, 0.0f, -kFar });
+
+    CHECK(nearly(atNear.z / atNear.w, 0.0f, 1e-3f),
+          "camera near plane maps to depth 0, not -1 (%.4f)", atNear.z / atNear.w);
+    CHECK(nearly(atFar.z / atFar.w, 1.0f, 1e-3f),
+          "camera far plane maps to depth 1 (%.4f)", atFar.z / atFar.w);
+}
+
+void testOrthographicLensIsAHeightNotAnAngle()
+{
+    /* THE fovy TRAP, checked on the matrix rather than argued about in a
+     * comment. Under orthographic the lens is a world HEIGHT, so a 20-unit lens
+     * must frame exactly 20 units top to bottom — reading it as degrees would
+     * produce a wildly different scale that still renders something. */
+    cromwell::Camera camera = cromwell::Camera::orthographic(20.0f);
+    camera.at({ 0.0f, 10.0f, 0.0f }).lookingAt({ 0.0f, 0.0f, 0.0f });
+
+    const Mat4 projection = camera.projectionMatrix(1.0f, 0.1f, 100.0f);
+
+    /* Half the height maps to the top edge of clip space. */
+    const Vec4 top = projection * Vec4::point({ 0.0f, 10.0f, -1.0f });
+    CHECK(nearly(top.y, 1.0f, 1e-3f),
+          "an orthographic lens of 20 frames 20 units tall (%.4f)", top.y);
+
+    const Vec4 centre = projection * Vec4::point({ 0.0f, 0.0f, -1.0f });
+    CHECK(nearly(centre.y, 0.0f, 1e-3f), "and centres on zero (%.4f)", centre.y);
+}
+
+void testViewMatrixPutsTheTargetDownNegativeZ()
+{
+    cromwell::Camera camera = cromwell::Camera::perspective(60.0f);
+    camera.at({ 0.0f, 0.0f, 10.0f }).lookingAt({ 0.0f, 0.0f, 0.0f });
+
+    const Vec3 target = camera.viewMatrix().transformPoint({ 0.0f, 0.0f, 0.0f });
+    CHECK(nearly(target.z, -10.0f, 1e-3f),
+          "the view matrix is right-handed, looking down -z (%.3f)", target.z);
+}
+
 }  // namespace
 
 int main()
@@ -137,6 +196,10 @@ int main()
     testTopDownCameraIsNotDegenerate();
     testTopDownFramesTheSameSpanEitherWay();
     testMatchFramingPreservesTheView();
+
+    testCameraDepthRangeIsZeroToOne();
+    testOrthographicLensIsAHeightNotAnAngle();
+    testViewMatrixPutsTheTargetDownNegativeZ();
 
     if (g_failures == 0) {
         std::printf("projection: all checks passed\n");

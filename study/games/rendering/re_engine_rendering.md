@@ -1448,12 +1448,28 @@ which our SSAO cannot, and it needs no depth prepass. Capcom run both together �
 SDF AO for the medium scale, SSAO for the contact scale — which is the right
 split and roughly free to copy.
 
-**The honest costs.** Sphere tracing per pixel in a fragment shader on GL 3.3 is
-the real expense; Capcom's figures are compute shaders on async, which we have
-neither of. Half-resolution with a blur, as they do for AO, is the mitigation and
-it is already the shape of our SSAO pass. Soft shadows also want several cone
-widths' worth of steps. This is a real experiment with a real chance of being too
-slow at 1080p on GL 3.3, and it should be measured before it is designed around.
+**The honest costs — and this paragraph used to overstate them.** It read
+"a fragment shader on GL 3.3… Capcom's figures are compute shaders on async,
+which we have neither of." **Half of that was already false**: `CMakeLists.txt`
+forces `OPENGL_VERSION "4.3"`, and `cromwell/gpu/compute/` wraps compute
+programs and SSBOs with the memory barrier made structural, so Capcom's three
+compute shaders are a shape we can actually write. See the same correction in
+§0 and §9.
+
+**What survives the correction is the scheduling half, and it is the part that
+matters.** Capcom's 2.5 ms is stated *with async off* precisely because in
+shipping it runs on a second queue, concurrent with the ordinary shadow-map
+pass — the cost is real but hidden. **GL has no async compute.** There is one
+queue, `glDispatchCompute` orders against the draws around it, and every
+millisecond lands on the critical path in full. So the number to beat is not
+Capcom's 2.5 ms overlapped, it is 2.5 ms *added* — against a frame that
+currently draws one 4096² shadow map and nothing else expensive. That is the
+experiment.
+
+Half-resolution with a blur, as they do for AO, is the mitigation and it is
+already the shape of our SSAO pass. Soft shadows also want several cone widths'
+worth of steps. This is a real experiment with a real chance of being too slow
+at 1080p, and it should be measured before it is designed around.
 But it is the highest-leverage thing in this document, and the reason is that
 **the expensive half of the technique — building and maintaining the field — is
 nearly free for a game whose world is already a voxel grid.**
@@ -1818,11 +1834,11 @@ context all along. §9.1 works through what that actually buys and what it costs
 The remaining barriers are raylib's API surface and the reason to want any of it
 at this scale, not the GL version.
 
-The first of those is now dealt with. `render/gpu/GL.hpp` declares the entry
+The first of those is now dealt with. `cromwell/gpu/GL.hpp` declares the entry
 points rlgl does not wrap — `glMemoryBarrier` above all, without which a compute
-write races the draw that reads it — and `render/gpu/ComputeShader.hpp` puts a
-dispatch and its barrier in one scope so they cannot drift apart.
-`render/gpu/ComputeSelfTest.hpp` proves the chain end to end
+write races the draw that reads it — and `cromwell/gpu/compute/ComputeShader.hpp`
+puts a dispatch and its barrier in one scope so they cannot drift apart.
+`cromwell/gpu/compute/ComputeSelfTest.hpp` proves the chain end to end
 (`xcom --compute-selftest <report>`). **Compute is available and verified; what
 is missing is a pass that wants it.**
 
@@ -2062,7 +2078,7 @@ judged without them:
 | 5 | persistent per-bucket buffers, replacing `DrawMeshInstanced`'s per-call VBO churn | 1 day |
 
 Note what is absent: **no compute anywhere in steps 0–5.** The GL escape hatch in
-`render/gpu/GL.hpp` is not needed until tier 3, which §9.1 argues against. The
+`cromwell/gpu/GL.hpp` is not needed until tier 3, which §9.1 argues against. The
 two pieces of work are independent.
 
 ---
@@ -2260,8 +2276,10 @@ transform after each destruction event. Then, in order of payoff:
    Capcom do it. This is the cheapest step and it is independently useful.
 2. **SDF soft shadows** by sphere tracing — a third answer to §9 that has no
    projection, no crawl, no bias, no cascade, and no re-render on destruction.
-   Measure it before committing; fragment-shader sphere tracing on GL 3.3 is the
-   risk.
+   Measure it before committing. **The risk is not the GL version — compute and
+   SSBOs are core at 4.3 and wrapped in `cromwell/gpu/compute/` — it is that GL
+   has no second queue, so unlike Capcom we cannot hide the cost behind the
+   shadow pass.** Their 2.5 ms overlapped becomes our 2.5 ms added. §5.2.
 3. **Exact leak rejection for the probe grid**, which §11 of the Source 2
    document already plans to do by lattice query — the SDF is the same
    information in a form the shader can sample and interpolate.

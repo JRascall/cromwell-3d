@@ -70,6 +70,7 @@
 #pragma once
 
 #include "cromwell/camera/Projection.hpp"
+#include "cromwell/math/Mat4.hpp"
 #include "cromwell/gpu/target/CaptureSchedule.hpp"
 #include "cromwell/gpu/target/HdrTarget.hpp"
 #include "cromwell/gpu/target/ScenePassBuffers.hpp"
@@ -155,6 +156,35 @@ public:
      * projection is meaningless under the other, so a naive flip lands on a
      * random zoom. See Projection.hpp. */
     Camera& switchTo(Projection projection, float fovDegrees = 60.0f);
+
+    /* ---- the matrices, in the engine's own convention ---------------------
+     *
+     * WORLD TO EYE, AND EYE TO CLIP, as Mat4 — column-major, column-vector,
+     * and clip depth running 0 TO 1 rather than OpenGL's -1 to 1. That last
+     * choice is Mat4.hpp's and it is the one that matters here: Metal, Vulkan
+     * and every console want 0..1, GL is the odd one out and is told to match
+     * at device creation. A camera that handed out GL's convention would push
+     * the correction into every backend forever.
+     *
+     * NOT toRaylib(). That returns a Camera3D for raylib's own passes to
+     * consume, and raylib builds its own matrices from it with its own
+     * convention. These two are what a shader's PassBlock is filled from — see
+     * assets/shaders/CONVENTIONS.md — and the two paths deliberately do not
+     * share a matrix, because they do not share a depth range.
+     *
+     * `aspect` is the target's width over its height. Passed rather than stored
+     * because one camera renders into targets of different shapes — the main
+     * view, a capture, a splitscreen pane — and a camera holding an aspect
+     * would be describing whichever of them ran last. */
+    Mat4 viewMatrix() const;
+    Mat4 projectionMatrix(float aspect, float nearPlane, float farPlane) const;
+
+    /* Both, composed, since almost every caller wants the product and composing
+     * it in the wrong order is silent. */
+    Mat4 viewProjectionMatrix(float aspect, float nearPlane, float farPlane) const
+    {
+        return projectionMatrix(aspect, nearPlane, farPlane) * viewMatrix();
+    }
 
     /* ---- what it draws ---------------------------------------------------- */
 

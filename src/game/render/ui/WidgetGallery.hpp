@@ -22,6 +22,12 @@
  */
 #pragma once
 
+#include "cromwell/camera/Camera.hpp"   /* named rather than relied on arriving
+                                       * transitively — and QUALIFIED at every
+                                       * use below, because raylib's global
+                                       * `Camera` alias makes the bare name
+                                       * ambiguous. Same trap FrameView.hpp
+                                       * documents. */
 #include "cromwell/sdf/WorldText.hpp"
 #include "cromwell/ui/core/UiContext.hpp"
 #include "game/render/ui/GameUi.hpp"
@@ -43,6 +49,23 @@ public:
     void setVisible(bool visible) { visible_ = visible; }
     void toggleVisible() { visible_ = !visible_; }
 
+    /* THE MSDF SAMPLE OFF, for a renderer that cannot draw it.
+     *
+     * Everything else in this gallery is UiDrawList commands, which means it
+     * runs on any painter — that is the whole reason the kit narrowed to one.
+     * The distance-field sample is the exception: it is real geometry in the
+     * scene, drawn through raylib's BeginMode3D, so on the device path it would
+     * be a raylib draw in the middle of a device frame.
+     *
+     * DEFAULTS ON, so the shipping renderer keeps it and nobody has to remember
+     * to ask. The device path turns it off, and loses one of the gallery's
+     * fifteen sections rather than the gallery.
+     *
+     * It goes when WorldText does — this is migration scaffolding, and the sign
+     * of that is that the flag names a capability of the RENDERER while sitting
+     * on a screen that should not know which one it is drawing through. */
+    void setWorldTextSample(bool enabled) { worldTextSample_ = enabled; }
+
     /* Builds and paints the gallery into the game's UI surface, which is what
      * brackets the frame and owns the fonts.
      *
@@ -50,8 +73,15 @@ public:
      * which is to show that a widget over a world position is drawn in screen
      * space and is therefore exactly as crisp as one in a menu.
      *
-     * No-op when hidden. Call inside BeginDrawing, after the scene. */
-    void draw(GameUi& gameUi, const Camera3D& camera);
+     * TAKES THE ENGINE'S CAMERA, NOT A raylib ONE, and converts at the one
+     * place inside that needs it. The device renderer has to be able to call
+     * this, and a `Camera3D` in the signature would put raylib back into a file
+     * whose entire purpose is not to have it.
+     *
+     * No-op when hidden. Call after the scene, in place of GameUi::begin/end —
+     * it brackets the frame itself. */
+    void draw(GameUi& gameUi, const cromwell::ui::UiInput& input,
+              const cromwell::Camera& camera);
 
 private:
     /* Sub-sections, in the order they appear. Split up because one function
@@ -96,6 +126,7 @@ private:
     float px(float referencePixels) const;
 
     bool visible_ = false;
+    bool worldTextSample_ = true;
 
     /* Loaded on first use rather than at setup: the atlas is baked from the
      * licensed font pack (tools/fonts/bake_msdf.py) and is simply absent on a

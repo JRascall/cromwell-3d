@@ -31,14 +31,15 @@
 #pragma once
 
 #include "cromwell/ui/core/UiDrawList.hpp"
+#include "cromwell/ui/paint/IUiPainter.hpp"
 #include "cromwell/ui/paint/UiFontSet.hpp"
 
 namespace cromwell::ui {
 
-class UiPainter {
+class UiPainter final : public IUiPainter {
 public:
     UiPainter() = default;
-    ~UiPainter();
+    ~UiPainter() override;
 
     UiPainter(const UiPainter&) = delete;
     UiPainter& operator=(const UiPainter&) = delete;
@@ -46,12 +47,12 @@ public:
     /* Executes every command in order. `fonts` resolves the text runs' weights;
      * it must be the same set the widgets measured against, or the layout and
      * the drawing will disagree. */
-    void draw(const UiDrawList& drawList, const UiFontSet& fonts);
+    void draw(const UiDrawList& drawList, const UiFontSet& fonts) override;
 
     /* Releases the backdrop scratch texture. Called by the destructor; exposed
      * for a caller that needs to let go of GPU memory before the context
      * does. */
-    void release();
+    void release() override;
 
 private:
     void executeTriangles(const UiDrawList& drawList, const UiCommand& command);

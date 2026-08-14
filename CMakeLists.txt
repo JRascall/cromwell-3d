@@ -78,6 +78,64 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL     "${XC_STAGE_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_SOURCE_DIR}/builds/win-debug")
 
 # ========================================================================
+# WHICH PLATFORM, AND WHICH LIBRARY INSIDE IT
+#
+# The layout is TWO AXES, in this order:
+#
+#   src/cromwell/platform/            the interfaces, and anything portable
+#   src/cromwell/platform/pc/         Windows, Linux and macOS together
+#   src/cromwell/platform/pc/raylib/  the third-party library backing them
+#   src/cromwell/platform/ps5/...     a folder per console
+#
+#   src/cromwell/rhi/                 the graphics interfaces
+#   src/cromwell/rhi/pc/opengl/       the PC graphics backend
+#   src/cromwell/rhi/ps5/...
+#
+# WHY PLATFORM FIRST AND LIBRARY SECOND. They are different questions with
+# different lifetimes. The platform decides what a window, a save file and a
+# gamepad even ARE - and "pc" genuinely covers all three desktops, because the
+# only difference between them is where the per-user directory lives. The
+# library is a dependency we chose and might change WITHOUT changing platform:
+# replacing raylib with a hand-rolled GL layer is `pc/opengl/` beside
+# `pc/raylib/`, not a new platform.
+#
+# WHY THE SELECTION IS HERE AND NOT AN #ifdef. A console build must not CONTAIN
+# desktop code, not merely avoid calling it - the sources are chosen, so the
+# other platform's files are never handed to a compiler. It also means the
+# boundary cannot rot: platform code that leaked into a shared file fails to
+# build the moment a second platform is configured, rather than years later.
+#
+# One backend defines IPlatform::create. Two selected at once is a duplicate
+# symbol at link time, which is the right way to find that out.
+set(XC_PLATFORM "pc" CACHE STRING "Target platform folder: pc, ps5, ...")
+set(XC_PC_BACKEND "raylib" CACHE STRING "Third-party library backing the pc platform")
+
+if(XC_PLATFORM STREQUAL "pc")
+    # PC-specific but library-agnostic: std::filesystem covers all three
+    # desktops and only the per-user directory differs. Headless, so it sits in
+    # cromwell_base with the rest of the code a test can run without a window.
+    set(XC_PLATFORM_HEADLESS_SOURCES
+        src/cromwell/platform/pc/PcFileSystem.cpp)
+
+    set(XC_PLATFORM_SOURCES
+        src/cromwell/platform/pc/${XC_PC_BACKEND}/RaylibPlatform.cpp
+        src/cromwell/platform/pc/${XC_PC_BACKEND}/RaylibSurface.cpp
+        src/cromwell/platform/pc/${XC_PC_BACKEND}/RaylibInput.cpp
+        src/cromwell/platform/pc/${XC_PC_BACKEND}/RaylibImageDecoder.cpp)
+
+    set(XC_RHI_SOURCES
+        src/cromwell/rhi/pc/opengl/OpenGlRenderDevice.cpp)
+else()
+    message(FATAL_ERROR
+        "XC_PLATFORM '${XC_PLATFORM}' has no source set. Add one beside the pc "
+        "block above, implementing ISurface, IInput, IFileSystem, IImageDecoder, "
+        "IPlatform and rhi::IRenderDevice in src/cromwell/platform/${XC_PLATFORM}/ "
+        "and src/cromwell/rhi/${XC_PLATFORM}/.")
+endif()
+
+message(STATUS "Platform: ${XC_PLATFORM} (backend: ${XC_PC_BACKEND})")
+
+# ========================================================================
 # FOUR TARGETS, AND ONE RULE BETWEEN THEM
 #
 #   cromwell_base -> nothing        the engine's headless half
@@ -118,6 +176,18 @@ add_library(cromwell_base STATIC
     # behind the renderer. See math/Easing.hpp.
     src/cromwell/math/Easing.cpp
     src/cromwell/math/Tween.cpp
+    # ---- the portable half of the platform layer ------------------------
+    # HERE RATHER THAN IN A PLATFORM FOLDER, because it needs no platform.
+    #
+    # FrameClock is the frame clock for EVERY target: the clamp, the pause, the
+    # resume skip and the scaling are arithmetic, and the one platform question
+    # ("what time is it") is answered portably by std::chrono::steady_clock. A
+    # per-platform clock would mean one copy of the hitch clamp per target,
+    # which is the single rule whose absence turns a stall into a unit
+    # teleporting through a wall - one chance to leave it out per port, in the
+    # least-tested code on the least-tested platform.
+    src/cromwell/platform/FrameClock.cpp
+    ${XC_PLATFORM_HEADLESS_SOURCES}
     src/cromwell/settings/Settings.cpp
     src/cromwell/net/WinHttpClient.cpp
     src/cromwell/steam/SteamAvatar.cpp
@@ -127,6 +197,12 @@ add_library(cromwell_base STATIC
     # what makes both testable without a window - see xcom_pointer_tests. The
     # projection helpers they pair with DO need the camera's matrices and so
     # live with the renderer; see camera/Viewport.hpp.
+    # The key and mouse BINDINGS. Moved here from the renderer once it stopped
+    # calling IsKeyPressed directly - it now reads IInput, IClock and ISurface,
+    # so it needs no window and the bindings became testable without one. That
+    # move is the point of the platform interfaces, made concrete: thirty-six
+    # raylib calls in the single densest non-render file, gone.
+    src/cromwell/input/InputHandler.cpp
     src/cromwell/input/PointerDrag.cpp
     src/cromwell/input/PointerFocus.cpp
     # ---- collision queries ---------------------------------------------
@@ -338,6 +414,33 @@ if(XC_BUILD_TESTS)
     add_executable(xcom_math_tests tests/MathTests.cpp)
     target_link_libraries(xcom_math_tests PRIVATE cromwell_base)
 
+    # The backend interface, checked by implementing it. Two things, both at
+    # BUILD time rather than at run time:
+    #
+    #   - a null backend overrides every pure virtual in IRenderDevice and
+    #     ICommandEncoder, so a method added to either without a thought for
+    #     what a real backend does with it fails here, on the machine of
+    #     whoever added it - not months later on a console port under NDA;
+    #
+    #   - it links cromwell_base, which NEVER SEES raylib. So the RHI headers
+    #     compiling in this target is the check that they have not quietly
+    #     acquired a graphics API. Same arrangement as the engine's one
+    #     architectural rule above: checked, not trusted.
+    add_executable(xcom_rhi_tests tests/RhiTests.cpp)
+    target_link_libraries(xcom_rhi_tests PRIVATE cromwell_base)
+
+    # The platform interfaces - surface, input, clock, storage, image decode -
+    # checked the same way and for the same two reasons: a null backend must be
+    # able to satisfy every one of them, and linking cromwell_base (which never
+    # sees raylib) is what proves the platform layer has not re-acquired a
+    # windowing library.
+    #
+    # The null backend is not only a test fixture. It is what a headless replay
+    # verifier, an asset cooker or a CI run of the simulation needs, and it
+    # falls out of writing the interfaces honestly.
+    add_executable(xcom_platform_tests tests/PlatformTests.cpp)
+    target_link_libraries(xcom_platform_tests PRIVATE cromwell_base)
+
     # The trace against a real tile world - the half of the trace layer that
     # only exists once there are tiles. Links game_core rather than the engine,
     # because a floor, a wall and a ramp are this game's shapes.
@@ -380,7 +483,7 @@ if(XC_BUILD_TESTS)
     # The test binaries stay in the build tree. builds/win is the runnable
     # product - what you would zip and hand to someone - and test exes are
     # not part of it.
-    set_target_properties(xcom_tests xcom_crier_tests xcom_ui_tests xcom_widget_tests xcom_easing_tests xcom_entity_tests xcom_services_tests xcom_steam_tests xcom_spatial_tests xcom_pointer_tests xcom_collision_tests xcom_trace_tests xcom_math_tests xcom_debug_tests xcom_capture_tests xcom_profiler_tests xcom_perf PROPERTIES
+    set_target_properties(xcom_tests xcom_crier_tests xcom_ui_tests xcom_widget_tests xcom_easing_tests xcom_entity_tests xcom_services_tests xcom_steam_tests xcom_spatial_tests xcom_pointer_tests xcom_collision_tests xcom_trace_tests xcom_math_tests xcom_rhi_tests xcom_platform_tests xcom_debug_tests xcom_capture_tests xcom_profiler_tests xcom_perf PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY                "${CMAKE_BINARY_DIR}/tests"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_BINARY_DIR}/tests"
         RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/tests"
@@ -401,6 +504,8 @@ if(XC_BUILD_TESTS)
     add_test(NAME collision COMMAND xcom_collision_tests)
     add_test(NAME trace     COMMAND xcom_trace_tests)
     add_test(NAME math      COMMAND xcom_math_tests)
+    add_test(NAME rhi       COMMAND xcom_rhi_tests)
+    add_test(NAME platform  COMMAND xcom_platform_tests)
     add_test(NAME debugdraw COMMAND xcom_debug_tests)
     add_test(NAME capture   COMMAND xcom_capture_tests)
     add_test(NAME profiler COMMAND xcom_profiler_tests)
@@ -610,6 +715,23 @@ if(XC_BUILD_APP)
     # dev panel is the game's, and an engine that drags a UI toolkit into every
     # project that embeds it has made a choice on that project's behalf.
     add_library(cromwell STATIC
+        # ---- the selected platform and its graphics backend ---------------
+        # Chosen at the top of this file, by name, so the other platforms' code
+        # is never handed to a compiler at all. See the two-axis note there.
+        ${XC_PLATFORM_SOURCES}
+        ${XC_RHI_SOURCES}
+        # The backend conformance suite. Takes an IRenderDevice rather than a
+        # concrete one, so the same stages run against every backend the engine
+        # grows - which is what turns "is the console port finished" from a
+        # judgement into a list of failures to work down. Needs a live context,
+        # so it is a flag on the executable rather than a ctest suite; same
+        # arrangement as ComputeSelfTest and for the same reason.
+        src/cromwell/rhi/RenderDeviceSelfTest.cpp
+        # The frame sequence and its targets. ENGINE, not game: a shadow map is
+        # a depth-only pass from the sun over the world whether that world has
+        # soldiers or tanks in it. The game supplies meshes through
+        # IGeometrySource and decides nothing about the order.
+        src/cromwell/render/ScenePipeline.cpp
         src/cromwell/camera/OrbitCamera.cpp
         # Screen space to world space and back. With the renderer rather than
         # in cromwell_base because it has to agree with the matrices the
@@ -625,6 +747,9 @@ if(XC_BUILD_APP)
         src/cromwell/decal/DecalRenderer.cpp
         src/cromwell/decal/DecalSet.cpp
         src/cromwell/diag/CrashHandler.cpp
+        # TEMPORARY: dumps a depth texture to a BMP, for comparing the two
+        # renderers' shadow maps directly. Remove with the comparison.
+        src/cromwell/diag/DepthDump.cpp
         src/cromwell/diag/RaylibLogBridge.cpp
         src/cromwell/geometry/BoxMesh.cpp
         src/cromwell/geometry/MeshVertexBuffer.cpp
@@ -652,12 +777,19 @@ if(XC_BUILD_APP)
         src/cromwell/camera/Camera.cpp
         src/cromwell/camera/CameraSet.cpp
         src/cromwell/gpu/ShaderLibrary.cpp
-        src/cromwell/input/InputHandler.cpp
         src/cromwell/lighting/PbrShader.cpp
         src/cromwell/lighting/ProbeSpheres.cpp
+        # The rhi half of the reflection probes: the cubemap array, the volumes
+        # and the round-robin schedule, naming no graphics API at all. The
+        # array creation and the per-layer attach that force ReflectionProbeSet
+        # below to call GL directly are both on IRenderDevice, so this file
+        # does not need the exemption that one has. Deleted together at parity.
+        src/cromwell/lighting/DeviceProbeSet.cpp
         src/cromwell/lighting/ReflectionProbeSet.cpp
         src/cromwell/lighting/ShadowMap.cpp
         src/cromwell/lighting/SunLight.cpp
+        src/cromwell/material/DeviceMaterials.cpp
+        src/cromwell/material/MaterialDefinition.cpp
         src/cromwell/material/MaterialLibrary.cpp
         src/cromwell/model/ModelAsset.cpp
         src/cromwell/model/ModelPreview.cpp
@@ -676,9 +808,16 @@ if(XC_BUILD_APP)
         src/cromwell/ribbon/RibbonShader.cpp
         src/cromwell/ribbon/StripSet.cpp
         # The UI kit's renderer half. Everything else about the widgets is in
-        # cromwell_base; these two files are where a draw list becomes pixels
-        # and a weight becomes a rasterised font. See ui/paint/UiPainter.hpp.
+        # cromwell_base; these files are where a draw list becomes pixels and a
+        # weight becomes a rasterised font. See ui/paint/UiPainter.hpp.
+        #
+        # GlyphAtlas is the odd one out and is here only because FreeType is
+        # linked into this target: it names no graphics API and needs no window,
+        # so moving it down to cromwell_base is a CMake edit rather than a
+        # rewrite the day the headless half wants to measure text.
+        src/cromwell/ui/paint/GlyphAtlas.cpp
         src/cromwell/ui/paint/UiFontSet.cpp
+        src/cromwell/ui/paint/DeviceUiPainter.cpp
         src/cromwell/ui/paint/UiPainter.cpp
         src/cromwell/ui/paint/WorldAnchor.cpp
         # UNCONDITIONAL, even with no SDK on the machine. The whole of the
@@ -765,6 +904,12 @@ if(XC_BUILD_APP)
         src/game/entities/pawns/CameraPawn.cpp
         src/game/render/DrawLayers.cpp
         src/game/render/FrameRenderer.cpp
+        # The renderer being built beside the one that works. Both exist during
+        # the port and --renderer chooses; see RhiFrameRenderer.hpp for why the
+        # conversion cannot be done in place.
+        src/game/render/rhi/RhiBodies.cpp
+        src/game/render/rhi/RhiFrameRenderer.cpp
+        src/game/render/rhi/RhiStatics.cpp
         src/game/cli/CliOptions.cpp
         src/game/path/MoveAnimator.cpp
         src/game/path/PathPreviewBuilder.cpp

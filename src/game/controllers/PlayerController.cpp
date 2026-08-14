@@ -79,15 +79,47 @@ Viewport PlayerController::viewViewport() const
 
 std::string PlayerController::cameraArguments() const
 {
-    /* THE PAWN'S camera, deliberately not viewCamera(): --cam reproduces the
-     * RIG's pose at startup, and copying whatever camera the screen happened
-     * to be switched to would paste a security feed's viewpoint into a flag
-     * that places the player's. */
-    const Vec3 position = pawn_->camera().position();
-    const Vec3 target   = pawn_->camera().target();
+    /* THE CAMERA ON SCREEN, which is viewCamera() and not the pawn's rig.
+     *
+     * This read pawn_->camera(), on the argument that --cam places the PLAYER's
+     * camera and copying whatever the screen was switched to would paste a
+     * security feed's viewpoint into a flag that positions the pawn. The
+     * argument is about the exceptional case and got the ordinary one wrong:
+     * the director reports the pawn's rig through current() in normal play
+     * anyway, so this only ever differed when the two disagreed — which is
+     * exactly when the copied line described a view nobody was looking at.
+     *
+     * What this button is FOR is turning "it looks wrong here" into a view
+     * somebody else can render. That means the view on the screen, whichever
+     * camera is producing it. Pasting a feed's pose into the pawn reproduces
+     * the picture, which is the whole request.
+     *
+     * ================== AND THE LENS, NOT JUST THE POSE ======================
+     *
+     * A pose is where the camera is; it is not what the camera sees. This
+     * emitted six numbers and no lens, so pasting it back restored the position
+     * exactly and framed it through whatever field of view the pawn's rig
+     * happened to carry. Every camera in this game that is not the pawn's has a
+     * different one — the security feeds are 50 degrees, the plan view is
+     * ORTHOGRAPHIC — so the reproduction was silently wrong for all of them.
+     *
+     * The symptom is the cruel part: a wrong field of view looks like the
+     * camera standing too far forward or too far back. So the reader compares
+     * the position, finds it correct to three decimals, and concludes the
+     * export is fine.
+     *
+     * TWO SPELLINGS BECAUSE THERE ARE TWO KINDS OF LENS. Under perspective the
+     * number is a vertical angle; under orthographic it is a visible height in
+     * world units. Camera.hpp calls conflating them "the fovy trap" and closed
+     * it by separating projection() from lens(); emitting one --fov for both
+     * would reopen it at the command line. */
+    const cromwell::Camera& camera = viewCamera();
 
-    char buffer[160];
-    std::snprintf(buffer, sizeof(buffer),
+    const Vec3 position = camera.position();
+    const Vec3 target   = camera.target();
+
+    char buffer[200];
+    const int written = std::snprintf(buffer, sizeof(buffer),
                   "--cam %.3f %.3f %.3f %.3f %.3f %.3f",
                   static_cast<double>(position.x),
                   static_cast<double>(position.y),
@@ -95,6 +127,15 @@ std::string PlayerController::cameraArguments() const
                   static_cast<double>(target.x),
                   static_cast<double>(target.y),
                   static_cast<double>(target.z));
+
+    if (written > 0 && static_cast<std::size_t>(written) < sizeof(buffer)) {
+        if (camera.isOrthographic())
+            std::snprintf(buffer + written, sizeof(buffer) - static_cast<std::size_t>(written),
+                          " --ortho %.3f", static_cast<double>(camera.lens()));
+        else
+            std::snprintf(buffer + written, sizeof(buffer) - static_cast<std::size_t>(written),
+                          " --fov %.3f", static_cast<double>(camera.lens()));
+    }
     return buffer;
 }
 
@@ -163,7 +204,7 @@ void PlayerController::updatePointer(const FrameInput& input)
      * would select things this player is not pointing at; everything below
      * treats it as the miss it is. */
     const Viewport viewport = viewViewport();
-    const Vec2 cursor{ input.mousePosition.x, input.mousePosition.y };
+    const Vec2 cursor = input.mousePosition;
     const bool inView = viewport.contains(cursor);
 
     const cromwell::Ray ray = viewport.rayThrough(cursor);
@@ -218,7 +259,7 @@ void PlayerController::updatePointer(const FrameInput& input)
      * written twice with two different thresholds. */
     const DragResult gesture = click_.update(cursor, input.leftPressed,
                                              input.leftDown, input.leftReleased);
-    if (gesture.clicked) handleClick();
+    if (gesture.clicked) handleClick(cursor);
 }
 
 /* ---- the dev decal tool --------------------------------------------------
@@ -296,7 +337,7 @@ void PlayerController::commitDecalPreview()
      * button is the way out. */
 }
 
-void PlayerController::handleClick()
+void PlayerController::handleClick(Vec2 cursor)
 {
     /* BEFORE THE GRENADE AND BEFORE SELECTION. While a placement tool is armed
      * the click belongs to it and to nothing else — a click that both stuck a
@@ -315,7 +356,7 @@ void PlayerController::handleClick()
     /* Same viewport, same rule as the hover: a click outside the view's own
      * rectangle landed on another pane's picture and orders nothing. */
     const Viewport viewport = viewViewport();
-    const Vec2 click{ GetMousePosition().x, GetMousePosition().y };
+    const Vec2& click = cursor;
     if (!viewport.contains(click)) return;
 
     const cromwell::Ray ray = viewport.rayThrough(click);

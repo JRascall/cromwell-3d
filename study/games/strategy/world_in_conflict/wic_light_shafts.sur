@@ -1,0 +1,201 @@
+Version 2
+
+DefaultTextures
+{
+	texture surfaces/dummy	noRepeat
+	texture surfaces/dummy	noRepeat
+}
+
+Config Normal PS2.0
+{
+	NormalPass
+	{
+		blend = alphaBlend
+		ZWRITE = OFF
+
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			struct VSOutput
+			{
+				float4	myColor				: COLOR0;
+
+				// UV's for cloud shape masks
+				float2	myShapeUV			: TEXCOORD0;
+			};			
+
+			float4 main (VSOutput aVSOut) : COLOR0
+			{
+				// Fetch shape mask
+				float4 shapeMaskTexel = tex2D(sampler0, aVSOut.myShapeUV);
+								
+				return float4(1,0,0,shapeMaskTexel.a);
+			}
+		}
+	}
+	CloudPackPass
+	{
+		ZWRITE = OFF
+
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			struct VSOutput
+			{
+				float4	myColor				: COLOR0;
+				float2	myUV				: TEXCOORD0;
+			};			
+
+			float4 main (VSOutput aVSOut) : COLOR0
+			{
+				float2 uv = aVSOut.myUV;
+				float q1 = tex2D(sampler0, float2(0.5 + uv.x, 0.5 + uv.y)).r;
+				float q2 = tex2D(sampler0, float2(0.5 + uv.x, 0.5 - uv.y)).r;
+				float q3 = tex2D(sampler0, float2(0.5 - uv.x, 0.5 - uv.y)).r;
+				float q4 = tex2D(sampler0, float2(0.5 - uv.x, 0.5 + uv.y)).r;
+								
+				return 1-float4(q1, q2, q3, q4);
+			}
+		}
+	}
+
+	CalcStartShaftsPass
+	{
+		ZWRITE = OFF
+
+		setConstant[0] = CUSTOM0
+
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			struct VSOutput
+			{
+				float4	myColor				: COLOR0;
+				float2	myUV0				: TEXCOORD0;
+				float2	myUV1				: TEXCOORD1;
+			};			
+
+			float4 main (VSOutput aVSOut) : COLOR0
+			{
+				//return float4(aVSOut.myUV0, 0, 1);
+				float steps = 32;
+				float4 accum = float4(0,0,0,0);
+				for(int a=0;a<steps;++a)
+				{
+					float2 uv = aVSOut.myUV0 * a / steps;
+					accum += tex2D(sampler0, uv);
+				}
+				
+				return accum  / steps * setConstant0.x;
+			}
+		}
+	}
+
+	CalcShaftsPass
+	{
+		ZWRITE = OFF
+
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			struct VSOutput
+			{
+				float4	myColor				: COLOR0;
+				float2	myUV0				: TEXCOORD0;
+				float2	myUV1				: TEXCOORD1;
+				float2	myUV2				: TEXCOORD2;
+				float2	myUV3				: TEXCOORD3;
+			};			
+
+			float4 main (VSOutput aVSOut) : COLOR0
+			{
+				//return float4(aVSOut.myUV0, 0, 1);
+				float steps = 32;
+				float4 accum = float4(0,0,0,0);
+	
+				float delta = 0.005;
+				float x = aVSOut.myUV0.x;
+				float y = aVSOut.myUV0.y;
+				float s = aVSOut.myUV1.x - delta;
+				if(x>s)
+				{
+					y *= s / x;
+					x = s;
+				}
+				if(y>s)
+				{
+					x *= s / y;
+					y = s;
+				}
+				float2 uv1 = float2(x,y);
+				float2 uv2 = aVSOut.myUV0 - uv1;
+
+				for(int a=0;a<steps;++a)
+				{
+					float2 uv = uv1 + uv2 * (a+1) / (steps+1);
+					accum += tex2D(sampler0, uv);
+				}
+				accum *= setConstant0.x / steps;
+				float4 prev = tex2D(sampler1, uv1);
+				float4 final = accum * aVSOut.myUV3.x + prev * (1-aVSOut.myUV3.x);
+				return final;
+			}
+		}
+	}
+	
+	UnpackShaftsPass
+	{
+		ZWRITE = OFF
+
+		setConstant[0] = CUSTOM0
+
+		Code
+		{
+			HLSL (ps_2_0, main)
+
+			struct VSOutput
+			{
+				float4	myColor				: COLOR0;
+				float2	myUV0				: TEXCOORD0;
+				float2	myUV1				: TEXCOORD1;
+			};			
+
+			float4 main (VSOutput aVSOut) : COLOR0
+			{
+				float4 ret = float4(0,0,0,0);
+				float2 uv = aVSOut.myUV0 * 4;
+				if(uv.x >= 1)
+				{
+					if(uv.y >= 1)
+					{
+						ret.x = tex2D(sampler0, float2(uv.x - 1, uv.y - 1)).r;
+						ret.x +=tex2D(sampler1, float2(uv.x - 1, uv.y - 1)).r;
+					}
+					else
+					{
+						ret.x = tex2D(sampler0, float2(uv.x - 1, 1 - uv.y)).g;
+						ret.x +=tex2D(sampler1, float2(uv.x - 1, 1 - uv.y)).g;
+					}
+				}
+				else
+				{
+					if(uv.y >= 1)
+					{
+						ret.x = tex2D(sampler0, float2(1 - uv.x, uv.y - 1)).a;
+						ret.x +=tex2D(sampler1, float2(1 - uv.x, uv.y - 1)).a;
+					}
+					else
+					{
+						ret.x = tex2D(sampler0, float2(1 - uv.x, 1 - uv.y)).b;
+						ret.x +=tex2D(sampler1, float2(1 - uv.x, 1 - uv.y)).b;
+					}
+				}
+				return (ret - setConstant0.y)/ (1-setConstant0.y);
+			}
+		}
+	}
+}

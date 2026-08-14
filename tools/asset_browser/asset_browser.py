@@ -5,12 +5,23 @@ Helldivers 2, Rainbow Six: Siege, UNIGINE -- because the useful question is
 usually "what does this look like" and the answer currently requires finding a
 file by hand and opening it in something else.
 
-Two things it does that a general image viewer does not:
+Three things it does that a general image viewer does not:
 
-*Renders a mesh without a GPU.* A numpy software rasteriser, same approach as
-xcom_parcel_render.py. Flat, normal-shaded, UV-checker and wireframe modes; no
-lighting model worth the name, which is the point -- it is for reading shape and
-topology, not for looking pretty.
+*Renders a mesh, with or without a GPU.* The fallback is a numpy software
+rasteriser, same approach as xcom_parcel_render.py: flat, normal-shaded,
+UV-checker and wireframe modes, no lighting model worth the name, which is the
+point -- it is for reading shape and topology, not for looking pretty. When
+moderngl is installed the same picture is drawn on the GPU instead, about 50x
+faster (measured: 3.9 ms against 202 ms for a 3,216-triangle character), which
+is what makes orbiting and animation playback keep their texture and detail
+instead of dropping to scattered samples.
+
+*Plays animation.* Any rigged .glb gets a clip list beside the preview: click one
+and it plays, with a repeat toggle. Clips come from inside the file and from the
+standalone .anim library beside it, bound to the skeleton by joint name -- which
+is what lets all 88 of Mercenaries' human models play the same 1,639 clips
+rather than 85 of them showing an empty panel. The list has a filter over it,
+because 1,639 rows is not a list anyone reads.
 
 *Splits a texture into channels.* This matters more than the composite view.
 These engines pack unrelated data per channel: XCOM's MSK carries alpha cutout in
@@ -31,11 +42,14 @@ Headless use, which is also how the rendering is tested:
     py -3 tools/asset_browser/asset_browser.py --sheet siege:mesh --out sheet.png -n 24
 
 With no arguments it opens the GUI. Needs Python 3 with numpy and Pillow; tkinter
-ships with Python. Nothing else to install.
+ships with Python. `pip install moderngl` is optional and only buys speed -- the
+tool runs without it, on the numpy renderer, and says which one it is using
+under the preview.
 """
 import argparse
 import csv
 import os
+import struct
 import sys
 import time
 from pathlib import Path
@@ -53,9 +67,15 @@ LIBRARIES = {
     'hd2':     REPO / 'hd2_extracted',
     'unigine': REPO / 'unigine_extracted',
     'siege':   Path(os.environ.get('R6_LIBRARY', r'D:\r6_extracted')),
+    'mercs':   REPO / 'mercs_extracted',
 }
 
 MESH_EXT = {'.obj', '.glb'}
+# Everything the mesh viewer can open. Split out because a composed world and a
+# terrain are meshes but wanting to FIND one is a different question from
+# wanting to find a prop - and mercs_extracted holds two files called
+# aclubs.obj, one the terrain and one the whole level.
+MESH_KINDS = {'mesh', 'scene', 'terrain'}
 TEX_EXT = {'.png', '.dds', '.tga', '.jpg', '.jpeg', '.bmp'}
 
 # Cataloguing Siege alone means walking ~940,000 files, so the result is cached.
@@ -77,6 +97,15 @@ def _kind_of(lib, path):
     there is to go on."""
     ext = path.suffix.lower()
     if ext in MESH_EXT:
+        # A composed level and a bare heightmap are both .obj and both often
+        # carry the level's name, so the directory is the only thing that tells
+        # them apart. Without this the browser lists two identical "aclubs.obj".
+        if lib == 'mercs':
+            parts = {p.lower() for p in path.parts}
+            if 'scenes' in parts:
+                return 'scene'
+            if 'terrain' in parts:
+                return 'terrain'
         # filediver writes one .glb per Helldivers *material* as well as per unit,
         # and a material export is a flat two-triangle quad carrying the material.
         # There are 5,587 of them against 7,541 real units, so leaving them in the
@@ -100,6 +129,14 @@ def _role_of(lib, name):
     art uses Firaxis' `_DIF`/`_NRM`/`_MSK` suffixes. That makes "show me every
     normal map" answerable without opening 267,000 files.
     """
+    # Mercenaries encodes nothing in its filenames because there is nothing to
+    # encode: every one of its 4,643 textures is a palettised diffuse map, with
+    # no normal, specular or mask maps in the game at all. Matching on
+    # substrings here would scatter them across roles on the accident of a name
+    # containing "mask" or "misc", and leave a role=diffuse filter returning
+    # none of them.
+    if lib == 'mercs':
+        return 'diffuse'
     n = name.lower()
     if 'typenormal' in n or '_nrm' in n or '_n.' in n or 'normal' in n:
         return 'normal'
@@ -125,12 +162,22 @@ def _material_of(lib, kind, path, xcom_index):
     answers "which meshes have a spec map" directly rather than only "does this
     have textures at all".
     """
-    if kind not in ('mesh', 'material'):
+    if kind not in MESH_KINDS and kind != 'material':
         return ''
     if lib == 'xcom':
         return xcom_index.get((path.parent.name, path.stem), 'none')
     if lib == 'hd2':
         return 'embedded'
+    if lib == 'mercs':
+        # PS2 art is diffuse-only, so the value is 'dif' or nothing - there is
+        # no map set to describe. A mesh with no textured segment (collision
+        # and shadow proxies) honestly has none.
+        #
+        # The .glb from mercs_gltf.py name their textures by relative URI rather
+        # than embedding them, which resolves the same way for the viewer - so
+        # they are 'dif' too. Reporting 'none' made every rigged character open
+        # untextured, since the default view mode is chosen from this value.
+        return 'dif'
     return 'none'
 
 
@@ -291,6 +338,133 @@ def xcom_material(mesh_path):
     return out
 
 
+# --------------------------------------------------------------------------
+# Mercenaries material links
+# --------------------------------------------------------------------------
+
+_MERCS_MATS = None
+
+
+def mercs_materials(mesh_path):
+    """Per-material textures for a Mercenaries mesh, shaped like glb_materials.
+
+    Returned as a list indexed by the mesh's material number, so the renderer's
+    tex_by_mat can select per triangle. That matters more here than anywhere
+    else in this browser: a PS2 vehicle is dozens of segments over a handful of
+    textures, and painting one texture across the whole mesh would show the
+    fuselage sheet stretched over the windows and rotor blur.
+
+    Only 'diffuse' is ever populated, and that is the whole truth rather than a
+    limitation of the extractor - the art is palettised diffuse maps, with no
+    normal, specular or mask maps anywhere in the game's 4,643 textures.
+    """
+    global _MERCS_MATS
+    lib = LIBRARIES['mercs']
+    csv_path = lib / 'materials.csv'
+    if not csv_path.exists():
+        return []
+    if _MERCS_MATS is None:
+        _MERCS_MATS = {}
+        with csv_path.open(encoding='utf-8') as f:
+            for r in csv.DictReader(f):
+                _MERCS_MATS[(r['package'], r['mesh'])] = r
+    p = Path(mesh_path)
+    row = _MERCS_MATS.get((p.parent.name, p.stem))
+    if not row:
+        return []
+    # Drive the order off the .obj itself rather than the csv: load_obj numbers
+    # materials by first `usemtl`, and the two must not be able to drift.
+    names = obj_material_names(mesh_path)
+    by_name = dict(zip([n for n in row.get('texture_names', '').split(';') if n],
+                       [t for t in row.get('textures', '').split(';')]))
+    tex_dir = lib / 'textures_png'
+    out = []
+    for n in names:
+        png = by_name.get(n)
+        im = None
+        if png and (tex_dir / png).exists():
+            try:
+                im = load_texture(str(tex_dir / png))
+            except Exception:
+                im = None
+        out.append({'diffuse': im} if im is not None else {})
+    return out
+
+
+def obj_mtl_materials(mesh_path):
+    """Textures from the .mtl beside an .obj, in the file's own usemtl order.
+
+    The plain .obj/.mtl route, which is what a composed scene uses and what any
+    exporter writes. It is tried before the per-library routes because it is
+    self-describing: the file says which texture each material uses and where it
+    lives, so nothing has to know which game the mesh came from.
+    """
+    p = Path(mesh_path)
+    if p.suffix.lower() != '.obj':
+        return []
+    mtl = None
+    try:
+        with p.open('r', errors='replace') as f:
+            for line in f:
+                if line.startswith('mtllib '):
+                    mtl = p.with_name(line[7:].strip())
+                    break
+                if line.startswith(('v ', 'f ')):
+                    break            # past the header; there is no mtllib
+    except OSError:
+        return []
+    if mtl is None:
+        mtl = p.with_suffix('.mtl')
+    if not mtl.exists():
+        return []
+
+    maps, cur = {}, None
+    with mtl.open('r', errors='replace') as f:
+        for line in f:
+            if line.startswith('newmtl '):
+                cur = line[7:].strip()
+            elif line.startswith('map_Kd ') and cur:
+                maps[cur] = line[7:].strip()
+    if not maps:
+        return []
+
+    cache, out = {}, []
+    for name in obj_material_names(mesh_path):
+        rel = maps.get(name)
+        im = None
+        if rel:
+            cand = mtl.parent / rel
+            key = str(cand)
+            if key in cache:
+                im = cache[key]
+            elif cand.exists():
+                try:
+                    im = load_texture(str(cand))
+                except Exception:
+                    im = None
+                cache[key] = im
+        out.append({'diffuse': im} if im is not None else {})
+    return out
+
+
+def mesh_materials(path):
+    """(materials, extra_images) for any mesh the browser can texture.
+
+    One entry point so the UI does not have to know which library a file came
+    from: .glb carries its materials inside it, a plain .obj declares them in an
+    .mtl, and Mercenaries' per-model exports also resolve through materials.csv.
+    """
+    sp = str(path)
+    if sp.lower().endswith('.glb'):
+        return glb_materials(path)
+    mats = obj_mtl_materials(path)
+    if any(m.get('diffuse') is not None for m in mats):
+        return mats, []
+    if 'mercs_extracted' in sp.replace('/', os.sep):
+        return mercs_materials(path), []
+    return [], []
+
+
 _EMISSIVE_CACHE = {}
 
 
@@ -322,10 +496,38 @@ def xcom_has_emissive(mask_path):
 # mesh loading and software rendering
 # --------------------------------------------------------------------------
 
+def obj_material_names(path):
+    """The `usemtl` names an .obj declares, in first-use order.
+
+    That order is the material INDEX the renderer selects on, so it has to match
+    load_obj's numbering exactly - hence one shared rule rather than two.
+    """
+    order, seen = [], set()
+    try:
+        with open(path, 'r', errors='replace') as fh:
+            for line in fh:
+                if line.startswith('usemtl '):
+                    name = line[7:].strip()
+                    if name and name not in seen:
+                        seen.add(name)
+                        order.append(name)
+    except OSError:
+        return []
+    return order
+
+
 def load_obj(path):
     """Positions, UVs, normals and triangulated faces. Faces are (n,3,3) of
-    vertex/uv/normal indices, matching xcom_parcel_render.py."""
+    vertex/uv/normal indices, matching xcom_parcel_render.py.
+
+    `usemtl` is honoured so a mesh built from many textured segments renders with
+    the right texture on each. XCOM's exports declare no materials, so they get a
+    single zero index exactly as before; Mercenaries' do, and a vehicle there is
+    dozens of segments over a handful of textures.
+    """
     V, T, N, F = [], [], [], []
+    tri_mat = []
+    mat_ids, cur = {}, 0
     with open(path, 'r', errors='replace') as fh:
         for line in fh:
             tok, _, rest = line.partition(' ')
@@ -335,31 +537,49 @@ def load_obj(path):
                 T.append([float(x) for x in rest.split()[:2]])
             elif tok == 'vn':
                 N.append([float(x) for x in rest.split()[:3]])
+            elif tok == 'usemtl':
+                name = rest.strip()
+                if name not in mat_ids:
+                    mat_ids[name] = len(mat_ids)
+                cur = mat_ids[name]
             elif tok == 'f':
-                c = [[int(b) - 1 if b else 0 for b in t.split('/')] for t in rest.split()]
+                # Every corner is normalised to (v, vt, vn). A face may be
+                # written 'v', 'v/vt', 'v//vn' or 'v/vt/vn', and a single file
+                # can mix them - a composed scene does, because some segments
+                # carry UVs and some do not. Leaving them ragged makes the
+                # numpy conversion fail on the whole mesh rather than on the
+                # face that lacked a field.
+                c = []
+                for t in rest.split():
+                    q = t.split('/')
+                    c.append([int(q[0]) - 1 if q[0] else 0,
+                              int(q[1]) - 1 if len(q) > 1 and q[1] else 0,
+                              int(q[2]) - 1 if len(q) > 2 and q[2] else 0])
                 for k in range(1, len(c) - 1):
                     F.append([c[0], c[k], c[k + 1]])
+                    tri_mat.append(cur)
     faces = np.array(F, np.int32) if F else np.zeros((0, 3, 3), np.int32)
     return (np.array(V, np.float32),
             np.array(T or [[0, 0]], np.float32),
             np.array(N or [[0, 1, 0]], np.float32),
             faces,
-            np.zeros(len(faces), np.int32))   # OBJ: one material
+            np.array(tri_mat, np.int32) if tri_mat else np.zeros(len(faces), np.int32))
 
 
 _GLTF_COMPONENT = {5120: np.int8, 5121: np.uint8, 5122: np.int16,
                    5123: np.uint16, 5125: np.uint32, 5126: np.float32}
-_GLTF_COUNT = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4}
+_GLTF_COUNT = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4,
+               'MAT2': 4, 'MAT3': 9, 'MAT4': 16}   # MAT4: inverse bind matrices
 
 
-def load_glb(path):
-    """Positions/UVs/normals/faces out of a binary glTF.
+def _glb_chunks(path):
+    """The JSON and BIN chunks of a binary glTF, and a reader over its accessors.
 
-    Deliberately minimal: Helldivers' filediver output is one .glb per unit with
-    everything embedded, and all this viewer needs is the geometry. No scene
-    graph, no node transforms, no skinning -- every primitive in the file is
-    merged into one soup, which is right for "what shape is this" and wrong for
-    anything else.
+    Split out of load_glb so the skinning loader below reads the SAME file the
+    same way. The vertex order the two produce has to agree exactly - a posed
+    vertex array is applied to geometry loaded separately, and an order that
+    drifts by one primitive scrambles the model in a way that still looks like a
+    mesh.
     """
     import json
     import struct
@@ -409,26 +629,51 @@ def load_glb(path):
         return np.frombuffer(bin_chunk, dtype=dt, count=count * ncomp,
                              offset=start).reshape(count, ncomp)
 
-    V, T, N, F, M = [], [], [], [], []
-    base = 0
+    return js, read
+
+
+def _glb_primitives(js):
+    """The primitives load_glb keeps, in the order it keeps them.
+
+    One generator, so the geometry loader and the skinning loader cannot
+    disagree about which primitives exist or what order their vertices are in.
+    """
     for m in js.get('meshes', []):
         for prim in m.get('primitives', []):
             attrs = prim.get('attributes', {})
             if 'POSITION' not in attrs or 'indices' not in prim:
                 continue
-            mat_id = prim.get('material', -1)
-            pos = read(attrs['POSITION']).astype(np.float32)
-            idx = read(prim['indices']).astype(np.int64).ravel()
-            nrm = read(attrs['NORMAL']).astype(np.float32) if 'NORMAL' in attrs else None
-            uv = read(attrs['TEXCOORD_0']).astype(np.float32) if 'TEXCOORD_0' in attrs else None
+            yield prim, attrs
 
-            V.append(pos)
-            N.append(nrm if nrm is not None else np.zeros_like(pos))
-            T.append(uv if uv is not None else np.zeros((len(pos), 2), np.float32))
-            tri = idx[: len(idx) // 3 * 3].reshape(-1, 3) + base
-            F.append(np.stack([tri, tri, tri], axis=2))
-            M.append(np.full(len(tri), mat_id, np.int32))
-            base += len(pos)
+
+def load_glb(path):
+    """Positions/UVs/normals/faces out of a binary glTF.
+
+    Deliberately minimal: Helldivers' filediver output is one .glb per unit with
+    everything embedded, and all this viewer needs is the geometry. No scene
+    graph and no node transforms -- every primitive in the file is merged into
+    one soup, which is right for "what shape is this" and wrong for anything
+    else. Skinning is not applied here either; it lives in load_glb_rig, which
+    poses this same soup.
+    """
+    js, read = _glb_chunks(path)
+
+    V, T, N, F, M = [], [], [], [], []
+    base = 0
+    for prim, attrs in _glb_primitives(js):
+        mat_id = prim.get('material', -1)
+        pos = read(attrs['POSITION']).astype(np.float32)
+        idx = read(prim['indices']).astype(np.int64).ravel()
+        nrm = read(attrs['NORMAL']).astype(np.float32) if 'NORMAL' in attrs else None
+        uv = read(attrs['TEXCOORD_0']).astype(np.float32) if 'TEXCOORD_0' in attrs else None
+
+        V.append(pos)
+        N.append(nrm if nrm is not None else np.zeros_like(pos))
+        T.append(uv if uv is not None else np.zeros((len(pos), 2), np.float32))
+        tri = idx[: len(idx) // 3 * 3].reshape(-1, 3) + base
+        F.append(np.stack([tri, tri, tri], axis=2))
+        M.append(np.full(len(tri), mat_id, np.int32))
+        base += len(pos)
 
     if not V:
         return (np.zeros((0, 3), np.float32), np.zeros((1, 2), np.float32),
@@ -442,6 +687,368 @@ def load_glb(path):
 def load_mesh(path):
     """Dispatch on extension so callers do not care which library it came from."""
     return load_glb(path) if str(path).lower().endswith('.glb') else load_obj(path)
+
+
+# --------------------------------------------------------------------------
+# skinning and animation
+# --------------------------------------------------------------------------
+#
+# Enough of glTF's animation model to PLAY a clip, which is a different job
+# from importing one: no retargeting, no blending, no root motion handling.
+# Mercenaries' rigs are rigid - one bone per vertex - but the code handles the
+# general four-influence case because Helldivers' .glb do use real weights and a
+# viewer that quietly ignored three of them would show a subtly wrong mesh
+# rather than fail.
+
+def load_glb_rig(path):
+    """The skin and clip list of a .glb, or None if it carries neither.
+
+    The clips' sampler data is NOT read here. A Mercenaries character file holds
+    1,639 clips and 116 MB of curves; reading them all to populate a list would
+    make selecting the asset take seconds and would hold the lot in memory to
+    play one. Only the chosen clip's accessors are read, in pose_glb.
+    """
+    js, read = _glb_chunks(path)
+    skins = js.get('skins') or []
+    clips = js.get('animations') or []
+    if not skins and not clips:
+        return None
+
+    nodes = js.get('nodes', [])
+    parent = {}
+    for i, n in enumerate(nodes):
+        for c in n.get('children', ()):
+            parent[c] = i
+
+    rest = []
+    for n in nodes:
+        rest.append((np.array(n.get('translation', (0, 0, 0)), np.float64),
+                     np.array(n.get('rotation', (0, 0, 0, 1)), np.float64),
+                     np.array(n.get('scale', (1, 1, 1)), np.float64)))
+
+    joints, ibm = [], None
+    if skins:
+        joints = list(skins[0].get('joints', ()))
+        if 'inverseBindMatrices' in skins[0]:
+            # glTF stores a matrix column-major; transposing once here means the
+            # rest of this file can think in rows.
+            ibm = read(skins[0]['inverseBindMatrices']).astype(np.float64)
+            ibm = ibm.reshape(-1, 4, 4).transpose(0, 2, 1)
+        else:
+            ibm = np.tile(np.eye(4), (len(joints), 1, 1))
+
+    # Per-vertex influences, in load_glb's vertex order - see _glb_primitives.
+    JI, JW, base = [], [], 0
+    for prim, attrs in _glb_primitives(js):
+        n = js['accessors'][attrs['POSITION']]['count']
+        if 'JOINTS_0' in attrs and 'WEIGHTS_0' in attrs:
+            JI.append(read(attrs['JOINTS_0']).astype(np.int32))
+            w = read(attrs['WEIGHTS_0']).astype(np.float64)
+            if w.dtype != np.float64:
+                w = w.astype(np.float64)
+            JW.append(w)
+        else:
+            # An unskinned primitive in a skinned file rides the skeleton root,
+            # which is what a viewer showing it attached to nothing would get
+            # wrong.
+            JI.append(np.zeros((n, 4), np.int32))
+            w = np.zeros((n, 4), np.float64)
+            w[:, 0] = 1.0
+            JW.append(w)
+        base += n
+
+    return {'path': str(path), 'js': js, 'read': read, 'nodes': nodes,
+            'parent': parent, 'rest': rest, 'joints': joints, 'ibm': ibm,
+            'joint_index': np.concatenate(JI) if JI else np.zeros((0, 4), np.int32),
+            'joint_weight': np.concatenate(JW) if JW else np.zeros((0, 4)),
+            'clips': [c.get('name') or 'clip %d' % i for i, c in enumerate(clips)],
+            'vertex_count': base, '_sampled': {}}
+
+
+def _anim_header(path):
+    """(name, frames, fps, duration, [joint names]) from a .anim, header only.
+
+    mercs_anim.py's format: a fixed header, then length-prefixed strings for the
+    clip name, the events and the joints, then the dense float block at
+    dataOffset. Everything this needs is in front of that offset, so a clip can
+    be listed and matched to a skeleton without reading its curves - which is
+    what makes indexing 1,835 of them cheap enough to do on selection.
+    """
+    # 8 KB covers a name, its events and 38 joint names with room to spare, and
+    # the whole point is to index 1,835 clips without reading 172 MB of curves.
+    # Re-read in full only if the strings actually run past it.
+    with open(path, 'rb') as f:
+        head = f.read(8192)
+        if head[:4] != b'MRCA':
+            return None
+        if struct.unpack_from('<I', head, 40)[0] > len(head):
+            f.seek(0)
+            head = f.read(struct.unpack_from('<I', head, 40)[0])
+    ver, frames, njoints = struct.unpack_from('<III', head, 4)
+    fps, duration = struct.unpack_from('<2f', head, 16)
+    nev, data_off = struct.unpack_from('<II', head, 36)
+    p = 44
+
+    def pstr(p):
+        n = struct.unpack_from('<H', head, p)[0]
+        return head[p + 2:p + 2 + n].decode('ascii', 'replace'), p + 2 + n
+
+    name, p = pstr(p)
+    for _ in range(nev):
+        _, p = pstr(p + 4)
+    joints = []
+    for _ in range(njoints):
+        s, p = pstr(p)
+        joints.append(s)
+        p += 1                                   # the flags byte
+    return name, frames, fps, duration, joints
+
+
+def anim_index(directory):
+    """[(name, path, {joint names})] for a directory of .anim, cached.
+
+    The scan is ~1,800 header reads. Done once per session and kept, because it
+    is what lets any rigged mesh be offered the clips that fit it.
+    """
+    directory = str(Path(directory))
+    if directory in _ANIM_INDEX:
+        return _ANIM_INDEX[directory]
+    out, failed, why = [], 0, None
+    for f in sorted(Path(directory).glob('*.anim')):
+        try:
+            h = _anim_header(f)
+        except Exception as e:
+            h, failed, why = None, failed + 1, why or e
+        if h:
+            out.append((h[0], str(f), {j.lower() for j in h[4]}))
+    # An empty library must not look like "this rig has no clips". A blanket
+    # except here once turned a NameError into a silently empty panel, which is
+    # indistinguishable from a model that genuinely has no animation.
+    if failed:
+        print('asset_browser: %d of %d clips in %s failed to index (%s: %s)'
+              % (failed, failed + len(out), directory, type(why).__name__, why))
+    _ANIM_INDEX[directory] = out
+    return out
+
+
+def anim_library(mesh_path, rig, threshold=0.75):
+    """Standalone clips that fit this mesh's skeleton, as [(name, path)].
+
+    The point: every human in Mercenaries shares one skeleton, so 1,639 clips
+    drive any of 88 models. Binding them here by joint name means the viewer can
+    play the lot against whichever character is selected, instead of the export
+    duplicating the same curves into 88 files.
+    """
+    if not rig or not rig.get('joints'):
+        return []
+    p = Path(mesh_path).resolve()
+    root = None
+    for parent in p.parents:
+        if (parent / 'animations').is_dir() and parent.name.endswith('_extracted'):
+            root = parent / 'animations'
+            break
+    if root is None:
+        return []
+    names = {(rig['nodes'][n].get('name') or '').lower() for n in rig['joints']}
+    out = []
+    for name, path, cj in anim_index(root):
+        # Overlap against the SMALLER set, not against the clip. A clip may
+        # animate more joints than a given model has - the 25-joint NK soldiers
+        # against a 36-joint clip is the common case - and it drives the joints
+        # they share perfectly well; measuring against the clip rejected every
+        # one of them at 69%. Measuring against the smaller set still keeps a
+        # 4-joint flag clip away from a character, which is what the threshold
+        # is actually for.
+        if cj and len(cj & names) >= max(1, int(min(len(cj), len(names)) * threshold)):
+            out.append((name, path))
+    return out
+
+
+def load_anim(path):
+    """A whole .anim: header plus the dense (joints, frames, 7) float block."""
+    h = _anim_header(path)
+    if not h:
+        raise ValueError('not a .anim')
+    name, frames, fps, duration, joints = h
+    raw = Path(path).read_bytes()
+    data_off = struct.unpack_from('<I', raw, 40)[0]
+    n = len(joints) * frames * 7
+    data = np.frombuffer(raw, np.float32, count=n, offset=data_off)
+    return {'name': name, 'frames': frames, 'fps': fps, 'duration': duration,
+            'joints': joints, 'data': data.reshape(len(joints), frames, 7)}
+
+
+def anim_sample(a, t):
+    """{joint name: (translation, quaternion)} at time t, interpolated.
+
+    The curves are dense at the clip's own rate, so this only ever blends
+    between two neighbouring frames - and it has to, because the viewer redraws
+    faster than 30 Hz and stepping to the nearest frame makes a smooth walk
+    stutter at the redraw rate rather than at the animation's.
+    """
+    frames = a['frames']
+    if frames <= 0:
+        return {}
+    x = max(0.0, min(float(t) * a['fps'], frames - 1))
+    i = int(x)
+    j = min(i + 1, frames - 1)
+    u = x - i
+    lo, hi = a['data'][:, i, :], a['data'][:, j, :]
+    out = {}
+    for k, name in enumerate(a['joints']):
+        q0, q1 = lo[k, :4], hi[k, :4]
+        q = _slerp(q0.astype(np.float64), q1.astype(np.float64), u) if u else q0
+        tr = lo[k, 4:7] * (1.0 - u) + hi[k, 4:7] * u
+        out[name.lower()] = (np.asarray(tr, np.float64), np.asarray(q, np.float64))
+    return out
+
+
+def clip_duration(rig, clip):
+    """Seconds, from the largest time in any of the clip's inputs."""
+    a = rig['js']['animations'][clip]
+    end = 0.0
+    for s in a['samplers']:
+        acc = rig['js']['accessors'][s['input']]
+        if 'max' in acc:
+            end = max(end, float(acc['max'][0]))
+        else:
+            end = max(end, float(rig['read'](s['input']).max()))
+    return end
+
+
+def _clip_channels(rig, clip):
+    """(node, path, times, values, interpolation) per channel, read once."""
+    if clip in rig['_sampled']:
+        return rig['_sampled'][clip]
+    a = rig['js']['animations'][clip]
+    out = []
+    times = {}
+    for ch in a['channels']:
+        s = a['samplers'][ch['sampler']]
+        if s['input'] not in times:
+            times[s['input']] = rig['read'](s['input']).astype(np.float64).ravel()
+        out.append((ch['target']['node'], ch['target']['path'],
+                    times[s['input']],
+                    rig['read'](s['output']).astype(np.float64),
+                    s.get('interpolation', 'LINEAR')))
+    rig['_sampled'] = {clip: out}          # one clip at a time; see load_glb_rig
+    return out
+
+
+def _slerp(a, b, u):
+    """Shortest-arc quaternion interpolation.
+
+    The sign fix is the part that matters: q and -q are the same rotation, so
+    without it a joint whose keys straddle the double cover spins the long way
+    round - one frame of a 359-degree flip in the middle of a walk cycle.
+    """
+    d = float(np.dot(a, b))
+    if d < 0.0:
+        b, d = -b, -d
+    if d > 0.9995:
+        q = a + (b - a) * u
+    else:
+        th = np.arccos(np.clip(d, -1.0, 1.0))
+        s = np.sin(th)
+        q = a * (np.sin((1 - u) * th) / s) + b * (np.sin(u * th) / s)
+    n = np.linalg.norm(q)
+    return q / n if n else np.array((0.0, 0.0, 0.0, 1.0))
+
+
+def _sample(times, values, t, path, interp):
+    if len(times) == 0:
+        return None
+    if interp == 'CUBICSPLINE':
+        # Three values per key (in-tangent, value, out-tangent). Taking the
+        # middle one is a linear approximation, and saying so beats pretending.
+        values = values[1::3]
+    i = int(np.searchsorted(times, t, side='right')) - 1
+    if i < 0:
+        return values[0]
+    if i >= len(times) - 1:
+        return values[len(values) - 1]
+    span = times[i + 1] - times[i]
+    u = 0.0 if span <= 0 else float((t - times[i]) / span)
+    if interp == 'STEP':
+        return values[i]
+    if path == 'rotation':
+        return _slerp(values[i], values[i + 1], u)
+    return values[i] + (values[i + 1] - values[i]) * u
+
+
+def _trs_matrix(t, q, s):
+    x, y, z, w = q
+    R = np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                  [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                  [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+    m = np.eye(4)
+    m[:3, :3] = R * np.asarray(s)[None, :]
+    m[:3, 3] = t
+    return m
+
+
+def pose_glb(rig, mesh, clip, t, anim=None):
+    """(positions, normals) for the mesh at time t.
+
+    `clip` is an index into the file's own animations; `anim` is a standalone
+    .anim from load_anim, bound to the skeleton BY JOINT NAME. The second path
+    is what lets one clip library drive 88 different characters - they share a
+    skeleton, so a name is all the correspondence needed, and nothing about the
+    clip is specific to the model it was authored on.
+
+    Returns the bind pose unchanged when the file has no skin, so a .glb whose
+    animation moves whole nodes rather than joints still previews rather than
+    raising.
+    """
+    local = [_trs_matrix(*r) for r in rig['rest']]
+    if anim is not None:
+        by_name = anim_sample(anim, t)
+        for i, n in enumerate(rig['nodes']):
+            hit = by_name.get((n.get('name') or '').lower())
+            if hit is None:
+                continue          # joint the clip does not touch: keep the rest pose
+            tr, q = hit
+            local[i] = _trs_matrix(tr, q, rig['rest'][i][2])
+    elif clip is not None:
+        pose = {i: list(r) for i, r in enumerate(rig['rest'])}
+        for node, path, times, values, interp in _clip_channels(rig, clip):
+            v = _sample(times, values, t, path, interp)
+            if v is None:
+                continue
+            pose[node][{'translation': 0, 'rotation': 1, 'scale': 2}[path]] = v
+        for i, r in pose.items():
+            local[i] = _trs_matrix(*r)
+
+    world, parent = {}, rig['parent']
+
+    def resolve(i, guard=0):
+        if i in world:
+            return world[i]
+        p = parent.get(i)
+        # A cycle cannot happen in a valid file, but a truncated one is a hang
+        # rather than an error without this.
+        m = local[i] if p is None or guard > 256 else resolve(p, guard + 1) @ local[i]
+        world[i] = m
+        return m
+
+    V, N = mesh[0].astype(np.float64), mesh[2].astype(np.float64)
+    if not rig['joints'] or rig['ibm'] is None or len(V) != rig['vertex_count']:
+        return mesh[0], mesh[2]
+
+    skin = np.stack([resolve(n) @ rig['ibm'][k] for k, n in enumerate(rig['joints'])])
+    JI, JW = rig['joint_index'], rig['joint_weight']
+    out = np.zeros_like(V)
+    nrm = np.zeros_like(N)
+    for k in range(JI.shape[1]):
+        w = JW[:, k]
+        if not np.any(w):
+            continue
+        m = skin[np.clip(JI[:, k], 0, len(skin) - 1)]
+        out += w[:, None] * (np.einsum('vij,vj->vi', m[:, :3, :3], V) + m[:, :3, 3])
+        nrm += w[:, None] * np.einsum('vij,vj->vi', m[:, :3, :3], N)
+    ln = np.linalg.norm(nrm, axis=1, keepdims=True)
+    nrm = np.divide(nrm, ln, out=np.zeros_like(nrm), where=ln > 1e-9)
+    return out.astype(np.float32), nrm.astype(np.float32)
 
 
 # glTF PBR slot -> the name this tool uses, so HD2 lines up with the other
@@ -504,6 +1111,19 @@ def glb_materials(path):
                 start = v.get('byteOffset', 0)
                 img = Image.open(io.BytesIO(blob[start: start + v['byteLength']]))
                 img.load()
+            elif src.get('uri'):
+                # An image BESIDE the file, not inside it. mercs_gltf.py writes
+                # these: embedding 4,643 PNGs into every character would have
+                # duplicated the whole texture library per model. Resolved
+                # relative to the .glb, as the spec says, and percent-decoded
+                # because a URI is not a path.
+                from urllib.parse import unquote
+                uri = src['uri']
+                if not uri.startswith('data:'):
+                    p = (Path(path).parent / unquote(uri)).resolve()
+                    if p.exists():
+                        img = Image.open(p)
+                        img.load()
         except Exception:
             img = None
         cache[idx] = img
@@ -576,13 +1196,27 @@ def guess_map_role(im):
 LIGHT_DIR = np.array([0.35, 0.60, -0.72], np.float32)   # camera sits on -z
 
 
+def default_flip_v(path):
+    """Whether V should be flipped for this file, before any manual override.
+
+    Only OBJ is ambiguous. glTF SPECIFIES the origin as top-left, so a .glb
+    needs no flip and applying the OBJ one turns a face upside down - which is
+    exactly what happened to Mercenaries' characters the moment their textures
+    started resolving. Same model, same texture, exported both ways: the .obj
+    (which stores 1-v) and the .glb (which stores v) only agree when the flip is
+    applied to one and not the other.
+    """
+    return not str(path).lower().endswith('.glb')
+
+
 def _uv_row(v, height, flip_v=True):
     """Texture row for a V coordinate.
 
-    Which way up V runs is genuinely ambiguous for this library. OBJ puts the
-    origin bottom-left, Unreal puts it top-left, and xcom_convert.py's --flip-v is
-    opt-in, so the exported files may carry either. xcom_parcel_render.py assumes
-    the flip, which is why that is the default here.
+    Which way up V runs is genuinely ambiguous for an OBJ from this library. OBJ
+    puts the origin bottom-left, Unreal puts it top-left, and xcom_convert.py's
+    --flip-v is opt-in, so the exported files may carry either.
+    xcom_parcel_render.py assumes the flip, which is why that is the default
+    here - see default_flip_v for the formats where it is not a guess.
 
     It is not a cosmetic choice: XCOM's emissive mask sits in a band at the very
     bottom of the MSK, and under one convention a given mesh reaches it while
@@ -590,6 +1224,309 @@ def _uv_row(v, height, flip_v=True):
     """
     vv = v % 1.0
     return np.clip((1.0 - vv if flip_v else vv) * (height - 1), 0, height - 1).astype(np.int32)
+
+
+# --------------------------------------------------------------------------
+# GPU renderer
+# --------------------------------------------------------------------------
+#
+# The numpy rasteriser is a Python loop over triangles at roughly 60 us each, so
+# its cost is the TRIANGLE COUNT and not the resolution: 3,216 triangles is
+# 0.20 s a frame and a 7,077-triangle interior is 0.93 s. Nothing tunable fixes
+# that shape, which is why every interactive path used to swap to scattered
+# samples and lose the texture and the surface detail with it.
+#
+# So: draw it on the GPU, where a few thousand triangles is free, and keep one
+# renderer for moving and settled frames. moderngl is an OPTIONAL import -- the
+# numpy path stays as the fallback, so the tool still runs on numpy and Pillow
+# alone, just slower and grainy while moving.
+#
+# The projection maths below is copied from render_mesh deliberately, constant
+# for constant, so swapping renderer does not move the camera. The same is true
+# of the shading (0.18 + 0.82 * |n . LIGHT_DIR| off the GEOMETRIC normal) and of
+# the two-pass alpha rule: opaque texels write depth, translucent ones draw
+# without writing it, or a rotor-blur quad punches a hole through the fuselage.
+
+_GPU = {'ctx': None, 'prog': None, 'fbo': {}, 'tex': {}, 'tried': False,
+        'error': None}
+_ANIM_INDEX = {}                 # directory -> [(name, path, joint names)]
+
+
+def gpu_status():
+    """(available, message). Called by the UI to decide which path to take."""
+    if _GPU['ctx'] is not None:
+        return True, _GPU['error'] or 'gpu'
+    return False, _GPU['error'] or 'not initialised'
+
+
+def gpu_init():
+    """Create the offscreen context once. Returns True if the GPU path is live.
+
+    Failure is expected and survivable -- a machine with no GL driver, a remote
+    session, moderngl not installed -- so the reason is recorded and the caller
+    falls back rather than the tool refusing to start.
+
+    THREAD AFFINITY. A GL context belongs to the thread that made it, so this
+    and every render_gpu call must happen on one thread - the Tk thread, here.
+    The mesh loader deliberately does NOT touch it: it parses on a worker and
+    hands the arrays back, and the drawing happens after that on the main
+    thread. Creating the context in the worker would work exactly once and then
+    fail on every redraw.
+    """
+    if _GPU['tried']:
+        return _GPU['ctx'] is not None
+    _GPU['tried'] = True
+    try:
+        import moderngl
+    except ImportError:
+        _GPU['error'] = 'moderngl not installed (pip install moderngl)'
+        return False
+    try:
+        ctx = moderngl.create_standalone_context(require=330)
+        prog = ctx.program(
+            vertex_shader='''
+                #version 330
+                in vec3 in_pos;
+                in vec3 in_nrm;
+                in vec2 in_uv;
+                out vec3 v_nrm;
+                out vec2 v_uv;
+                uniform mat3 u_rot;
+                uniform vec3 u_centre;
+                uniform vec3 u_cam;
+                uniform vec2 u_pan;
+                uniform float u_scale, u_zscale, u_m, u_size, u_zoom, u_fl,
+                              u_persp, u_far;
+                void main() {
+                    vec3 p = u_persp > 0.5 ? u_rot * (in_pos - u_cam)
+                                           : u_rot * in_pos;
+                    float sx, sy, z;
+                    if (u_persp > 0.5) {
+                        sx = u_size * 0.5 + u_fl * p.x / p.z;
+                        sy = u_size * 0.5 - u_fl * p.y / p.z;
+                        z  = clamp(p.z / max(u_far, 1.0), -0.999, 0.999);
+                    } else {
+                        sx = (p.x - u_centre.x) / u_scale * 2.0 * u_m
+                           + u_size * 0.5 + u_pan.x * u_zoom;
+                        sy = u_size * 0.5
+                           - (p.y - u_centre.y) / u_scale * 2.0 * u_m
+                           + u_pan.y * u_zoom;
+                        // Depth uses the mesh's own Z extent, not the X/Y one
+                        // the framing is fitted to: a wide flat mesh seen edge
+                        // on has a Z range far larger than u_scale, and reusing
+                        // it clips the model in half at the near plane.
+                        z  = clamp((p.z - u_centre.z) / u_zscale, -0.999, 0.999);
+                    }
+                    v_nrm = in_nrm;
+                    v_uv = in_uv;
+                    gl_Position = vec4(sx / u_size * 2.0 - 1.0,
+                                       1.0 - sy / u_size * 2.0, z, 1.0);
+                }
+            ''',
+            fragment_shader='''
+                #version 330
+                in vec3 v_nrm;
+                in vec2 v_uv;
+                out vec4 f_col;
+                uniform sampler2D u_tex;
+                uniform int u_mode;          // 0 flat, 1 normals, 2 textured
+                uniform int u_pass;          // 0 opaque, 1 translucent
+                uniform int u_flip_v;
+                uniform vec3 u_light;
+                void main() {
+                    // v_nrm is the GEOMETRIC face normal, computed on the CPU
+                    // and given to all three corners, so this is flat shading
+                    // without needing a flat qualifier. abs() shades two-sided:
+                    // a flipped winding should read as lit, not as a black hole.
+                    vec3 n = normalize(v_nrm);
+                    float lam = abs(dot(n, u_light));
+                    vec3 col = vec3(0.18 + 0.82 * lam);
+                    float a = 1.0;
+                    if (u_mode == 1) {
+                        col = n * 0.5 + 0.5;
+                    } else if (u_mode == 2) {
+                        vec2 uv = vec2(fract(v_uv.x),
+                                       u_flip_v == 1 ? 1.0 - fract(v_uv.y)
+                                                     : fract(v_uv.y));
+                        vec4 t = texture(u_tex, uv);
+                        col = t.rgb * (0.55 + 0.45 * (0.18 + 0.82 * lam));
+                        a = t.a;
+                    }
+                    // Two passes rather than one threshold - see the note above
+                    // render_gpu. 0.02 and 0.95 are render_mesh's own cutoffs.
+                    if (a <= 0.02) discard;
+                    if (u_pass == 0 && a < 0.95) discard;
+                    if (u_pass == 1 && a >= 0.95) discard;
+                    f_col = vec4(col, a);
+                }
+            ''')
+        _GPU['ctx'], _GPU['prog'] = ctx, prog
+        _GPU['error'] = ctx.info.get('GL_RENDERER', 'gpu')
+        return True
+    except Exception as e:                       # any driver or context failure
+        _GPU['error'] = '%s: %s' % (type(e).__name__, e)
+        return False
+
+
+def _gpu_fbo(size):
+    ctx = _GPU['ctx']
+    if size not in _GPU['fbo']:
+        # 4x MSAA, then resolved on read: the numpy path has no antialiasing at
+        # all and its edges crawl, which is worse on a moving frame than on a
+        # still one.
+        colour = ctx.renderbuffer((size, size), 4, samples=4)
+        depth = ctx.depth_renderbuffer((size, size), samples=4)
+        ms = ctx.framebuffer(color_attachments=[colour], depth_attachment=depth)
+        plain = ctx.simple_framebuffer((size, size), 4)
+        _GPU['fbo'][size] = (ms, plain)
+    return _GPU['fbo'][size]
+
+
+def _gpu_texture(im):
+    """Upload a PIL image once and keep it, keyed by identity."""
+    ctx = _GPU['ctx']
+    key = id(im)
+    if key not in _GPU['tex']:
+        if len(_GPU['tex']) > 64:                # bounded, not a leak
+            for k in list(_GPU['tex'])[:32]:
+                _GPU['tex'].pop(k).release()
+        rgba = im.convert('RGBA')
+        t = ctx.texture(rgba.size, 4, rgba.tobytes())
+        t.build_mipmaps()
+        t.anisotropy = 8.0
+        _GPU['tex'][key] = t
+    return _GPU['tex'][key]
+
+
+def render_gpu(mesh, size=512, yaw=35.0, pitch=20.0, mode='flat',
+               texture=None, zoom=1.0, pan=(0.0, 0.0), flip_v=True,
+               tex_by_mat=None, camera=None, **_ignored):
+    """render_mesh's picture, drawn by the GPU. Returns None if unavailable.
+
+    Returning None rather than raising lets the caller treat "no GPU here" as a
+    fallback rather than an error path, which is what it is.
+    """
+    if not gpu_init():
+        return None
+    import moderngl
+    ctx = _GPU['ctx']
+    prog = _GPU['prog']
+
+    V, T, N, F = mesh[0], mesh[1], mesh[2], mesh[3]
+    tri_mat = mesh[4] if len(mesh) > 4 else np.zeros(len(F), np.int32)
+    if len(V) == 0 or len(F) == 0:
+        return Image.new('RGB', (size, size), (0, 0, 0))
+
+    p = V[F[:, :, 0]].astype(np.float32)             # (n,3,3) triangle corners
+    rot = _view_rotation(yaw, pitch) if camera is None else \
+        _view_rotation(camera.get('yaw', 0.0), camera.get('pitch', 0.0))
+
+    persp = camera is not None
+    cam = np.zeros(3, np.float32)
+    fl = far = 0.0
+    centre = np.zeros(3, np.float32)
+    scale = zscale = 1.0
+    if persp:
+        cam = np.asarray(camera.get('pos', (0, 0, 0)), np.float32)
+        far = float(camera.get('far', 0.0))
+        near = float(camera.get('near', 0.25))
+        q = (p - cam) @ rot.T
+        # Same near/far rejection as the numpy path. The GPU could clip properly,
+        # but keeping the same triangles keeps the two renderers comparable.
+        keep = (q[:, :, 2] > near).all(axis=1)
+        if far > 0:
+            keep &= q[:, :, 2].min(axis=1) < far
+        if not keep.any():
+            return Image.new('RGB', (size, size), (0, 0, 0))
+        F, tri_mat, p = F[keep], tri_mat[keep], p[keep]
+        fl = (size * 0.5) / np.tan(np.radians(float(camera.get('fov', 70.0))) * 0.5)
+        far = max(far, float(q[:, :, 2].max())) if far > 0 else float(q[:, :, 2].max())
+    else:
+        q = p @ rot.T
+        lo, hi = q.reshape(-1, 3).min(0), q.reshape(-1, 3).max(0)
+        centre = ((lo + hi) / 2.0).astype(np.float32)
+        scale = float((hi - lo)[:2].max()) or 1.0
+        zscale = max(float(hi[2] - lo[2]), scale) or 1.0
+
+    # Geometric face normal per triangle, replicated to its corners: the shader
+    # shades exactly what render_mesh shades.
+    e1, e2 = p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]
+    fn = np.cross(e1, e2)
+    ln = np.linalg.norm(fn, axis=1, keepdims=True)
+    fn = (fn / np.where(ln == 0, 1, ln)).astype(np.float32)
+
+    uv = (T[F[:, :, 1]] if len(T) > 1 else np.zeros((len(F), 3, 2), np.float32))
+    want_tex = mode in ('textured', 'lit', 'emissive') and (texture is not None
+                                                            or tex_by_mat)
+    gl_mode = 1 if mode == 'normals' else (2 if want_tex else 0)
+
+    # One draw per texture: triangles are grouped by material so a mesh made of
+    # many textured segments needs a handful of draws, not one per triangle.
+    groups = []
+    if gl_mode == 2 and tex_by_mat:
+        order = np.argsort(tri_mat, kind='stable')
+        p, fn, uv, tri_mat = p[order], fn[order], uv[order], tri_mat[order]
+        bounds = np.flatnonzero(np.diff(tri_mat)) + 1
+        for a, b in zip(np.r_[0, bounds], np.r_[bounds, len(tri_mat)]):
+            groups.append((int(a), int(b), tex_by_mat.get(int(tri_mat[a]))))
+    else:
+        groups.append((0, len(p), texture if gl_mode == 2 else None))
+
+    verts = np.empty((len(p) * 3, 8), np.float32)
+    verts[:, 0:3] = p.reshape(-1, 3)
+    verts[:, 3:6] = np.repeat(fn, 3, axis=0)
+    verts[:, 6:8] = uv.reshape(-1, 2)
+    vbo = ctx.buffer(verts.tobytes())
+    vao = ctx.vertex_array(prog, [(vbo, '3f 3f 2f', 'in_pos', 'in_nrm', 'in_uv')])
+
+    ms, plain = _gpu_fbo(size)
+    ms.use()
+    ctx.clear(0.0, 0.0, 0.0, 1.0)
+    ctx.enable(moderngl.DEPTH_TEST)
+    ctx.disable(moderngl.CULL_FACE)              # two-sided, like the numpy path
+    prog['u_rot'].write(np.ascontiguousarray(rot.T, np.float32).tobytes())
+    prog['u_centre'].value = tuple(float(c) for c in centre)
+    prog['u_cam'].value = tuple(float(c) for c in cam)
+    prog['u_pan'].value = (float(pan[0]), float(pan[1]))
+    prog['u_scale'].value = float(scale)
+    prog['u_zscale'].value = float(zscale)
+    prog['u_m'].value = float(size * 0.44 * zoom)
+    prog['u_size'].value = float(size)
+    prog['u_zoom'].value = float(zoom)
+    prog['u_fl'].value = float(fl)
+    prog['u_persp'].value = 1.0 if persp else 0.0
+    prog['u_far'].value = float(far)
+    prog['u_mode'].value = gl_mode
+    prog['u_flip_v'].value = 1 if flip_v else 0
+    prog['u_light'].value = tuple(float(c) for c in LIGHT_DIR)
+
+    for pass_i in (0, 1):
+        prog['u_pass'].value = pass_i
+        ctx.depth_mask = (pass_i == 0)
+        if pass_i == 1:
+            ctx.enable(moderngl.BLEND)
+            ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+        for a, b, im in groups:
+            if b <= a:
+                continue
+            if gl_mode == 2:
+                if im is None:
+                    continue
+                _gpu_texture(im).use(0)
+                prog['u_tex'].value = 0
+            vao.render(moderngl.TRIANGLES, vertices=(b - a) * 3, first=a * 3)
+    ctx.disable(moderngl.BLEND)
+    ctx.depth_mask = True
+
+    ctx.copy_framebuffer(plain, ms)              # resolve the MSAA samples
+    # GL's framebuffer origin is bottom-left and PIL's is top-left, so the
+    # read comes back upside down. Flipping here rather than in the projection
+    # keeps the vertex shader's arithmetic identical to render_mesh's.
+    img = Image.frombytes('RGBA', (size, size), plain.read(components=4))
+    img = img.transpose(Image.FLIP_TOP_BOTTOM)
+    vao.release()
+    vbo.release()
+    return img.convert('RGB')
 
 
 def _view_rotation(yaw, pitch):
@@ -600,7 +1537,7 @@ def _view_rotation(yaw, pitch):
 
 
 def render_points(mesh, size=512, yaw=35.0, pitch=20.0, zoom=1.0, pan=(0.0, 0.0),
-                  texture=None, budget=500000, seed=0):
+                  texture=None, budget=500000, seed=0, camera=None):
     """Surface splat, for use while the camera is moving.
 
     The triangle rasteriser is a Python loop over faces and costs roughly 60us per
@@ -620,16 +1557,52 @@ def render_points(mesh, size=512, yaw=35.0, pitch=20.0, zoom=1.0, pan=(0.0, 0.0)
     if len(V) == 0 or len(F) == 0:
         return Image.fromarray((img * 255).astype(np.uint8))
 
-    p = V[F[:, :, 0]] @ _view_rotation(yaw, pitch).T
-    flat = p.reshape(-1, 3)
-    lo, hi = flat.min(0), flat.max(0)
-    centre = (lo + hi) / 2.0
-    scale = float((hi - lo)[:2].max()) or 1.0
-    m = size * 0.44 * float(zoom)
+    if camera is not None:
+        # Same perspective camera as render_mesh, so flying gets the vectorised
+        # renderer too. Without this, moving in fly mode falls back to the
+        # per-face loop and runs at about three frames a second on an assembled
+        # world; the splat path is numpy end to end and is the only reason the
+        # orbit view is interactive at all.
+        cam = np.asarray(camera.get('pos', (0.0, 0.0, 0.0)), np.float32)
+        near = float(camera.get('near', 0.25))
+        far = float(camera.get('far', 0.0))
 
-    sx = (p[:, :, 0] - centre[0]) / scale * 2 * m + size / 2 + pan[0] * zoom
-    sy = size / 2 - (p[:, :, 1] - centre[1]) / scale * 2 * m + pan[1] * zoom
-    sz = p[:, :, 2]
+        # Cull in WORLD space first, before the rotation. Culling after the
+        # transform still pays to rotate every triangle in the scene, and on an
+        # assembled world that fixed cost is the frame - sample budget and
+        # resolution barely move it. One vertex per triangle is enough for a
+        # coarse reject; the exact near/far test still runs afterwards.
+        idx = F[:, 0, 0]
+        if far > 0:
+            d = V[idx] - cam
+            rough = (d * d).sum(1) < (far + 64.0) ** 2
+            if not rough.any():
+                return Image.fromarray((img * 255).astype(np.uint8))
+            F = F[rough]
+
+        p = (V[F[:, :, 0]] - cam) @ _view_rotation(camera.get('yaw', 0.0),
+                                                   camera.get('pitch', 0.0)).T
+        keep = (p[:, :, 2] > near).all(axis=1)
+        if far > 0:
+            keep &= p[:, :, 2].min(axis=1) < far
+        if not keep.any():
+            return Image.fromarray((img * 255).astype(np.uint8))
+        F, p = F[keep], p[keep]
+        fl = (size * 0.5) / np.tan(np.radians(float(camera.get('fov', 70.0))) * 0.5)
+        sx = size / 2 + fl * p[:, :, 0] / p[:, :, 2]
+        sy = size / 2 - fl * p[:, :, 1] / p[:, :, 2]
+        sz = p[:, :, 2]
+    else:
+        p = V[F[:, :, 0]] @ _view_rotation(yaw, pitch).T
+        flat = p.reshape(-1, 3)
+        lo, hi = flat.min(0), flat.max(0)
+        centre = (lo + hi) / 2.0
+        scale = float((hi - lo)[:2].max()) or 1.0
+        m = size * 0.44 * float(zoom)
+
+        sx = (p[:, :, 0] - centre[0]) / scale * 2 * m + size / 2 + pan[0] * zoom
+        sy = size / 2 - (p[:, :, 1] - centre[1]) / scale * 2 * m + pan[1] * zoom
+        sz = p[:, :, 2]
 
     # Samples proportional to screen area, so coverage is even across the model.
     area = 0.5 * np.abs((sx[:, 1] - sx[:, 0]) * (sy[:, 2] - sy[:, 0]) -
@@ -692,11 +1665,17 @@ def render_points(mesh, size=512, yaw=35.0, pitch=20.0, zoom=1.0, pan=(0.0, 0.0)
 
 def render_mesh(mesh, size=512, yaw=35.0, pitch=20.0, mode='flat',
                 texture=None, max_tris=60000, zoom=1.0, pan=(0.0, 0.0),
-                spec_texture=None, emis_texture=None, flip_v=True, tex_by_mat=None):
+                spec_texture=None, emis_texture=None, flip_v=True, tex_by_mat=None,
+                camera=None):
     """Rasterise a mesh to a PIL image. No GPU, no lighting rig.
 
-    Orthographic on purpose: it keeps proportions readable and makes two meshes
-    visually comparable, which perspective does not.
+    Orthographic by default and on purpose: it keeps proportions readable and
+    makes two meshes visually comparable, which perspective does not.
+
+    Pass `camera` -- {'pos': (x,y,z), 'yaw':, 'pitch':, 'fov':, 'near':} -- for a
+    free-fly perspective view instead. That exists for terrain and assembled
+    worlds, where fitting a bounding box to the frame is useless: a 4 km map
+    reduces to a smudge, and the only way to read it is to stand in it.
     """
     V, T, N, F = mesh[0], mesh[1], mesh[2], mesh[3]
     tri_mat = mesh[4] if len(mesh) > 4 else np.zeros(len(F), np.int32)
@@ -711,30 +1690,77 @@ def render_mesh(mesh, size=512, yaw=35.0, pitch=20.0, mode='flat',
         F = F[keep_idx]
         tri_mat = tri_mat[keep_idx]
 
-    p = V[F[:, :, 0]]                                    # (n,3,3) triangle corners
+    def _rot(yaw_deg, pitch_deg):
+        ry, rx = np.radians(yaw_deg), np.radians(pitch_deg)
+        cy, sy = np.cos(ry), np.sin(ry)
+        cx, sx = np.cos(rx), np.sin(rx)
+        return np.array([[cy, 0, -sy], [sx * sy, cx, sx * cy],
+                         [cx * sy, -sx, cx * cy]], np.float32)
 
-    ry, rx = np.radians(yaw), np.radians(pitch)
-    cy, sy = np.cos(ry), np.sin(ry)
-    cx, sx = np.cos(rx), np.sin(rx)
-    rot = np.array([[cy, 0, -sy], [sx * sy, cx, sx * cy], [cx * sy, -sx, cx * cy]], np.float32)
-    p = p @ rot.T
+    if camera is not None:
+        # FREE-FLY PERSPECTIVE. The orbit path below frames a bounding box,
+        # which is right for one object and useless for a 4 km terrain: the
+        # whole map collapses to a smudge and there is no way to stand in it.
+        # Here the camera has a position and looks where it is pointed, and
+        # distant geometry actually gets smaller.
+        cam = np.asarray(camera.get('pos', (0.0, 0.0, 0.0)), np.float32)
+        near = float(camera.get('near', 0.25))
+        far = float(camera.get('far', 0.0))
+        # Coarse world-space reject before the rotation - see render_points for
+        # why the order matters. Transforming the whole scene and culling after
+        # costs the same whatever the cull distance is.
+        if far > 0:
+            d = V[F[:, 0, 0]] - cam
+            rough = (d * d).sum(1) < (far + 64.0) ** 2
+            if not rough.any():
+                return Image.fromarray((np.clip(img, 0, 1) * 255).astype(np.uint8))
+            F, tri_mat = F[rough], tri_mat[rough]
+        p = (V[F[:, :, 0]] - cam) @ _rot(camera.get('yaw', 0.0),
+                                         camera.get('pitch', 0.0)).T
+        # Triangles crossing the near plane are dropped rather than clipped.
+        # Clipping properly means splitting them, which this rasteriser has no
+        # machinery for; dropping costs a sliver at the very edge of view.
+        keep = (p[:, :, 2] > near).all(axis=1)
+        # A far cull is not a quality setting here, it is the difference between
+        # a viewable scene and a frozen window: the rasteriser is a Python loop
+        # at ~60 us a face, so 172,000 triangles is ten seconds whatever they
+        # are. This test is vectorised and runs BEFORE that loop, so culling is
+        # nearly free and the loop only sees what is close enough to matter.
+        #
+        # It is also what the game did. There are no LOD meshes on disc; instead
+        # every modl carries distance thresholds in its INFO - 80/180/1000 m on
+        # 412 models, and -1 (never cull) on 902 of them.
+        if far > 0:
+            keep &= p[:, :, 2].min(axis=1) < far
+        if not keep.any():
+            return Image.fromarray((np.clip(img, 0, 1) * 255).astype(np.uint8))
+        F, tri_mat, p = F[keep], tri_mat[keep], p[keep]
+        fl = (size * 0.5) / np.tan(np.radians(float(camera.get('fov', 70.0))) * 0.5)
+        sx_ = size / 2 + fl * p[:, :, 0] / p[:, :, 2]
+        sy_ = size / 2 - fl * p[:, :, 1] / p[:, :, 2]
+        depth = p[:, :, 2]
+    else:
+        p = V[F[:, :, 0]]                                # (n,3,3) triangle corners
 
-    lo, hi = p.reshape(-1, 3).min(0), p.reshape(-1, 3).max(0)
-    centre = (lo + hi) / 2.0
-    scale = float((hi - lo)[:2].max())
-    if scale <= 0:
-        scale = 1.0
-    # Zoom and pan are applied after the fit-to-frame, which keeps "framed by
-    # default" true for every mesh regardless of its authored scale.
-    #
-    # Pan is held in zoom-1 pixels and scaled by zoom here, rather than being a
-    # raw screen offset. A raw offset does not shrink when you zoom out, so a pan
-    # set while zoomed in walks the model off the canvas as you pull back and the
-    # mesh appears to vanish.
-    m = size * 0.44 * float(zoom)
-    sx_ = (p[:, :, 0] - centre[0]) / scale * 2 * m + size / 2 + pan[0] * zoom
-    sy_ = size / 2 - (p[:, :, 1] - centre[1]) / scale * 2 * m + pan[1] * zoom
-    depth = p[:, :, 2]
+        rot = _rot(yaw, pitch)
+        p = p @ rot.T
+
+        lo, hi = p.reshape(-1, 3).min(0), p.reshape(-1, 3).max(0)
+        centre = (lo + hi) / 2.0
+        scale = float((hi - lo)[:2].max())
+        if scale <= 0:
+            scale = 1.0
+        # Zoom and pan are applied after the fit-to-frame, which keeps "framed by
+        # default" true for every mesh regardless of its authored scale.
+        #
+        # Pan is held in zoom-1 pixels and scaled by zoom here, rather than being
+        # a raw screen offset. A raw offset does not shrink when you zoom out, so
+        # a pan set while zoomed in walks the model off the canvas as you pull
+        # back and the mesh appears to vanish.
+        m = size * 0.44 * float(zoom)
+        sx_ = (p[:, :, 0] - centre[0]) / scale * 2 * m + size / 2 + pan[0] * zoom
+        sy_ = size / 2 - (p[:, :, 1] - centre[1]) / scale * 2 * m + pan[1] * zoom
+        depth = p[:, :, 2]
 
     # Geometric normals: the file's own normals may be absent or wrong, and the
     # face normal is what the flat shading wants anyway.
@@ -762,11 +1788,13 @@ def render_mesh(mesh, size=512, yaw=35.0, pitch=20.0, mode='flat',
     mat_tex = None
     if tex_by_mat and mode in ('textured', 'lit') and len(T) > 1:
         uv = T[F[:, :, 1]]
-        mat_tex = {k: np.asarray(v.convert('RGB'), np.float32) / 255.0
+        # RGBA, not RGB: the alpha channel is what lets a cutout texture -- rotor
+        # blur, foliage, chain-link -- read as its shape instead of a black quad.
+        mat_tex = {k: np.asarray(v.convert('RGBA'), np.float32) / 255.0
                    for k, v in tex_by_mat.items() if v is not None}
     elif mode in ('textured', 'lit', 'emissive') and texture is not None and len(T) > 1:
         uv = T[F[:, :, 1]]
-        tex = np.asarray(texture.convert('RGB'), np.float32) / 255.0
+        tex = np.asarray(texture.convert('RGBA'), np.float32) / 255.0
         # 'lit' adds a highlight driven by the spec map, which is the only way to
         # see what that map does to the surface rather than just what it looks
         # like flat. Face normals are flat-shaded, so the highlight is faceted --
@@ -837,30 +1865,55 @@ def render_mesh(mesh, size=512, yaw=35.0, pitch=20.0, mode='flat',
         z = w0 * depth[i, 0] + w1 * depth[i, 1] + w2 * depth[i, 2]
         sub = zbuf[miny:maxy, minx:maxx]
         write = inside & (z < sub)
-        if not write.any():
-            continue                      # occluded: draw nothing
-        sub[write] = z[write]
 
-        if uv is not None:
+        # The texture is sampled BEFORE the depth write, so a transparent texel
+        # can be discarded without leaving its depth behind. Doing it the other
+        # way round - write depth, then discard - punches invisible holes
+        # through whatever is behind, which is exactly what a rotor-blur quad or
+        # a chain-link fence would do to the rest of the model.
+        u = v = ui = vi = tex_i = None
+        alpha = None
+        if uv is not None and write.any():
             u = w0 * uv[i, 0, 0] + w1 * uv[i, 1, 0] + w2 * uv[i, 2, 0]
             v = w0 * uv[i, 0, 1] + w1 * uv[i, 1, 1] + w2 * uv[i, 2, 1]
             tex_i = tex if mat_tex is None else mat_tex.get(int(tri_mat[i]))
+            if tex_i is not None:
+                tw, th = tex_i.shape[1], tex_i.shape[0]
+                ui = np.clip((u % 1.0) * (tw - 1), 0, tw - 1).astype(np.int32)
+                vi = _uv_row(v, th, flip_v)
+                if tex_i.shape[2] == 4:
+                    alpha = tex_i[vi, ui, 3]
+                    # Only near-zero texels are dropped outright. A hard cutout
+                    # at 0.5 is wrong for soft art: a rotor blur is a GRADIENT,
+                    # mostly half-transparent rather than fully so, and a
+                    # threshold keeps all of it and draws a solid square.
+                    write = write & (alpha > 0.02)
+        if not write.any():
+            continue                      # occluded, or entirely transparent
+
+        # Depth is written only where the surface is essentially opaque. A
+        # half-transparent texel must not occlude what is behind it, or the
+        # blur disc stamps a hole through the fuselage.
+        if alpha is None:
+            sub[write] = z[write]
+        else:
+            solid = write & (alpha >= 0.95)
+            sub[solid] = z[solid]
+
+        if uv is not None:
             if tex_i is None:
                 px = np.broadcast_to(col[i], (maxy - miny, maxx - minx, 3))
                 tile = img[miny:maxy, minx:maxx]
                 tile[write] = px[write]
                 continue
             tex = tex_i
-            tw, th = tex.shape[1], tex.shape[0]
-            ui = np.clip((u % 1.0) * (tw - 1), 0, tw - 1).astype(np.int32)
-            vi = _uv_row(v, th, flip_v)
             shade = abs(float(fn[i] @ LIGHT_DIR))
-            px = tex[vi, ui] * (0.55 + 0.45 * shade)
+            px = tex[vi, ui, :3] * (0.55 + 0.45 * shade)
             if emis is not None:
                 eh, ew = emis.shape[:2]
                 ei = _uv_row(v, eh, flip_v)
                 ej = np.clip((u % 1.0) * (ew - 1), 0, ew - 1).astype(np.int32)
-                glow = emis[ei, ej][..., None] * tex[vi, ui]
+                glow = emis[ei, ej][..., None] * tex[vi, ui, :3]
                 # Emissive is unlit by definition: add it on top of the shaded
                 # albedo rather than letting the lambert term dim it.
                 px = glow * 1.7 if mode == 'emissive' else px + glow * 1.4
@@ -873,7 +1926,17 @@ def render_mesh(mesh, size=512, yaw=35.0, pitch=20.0, mode='flat',
             px = np.broadcast_to(col[i], (maxy - miny, maxx - minx, 3))
 
         tile = img[miny:maxy, minx:maxx]
-        tile[write] = px[write] if px.ndim == 3 else px
+        if alpha is not None and px.ndim == 3:
+            # Blend rather than replace. Triangles are not sorted back to front,
+            # so overlapping transparent surfaces can composite in the wrong
+            # order - acceptable here because the alternative is a black square
+            # where the art is a soft gradient, and the common case is one
+            # transparent quad over an opaque hull.
+            a3 = alpha[..., None]
+            blended = tile * (1.0 - a3) + px * a3
+            tile[write] = blended[write]
+        else:
+            tile[write] = px[write] if px.ndim == 3 else px
         img[miny:maxy, minx:maxx] = tile
 
     return Image.fromarray((np.clip(img, 0, 1) * 255).astype(np.uint8))
@@ -970,7 +2033,8 @@ def main():
     ap.add_argument('--list', action='store_true', help='per-library counts')
     ap.add_argument('--find')
     ap.add_argument('--lib', choices=sorted(LIBRARIES))
-    ap.add_argument('--kind', choices=['mesh', 'material', 'texture', 'guitexture', 'other'])
+    ap.add_argument('--kind', choices=['mesh', 'scene', 'terrain', 'material',
+                                       'texture', 'guitexture', 'other'])
     ap.add_argument('--role', choices=['diffuse', 'normal', 'specular', 'mask', 'misc', 'other'],
                     help='texture role, read off the filename')
     ap.add_argument('--material', choices=['linked', 'embedded', 'none'],
@@ -983,20 +2047,55 @@ def main():
     ap.add_argument('--yaw', type=float, default=35.0)
     ap.add_argument('--pitch', type=float, default=20.0)
     ap.add_argument('--mode', default='flat', choices=['flat', 'normals', 'textured'])
+    ap.add_argument('--fly', metavar='X,Y,Z',
+                    help='free-fly camera at this position instead of orbiting')
+    ap.add_argument('--fov', type=float, default=70.0)
+    ap.add_argument('--far', type=float, default=0.0,
+                    help='cull geometry beyond this distance (metres); 0 = no cull')
     ap.add_argument('--refresh', action='store_true', help='rebuild the catalogue')
+    ap.add_argument('--flip-v', dest='flip_v', default=None,
+                    action=argparse.BooleanOptionalAction,
+                    help='override the V flip; defaults per format, see '
+                         'default_flip_v')
+    ap.add_argument('--gpu', default=None, action=argparse.BooleanOptionalAction,
+                    help='force the GPU renderer on or off (default: use it '
+                         'when moderngl is importable)')
     a = ap.parse_args()
 
     if a.render:
         mesh = load_mesh(a.render)
         tex = None
+        tex_by_mat = None
         if a.mode == 'textured':
-            mats = xcom_material(a.render)
-            if mats and mats.get('diffuse'):
-                tex = load_texture(mats['diffuse'])
-        img = render_mesh(mesh, size=max(a.size, 512), yaw=a.yaw, pitch=a.pitch,
-                          mode=a.mode, texture=tex)
+            # Per-material first, so a mesh made of many textured segments
+            # renders correctly rather than wearing one sheet all over. Falls
+            # back to XCOM's single-diffuse link when the mesh declares none.
+            mats, _ = mesh_materials(a.render)
+            tex_by_mat = {i: m['diffuse'] for i, m in enumerate(mats) if m.get('diffuse')}
+            if not tex_by_mat:
+                tex_by_mat = None
+                xm = xcom_material(a.render)
+                if xm and xm.get('diffuse'):
+                    tex = load_texture(xm['diffuse'])
+        cam = None
+        if a.fly:
+            cam = {'pos': tuple(float(v) for v in a.fly.split(',')),
+                   'yaw': a.yaw, 'pitch': a.pitch, 'fov': a.fov, 'far': a.far}
+        flip = a.flip_v if a.flip_v is not None else default_flip_v(a.render)
+        img = None
+        if a.gpu is not False and a.mode in ('flat', 'normals', 'textured'):
+            img = render_gpu(mesh, size=max(a.size, 512), yaw=a.yaw,
+                             pitch=a.pitch, mode=a.mode, texture=tex,
+                             tex_by_mat=tex_by_mat, camera=cam, flip_v=flip)
+        if img is None:
+            img = render_mesh(mesh, size=max(a.size, 512), yaw=a.yaw, pitch=a.pitch,
+                              mode=a.mode, texture=tex, tex_by_mat=tex_by_mat,
+                              camera=cam, flip_v=flip,
+                              max_tris=400000 if cam else 60000)
         img.save(a.out)
-        print(f'{len(mesh[0])} verts, {len(mesh[3])} tris -> {a.out}')
+        print(f'{len(mesh[0])} verts, {len(mesh[3])} tris'
+              f'{f", {len(tex_by_mat)} textured materials" if tex_by_mat else ""}'
+              f' -> {a.out}')
         return
 
     rows = load_catalog(a.refresh)

@@ -19,33 +19,53 @@
  *   so much as DUPLICATION — two names for the same four floats, converted back
  *   and forth at every boundary for no gain.
  *
- *   RESOURCE HANDLES — Texture2D, Shader, Mesh, Material, RenderTexture2D,
- *   Font. THESE ARE RAYLIB'S AND STAY RAYLIB'S, in interfaces and all. They are
- *   handles to GPU and asset objects, they are only meaningful to code that
- *   already links raylib, and every one of them lives behind a pass that would
- *   have to be REWRITTEN for another backend anyway.
+ *   RESOURCE HANDLES — a texture, a shader, a mesh, a render target. THESE ARE
+ *   THE RHI's, and raylib's spelling of them must not appear in an interface
+ *   either. See cromwell/rhi/Handles.hpp. This rule REVERSED in August 2026 and
+ *   the old one is reproduced below, because it is the more tempting answer and
+ *   it needs refuting rather than deleting.
  *
- * ================= WHY WRAPPING THE HANDLES WOULD NOT HELP =================
+ * ============ THE RULE THAT USED TO BE HERE, AND WHY IT WAS WRONG ==========
  *
- * IT IS WORTH BEING HONEST ABOUT THIS, because "abstract the renderer" sounds
- * like insurance and mostly is not. A `cromwell::Texture` wrapping a
- * `Texture2D` changes the type in a signature; it does not change that the
- * shadow pass, the tone map, the decal projector and the PBR shader are written
- * against GL through rlgl. Swapping raylib means reimplementing those passes,
- * and the cost of that is the passes, not the typedefs. A wrapper layer would
- * add indirection to every one of them today in exchange for saving a rename on
- * a day that may not come.
+ * This file used to say: "Texture2D, Shader, Mesh, Material, RenderTexture2D,
+ * Font — THESE ARE RAYLIB'S AND STAY RAYLIB'S, in interfaces and all", on the
+ * argument that a `cromwell::Texture` wrapping a `Texture2D` only changes a
+ * type in a signature and does not change that the shadow pass, the tone map,
+ * the decal projector and the PBR shader are written against GL through rlgl.
+ * Swapping raylib means reimplementing those passes; the cost is the passes,
+ * not the typedefs.
  *
- * So the seam is DECLARED rather than abstracted. `Camera::toRaylib()`,
- * `toRaylib(Vec3)` and this file are the crossing points; a port replaces the
- * passes behind them, and everything above — the simulation, the traces, the
- * camera model, the UI geometry, the entity system — never mentioned raylib and
- * does not move.
+ * EVERY SENTENCE OF THAT IS TRUE AND THE CONCLUSION DOES NOT FOLLOW.
+ *
+ * The passes being the cost is the argument FOR the interface, not against it.
+ * With the passes written against IRenderDevice, two backends COEXIST and one
+ * is chosen at startup. With them written against rlgl, a second backend means
+ * rewriting the first in place, and there is no point in that process where the
+ * tree builds and runs on both. The first is a port. The second is a rolling
+ * outage, and it has to be lived through once per platform.
+ *
+ * It also silently assumed ONE target. cromwell ships to Windows and Linux
+ * (GL 4.3), to macOS — where GL is deprecated, capped at 4.1, and has none of
+ * the compute cromwell/gpu/compute already uses — and to consoles, whose APIs
+ * are explicit, proprietary, and whose headers cannot be committed to this
+ * repository at all. "Reimplement the passes" is not a one-off cost against
+ * that list. It is a cost per platform, forever, paid in the place a bug is
+ * most expensive to find.
+ *
+ * The old rule was also, in fairness, self-fulfilling: it is only true that a
+ * wrapper "adds indirection for nothing" while the passes are still GL. Once
+ * they are not, the handle types are what let one pass serve four backends.
  *
  * WHAT TO DO WHEN YOU ADD SOMETHING. If it is four floats, use the engine's
- * type. If it is a GPU object, raylib's is fine and belongs behind a pass. If
- * you find yourself converting a value type in both directions inside one
- * function, the interface above it has the wrong type on it.
+ * type. If it is a GPU object, use the RHI's handle — and if the thing you are
+ * adding needs a raylib type in its signature to work, that is the signal it
+ * belongs behind IRenderDevice rather than in front of it. If you find yourself
+ * converting a value type in both directions inside one function, the interface
+ * above it has the wrong type on it.
+ *
+ * WHAT THIS FILE IS NOW FOR: the value types only, and the shrinking set of
+ * call sites still talking to raylib directly while the passes migrate. It is
+ * scaffolding with a demolition date, not a permanent seam.
  *
  * ===========================================================================
  *

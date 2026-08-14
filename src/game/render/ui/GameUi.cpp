@@ -70,23 +70,28 @@ void GameUi::setup()
                  kFontFamily, root, displayScale());
 }
 
-ui::UiContext& GameUi::begin()
+/* THE FRAME'S UI INPUT ARRIVES, it is not sampled here.
+ *
+ * This used to read GetMousePosition, IsMouseButtonDown, GetTime, GetFrameTime
+ * and GetScreenWidth itself — six raylib calls in a class whose job is drawing
+ * widgets. Two things were wrong with that beyond the dependency: it sampled a
+ * SECOND time, so a click could be seen by the UI and not by the world (or the
+ * reverse) on the frame the button changed under it; and it read the raw
+ * pointer in logical units while everything else works in surface pixels,
+ * which on a high-DPI display puts every hit test out by the scale factor.
+ *
+ * One sample, taken in the loop where the platform's services live, shared by
+ * the world and the interface. See Application::run. */
+ui::UiContext& GameUi::begin(const ui::UiInput& input)
 {
     setup();
 
-    ui::UiInput input;
-    const Vector2 mouse = GetMousePosition();
-    input.mousePosition = { mouse.x, mouse.y };
-    input.mouseDown = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
-    input.mousePressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-    input.mouseReleased = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
-    input.timeSeconds = GetTime();
-    input.deltaSeconds = GetFrameTime();
-    input.screenSize = { static_cast<float>(GetScreenWidth()),
-                         static_cast<float>(GetScreenHeight()) };
-    input.scale = displayScale();
+    /* The one field the caller cannot know: the font atlas's own scale, which
+     * belongs to this class. Everything else travels in. */
+    ui::UiInput scaled = input;
+    scaled.scale = displayScale();
 
-    context_->beginFrame(input);
+    context_->beginFrame(scaled);
     return *context_;
 }
 
@@ -96,7 +101,13 @@ void GameUi::end()
         return;
     }
     context_->endFrame();
-    painter_.draw(context_->drawList(), fonts_);
+
+    /* THROUGH WHOEVER IS PAINTING. The draw list is the same either way — that
+     * is the whole reason the kit narrowed to one painter — so the widgets
+     * above here cannot tell which renderer is running. */
+    cromwell::ui::IUiPainter& painter =
+        external_ != nullptr ? *external_ : static_cast<cromwell::ui::IUiPainter&>(painter_);
+    painter.draw(context_->drawList(), fonts_);
 }
 
 }  // namespace game

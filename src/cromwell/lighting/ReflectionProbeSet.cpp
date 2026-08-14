@@ -16,6 +16,7 @@
 #include "cromwell/gpu/ShaderLibrary.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <vector>
 
 namespace cromwell {
