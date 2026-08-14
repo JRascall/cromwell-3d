@@ -2,6 +2,11 @@
 
 namespace game {
 
+void UnitRoster::simulate(float fixedSeconds)
+{
+    for (std::unique_ptr<Unit>& unit : units_) unit->simulate(fixedSeconds);
+}
+
 void UnitRoster::tick(float deltaSeconds)
 {
     for (std::unique_ptr<Unit>& unit : units_) unit->tick(deltaSeconds);

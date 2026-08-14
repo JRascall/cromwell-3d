@@ -48,8 +48,8 @@ layout(location = 3) in vec4 vShadowClip;
 
 layout(location = 0) out vec4 outRadiance;
 
-#include "rhi/scene_block.glsl"
-#include "rhi/material_block.glsl"
+#include "rhi/include/scene_block.glsl"
+#include "rhi/include/material_block.glsl"
 
 layout(binding = 1) uniform sampler2D uOcclusion;
 layout(binding = 2) uniform sampler2D uShadowDepth;
@@ -59,11 +59,11 @@ layout(binding = 2) uniform sampler2D uShadowDepth;
  * rhi/transmission.fs.glsl. */
 layout(binding = 3) uniform sampler2D uShadowTransmission;
 
-#include "rhi/shadow.glsl"
-#include "rhi/sky.glsl"
+#include "rhi/include/shadow.glsl"
+#include "rhi/include/sky.glsl"
 
 /* After rhi/sky.glsl, which it calls. It adds a samplerCubeArray at slot 4. */
-#include "rhi/probes.glsl"
+#include "rhi/include/probes.glsl"
 
 void main()
 {

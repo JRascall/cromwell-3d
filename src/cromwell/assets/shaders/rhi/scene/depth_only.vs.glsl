@@ -46,7 +46,7 @@ layout(std140, binding = 1) uniform PassBlock {
 /* THE OBJECT'S TRANSFORM, and a depth pass needs it as much as a lit one does -
  * a body that casts its shadow from the wrong place is the same bug as a body
  * DRAWN in the wrong place, and harder to see. */
-#include "rhi/object.glsl"
+#include "rhi/include/object.glsl"
 
 void main()
 {

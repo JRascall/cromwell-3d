@@ -229,6 +229,91 @@ The general rule this leaves: a clip that bakes static should have 1–2 keys pe
 curve in its `.anim`. If a *movement verb* — run, reload, shoot, death — turns
 up in `ba_animcheck.py`'s static list, that is a regression, not authoring.
 
+### FBX out: `unity/BaExport.cs`
+
+```
+Unity.exe -batchmode -quit -nographics -projectPath <proj> \
+          -executeMethod BaExport.Export -baOut D:/ba_extracted/fbx
+```
+
+One FBX per rig — mesh, skeleton, skinning and every clip as a take. Resumable:
+an existing output is skipped. Needs `Mesh/` and `Material/` copied into the
+project alongside the folders the bake needs, or you get skeletons with no
+geometry.
+
+**The export runs in Unity rather than Blender on purpose.** The baked tracks
+are Unity local transforms: left-handed, Y up, against Unity's bone rest poses.
+Blender is right-handed Z up *and* its FBX importer rewrites bone rest
+orientations on the way in, so applying these by hand means composing an axis
+conversion with a per-bone rest-basis change and being wrong in a way that looks
+almost right. Unity already knows how to write an FBX.
+
+**The clips are rebuilt as legacy generic clips before export.** The FBX
+exporter takes its takes from an `Animation` or `Animator` component — hand it
+the originals and it writes the humanoid muscle curves straight into the FBX,
+which is the thing this whole exercise exists to escape. Legacy clips on an
+`Animation` component specifically, because they can be built in memory; an
+AnimatorController would mean thousands of `.anim` and `.controller` assets on
+disk for files nobody keeps. The `Animator` must be destroyed first, or the
+exporter sees both components and prefers the controller.
+
+**Two `ExportModelOptions` defaults are wrong here**, and only one of them says
+so:
+
+| option | default | why it matters |
+|---|---|---|
+| `ExportFormat` | `ASCII` | Blender refuses outright — "ASCII FBX files are not supported". Loud, harmless. |
+| `AnimateSkinnedMesh` | `false` | **Silent.** Valid binary FBX, mesh, skeleton, all takes present — and no animation on the skinned mesh. |
+
+**The exporter leaks a native `FbxManager` per call** and kills the editor with
+an access violation inside `FbxManager_Create` at around 170 rigs. Nothing in
+the managed API exposes that lifetime, so it cannot be fixed here — the only
+lever is process lifetime, which is why `ba_anim.ps1` relaunches Unity until a
+pass adds no files rather than running one long export.
+
+**Names are assigned over the rig set, up front, before any export.** Three
+rigs share a prefab basename — `RU_Morskaya_MG`, `US_MARINE_Radio`,
+`US_MARINE_rifle` — and naming output after the prefab alone silently drops the
+second of each pair as "already exported". Within a group the first by asset
+path keeps the plain name; the rest get an 8-hex FNV-1a suffix of their path.
+Deterministic, so a re-run assigns identical names and resume-by-existence stays
+honest.
+
+The filtering to rigs has to happen *before* that grouping. There are 1,410
+prefabs and 422 rigs; let a non-rig into the grouping and it takes the plain
+name and pushes a real rig onto a hashed one — and since nothing ever exports
+the non-rig, the plain name simply never appears. Getting this wrong once left
+three orphan files that a directory listing could not distinguish from real
+output. `BaExport.Manifest` exists for exactly that: it emits the authoritative
+name→prefab mapping without exporting, so what is on disk can be diffed against
+what should be.
+
+Note that **FBX files cannot be compared byte-wise**. Two exports of the same
+object differ — creation timestamp, file GUID, and freshly generated object IDs
+throughout, so even skipping the header does not help. To prove an orphan was a
+duplicate, recompute the FNV-1a of the prefab path and match it against the
+suffix.
+
+### Verified
+
+`US_Ranger_Rifle1`, imported into Blender: binary, 18.5 MB, 3 LOD meshes at
+32,343 verts, a 39-bone armature with vertex groups intact, and **22 takes
+totalling 641,190 keyframes** — `Kneel_reload` at 399 fcurves / 42,693 keys over
+107 frames. 399 is 39 bones × 10 channels plus 9 for the root, which is the
+arithmetic working out.
+
+| rig | meshes | bones | takes | keyframes |
+|---|---|---|---|---|
+| `US_Ranger_Rifle1` | 3 LODs, 32,343 v | 39 | 22 | 641,190 |
+| `RU_VDV_rifle` | 3 LODs, 21,746 v | 39 | 22 | 641,190 |
+| `RU_2S7M_Malka` | 24, 92,666 v | 156 | 56 | 1,524,144 |
+
+`RU_VDV_rifle` is the check that matters: it is one of the rigs AssetStudio
+exported with 21 correctly-named, entirely empty takes.
+
+**Final: 422 FBX, 4.99 GB — one per rig, zero missing, zero stale**, diffed
+against the manifest rather than counted.
+
 **The output tree exceeds `MAX_PATH`.** Container paths like
 `Assets/Prefabs/GUI/GameMenu/Settings/Property Labels Description/...` plus the
 `@pathID` suffix push past 260 characters, and anything not opted into long

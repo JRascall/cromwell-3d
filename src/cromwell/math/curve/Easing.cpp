@@ -1,4 +1,4 @@
-#include "cromwell/math/Easing.hpp"
+#include "cromwell/math/curve/Easing.hpp"
 
 #include <algorithm>
 #include <cmath>

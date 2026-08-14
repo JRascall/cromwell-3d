@@ -60,7 +60,7 @@
 #pragma once
 
 #include "cromwell/ui/core/UiText.hpp"
-#include "cromwell/ui/paint/GlyphAtlas.hpp"
+#include "cromwell/ui/text/GlyphAtlas.hpp"
 
 #include "raylib.h"
 
@@ -143,6 +143,60 @@ public:
      * display scale multiplies them, so the two numbers cannot be assumed
      * equal. */
     static float rasterSize(float sizePx);
+
+    /* THE GAP BETWEEN GLYPHS, IN WHOLE PIXELS, and the one place it is decided.
+     *
+     * ============ WHY THIS IS A FUNCTION AND NOT A MULTIPLICATION ===========
+     *
+     * Letter spacing is authored fractionally — this kit tracks at 1.8, 2.1 and
+     * 2.4 — and it is DRAWN rounded, because FreeType's advances are integers
+     * and accumulating a fraction makes the gaps alternate: 2.4 comes out as
+     * 3,2,3,2,3,2,2,3, which the eye reads as ragged rather than as tracking
+     * being 0.4 px off. That rounding is deliberate and is explained where the
+     * pen walks.
+     *
+     * THE BUG IT CAUSED was measuring with the fractional value and drawing
+     * with the rounded one. The two disagree by (n-1) x the rounding error, so
+     * a run drifts out of the box that was reserved for it — a little more with
+     * every character. It shows up as a highlighted label whose padding is
+     * visibly heavier on one side, and it flips sides depending on whether the
+     * style's tracking happens to round up or down:
+     *
+     *   VETERAN at 16 px, tracking 2.4 -> 2   drawn 2.4 px NARROWER over 7 chars
+     *   ALPHA   at  8 px, tracking 1.7 -> 2   drawn 1.3 px WIDER over 5 chars
+     *
+     * Both were measured off a screenshot before this existed. A caller cannot
+     * be expected to know the rounding, and a second copy of it would drift, so
+     * the layout and both painters ask HERE. */
+    static float trackingPx(const TextStyle& style);
+
+    /* WHERE A PAINTER PUTS THE TOP OF THE GLYPH BOX, given the top of the line
+     * box the layout placed. Both painters ask; neither computes it.
+     *
+     * ============ THE LINE BOX IS NOT WHAT THE EYE CENTRES ON ==============
+     *
+     * A line box is tall enough for ascenders AND descenders, because a
+     * paragraph needs both. The kit's chips and buttons are SHOUTED — all caps,
+     * no descenders anywhere in them — so centring the line box inside a plate
+     * leaves the reserved descender space as slack under the letters, and the
+     * text reads as sitting low. It is not subtle at small sizes, where the
+     * slack is a large share of the plate: measured on the gallery, a badge had
+     * five pixels above its letters and two below, and a chip eight and six.
+     *
+     * So this centres the CAP BAND — cap top to baseline, the ink an all-caps
+     * run actually occupies — and the padding above and below comes out equal.
+     * Lower-case text with descenders then hangs slightly below centre, which is
+     * correct: the eye centres on the body of the text, not on the extremes.
+     * This is the same trim CSS spells `leading-trim` and Figma calls vertical
+     * trim, and every UI toolkit that looks right does some version of it.
+     *
+     * IT IS A CONSTANT PER RUN, so a wrapped paragraph shifts as a block and its
+     * line spacing is untouched — this changes where text sits in its box, never
+     * how far apart two lines are.
+     *
+     * Falls back to centring the whole box when nothing rasterised, which is
+     * what this replaced. */
+    float runOriginY(float lineTopY, const TextStyle& style) const;
 
     /* THE ATLAS for this weight AT THIS SIZE — rasterising it if this is the
      * first time that pair has been asked for. Null when nothing could be

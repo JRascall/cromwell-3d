@@ -130,7 +130,7 @@ native hinting was unavailable, and native hinting was the answer.
 
 ## 4. Audit of ours
 
-`cromwell/ui/paint/UiFontSet.cpp` and `UiPainter.cpp`.
+`cromwell/ui/text/UiFontSet.cpp` and `UiPainter.cpp`.
 
 | Stage | Ours | Verdict |
 |---|---|---|

@@ -86,11 +86,16 @@ public:
 private:
     /* Sub-sections, in the order they appear. Split up because one function
      * that drew all of this would be four hundred lines of layout arithmetic
-     * and nobody would find anything in it. */
-    void drawLoaders(cromwell::ui::UiRect column);
-    void drawGauges(cromwell::ui::UiRect column);
-    void drawControls(cromwell::ui::UiRect column);
-    void drawPanels(cromwell::ui::UiRect column);
+     * and nobody would find anything in it.
+     *
+     * EACH RETURNS THE Y IT FINISHED AT, which the type specimen's band starts
+     * below. That used to be a hardcoded fraction of the content height, and it
+     * was fine while nothing below the columns was opaque — see the note at the
+     * call site for what broke when something was. */
+    float drawLoaders(cromwell::ui::UiRect column);
+    float drawGauges(cromwell::ui::UiRect column);
+    float drawControls(cromwell::ui::UiRect column);
+    float drawPanels(cromwell::ui::UiRect column);
 
     /* Badges pinned to world positions, to show that world-space UI here is
      * screen-space UI at a projected point — see cromwell/ui/paint/WorldAnchor.hpp. */

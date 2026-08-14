@@ -15,9 +15,9 @@ layout(location = 2) in vec4 inTangent;    /* declared for stride; unused here y
 layout(location = 3) in vec2 inTexCoord;   /* likewise, until materials land */
 layout(location = 4) in vec4 inColour;
 
-#include "rhi/scene_block.glsl"
+#include "rhi/include/scene_block.glsl"
 
-#include "rhi/object.glsl"
+#include "rhi/include/object.glsl"
 
 layout(location = 0) out vec3 vWorldPosition;
 layout(location = 1) out vec3 vNormal;

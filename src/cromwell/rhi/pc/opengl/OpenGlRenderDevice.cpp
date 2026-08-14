@@ -281,7 +281,8 @@ public:
     void setViewport(float x, float y, float width, float height) override;
     void setScissor(float x, float y, float width, float height) override;
     void setStencilReference(uint32_t value) override;
-    void draw(MeshHandle mesh, uint32_t instances) override;
+    void draw(MeshHandle mesh, uint32_t vertexCount, uint32_t firstVertex,
+              uint32_t instances) override;
     void drawIndexed(MeshHandle mesh, uint32_t indexCount,
                      uint32_t firstIndex, uint32_t instances) override;
     void drawFullscreen() override;
@@ -440,10 +441,22 @@ void OpenGlRenderDevice::Encoder::setStencilReference(uint32_t value)
     glStencilFunc(GL_ALWAYS, static_cast<int>(value), 0xFF);
 }
 
-void OpenGlRenderDevice::Encoder::draw(MeshHandle handle, uint32_t instances)
+void OpenGlRenderDevice::Encoder::draw(MeshHandle handle, uint32_t vertexCount,
+                                      uint32_t firstVertex, uint32_t instances)
 {
     const Mesh* mesh = device_.resolve(handle);
     if (mesh == nullptr || instances == 0) return;
+
+    /* ZERO MEANS THE WHOLE MESH, and a range past the end is clamped rather
+     * than passed on — glDrawArrays reading beyond the buffer is undefined, and
+     * the failure is a driver-dependent mixture of garbage triangles and
+     * nothing at all. */
+    const uint32_t available = mesh->indexed ? mesh->indexCount : mesh->vertexCount;
+    if (firstVertex >= available) return;
+
+    uint32_t count = vertexCount == 0 ? available : vertexCount;
+    if (firstVertex + count > available) count = available - firstVertex;
+    if (count == 0) return;
 
     /* WHOLE-MESH DRAW, indexed or not. `draw` is the call every pass makes;
      * whether the geometry carries indices was decided at creation and is not
@@ -452,14 +465,13 @@ void OpenGlRenderDevice::Encoder::draw(MeshHandle handle, uint32_t instances)
      * bound reads from address zero and the driver quietly discards it. */
     if (!mesh->indexed) {
         glBindVertexArray(mesh->vao);
-        glDrawArraysInstanced(translate(primitive_), 0,
-                              static_cast<int>(mesh->vertexCount),
-                              static_cast<int>(instances));
+        glDrawArraysInstanced(translate(primitive_), static_cast<int>(firstVertex),
+                              static_cast<int>(count), static_cast<int>(instances));
         glBindVertexArray(0);
         return;
     }
 
-    drawIndexed(handle, mesh->indexCount, 0, instances);
+    drawIndexed(handle, count, firstVertex, instances);
 }
 
 void OpenGlRenderDevice::Encoder::drawIndexed(MeshHandle handle, uint32_t indexCount,
@@ -1260,6 +1272,47 @@ void OpenGlRenderDevice::generateMips(TextureHandle handle)
     glBindTexture(texture->target, texture->name);
     glGenerateMipmap(texture->target);
     glBindTexture(texture->target, 0);
+}
+
+bool OpenGlRenderDevice::copyBackbufferToTexture(TextureHandle handle, uint32_t x, uint32_t y,
+                                                 uint32_t width, uint32_t height)
+{
+    /* REFUSED INSIDE A PASS rather than quietly working. It would work here —
+     * GL copies from whatever framebuffer is bound — and that is exactly the
+     * problem: the call would be written against this backend's permissiveness
+     * and fail on the three where an image copy inside a render pass is
+     * illegal. See IRenderDevice.hpp. */
+    if (inPass_) {
+        LOGGER.error("copyBackbufferToTexture: a pass is open - this is a "
+                     "between-passes operation on every backend");
+        return false;
+    }
+
+    Texture* texture = resolve(handle);
+    if (texture == nullptr || width == 0 || height == 0) return false;
+
+    if (texture->target != GL_TEXTURE_2D) {
+        LOGGER.error("copyBackbufferToTexture: the destination is not a plain 2D texture");
+        return false;
+    }
+    if (width > texture->width || height > texture->height) {
+        LOGGER.error("copyBackbufferToTexture: {}x{} does not fit a {}x{} destination",
+                     width, height, texture->width, texture->height);
+        return false;
+    }
+
+    /* THE DEFAULT FRAMEBUFFER'S BACK BUFFER — what endPass left bound, and what
+     * the frame is being drawn into. Stated rather than assumed: the read buffer
+     * is per-framebuffer state, and a previous pass reading from a colour
+     * attachment would otherwise decide where this copy comes from. */
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glReadBuffer(GL_BACK);
+
+    glBindTexture(GL_TEXTURE_2D, texture->name);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<int>(x), static_cast<int>(y),
+                        static_cast<int>(width), static_cast<int>(height));
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return true;
 }
 
 /* ---- passes --------------------------------------------------------------*/

@@ -45,7 +45,7 @@
  * its tint, and glass BEHIND one is discarded — because light already stopped
  * by a wall never reached the window to be tinted.
  */
-#include "rhi/material_block.glsl"
+#include "rhi/include/material_block.glsl"
 
 /* The sun's depth map, at its own full resolution. */
 layout(binding = 0) uniform sampler2D uShadowDepth;

@@ -4,6 +4,7 @@
 #include "cromwell/diag/Profile.hpp"
 #include "cromwell/geometry/MeshVertexBuffer.hpp"
 #include "cromwell/gpu/ShaderLibrary.hpp"
+#include "cromwell/debug/DebugDraw.hpp"
 #include "cromwell/render/IGeometrySource.hpp"
 #include "cromwell/rhi/IRenderDevice.hpp"
 
@@ -24,6 +25,46 @@ using namespace cromwell::rhi;
  * 64 MB at D32F. That is a lot for one buffer and it is the correct trade here:
  * a tactical game is read at a fixed, fairly close zoom, so there is no cascade
  * to spend it on and the single focused map does the whole job. */
+/* ---- the debug line vertex ----------------------------------------------
+ *
+ * Position and a packed colour, sixteen bytes. No normal, no UV: a debug
+ * segment is already in world space and there is nothing to light or sample.
+ * The struct is ScenePipeline::DebugVertex; only the stride is needed here, and
+ * the two are pinned together by the assert in ensureDebugCapacity. */
+constexpr uint32_t kDebugVertexStride = 16;
+
+VertexLayout debugLineLayout()
+{
+    VertexLayout layout;
+    layout.stride = kDebugVertexStride;
+    layout.attributeCount = 2;
+    layout.attributes[0] = { 0, 0,  VertexFormat::Float3 };
+    layout.attributes[1] = { 1, 12, VertexFormat::UByte4Normalised };
+    return layout;
+}
+
+/* PACKED LINEAR, NOT sRGB — and this is the opposite of what the raylib debug
+ * renderer does, for a reason worth stating.
+ *
+ * That one encodes to sRGB because it draws into an already tone-mapped frame.
+ * This draws into the LINEAR scene target, ahead of the resolve, so the value
+ * written has to be linear radiance and the filmic curve turns it back into the
+ * colour that was asked for. Encoding here would apply the curve twice and
+ * every debug colour would come out pale.
+ *
+ * Eight bits of a linear value crushes the darks, which for saturated debug
+ * primaries is invisible and for a dim grey line would not be. Debug colours
+ * are saturated primaries on purpose — see debugColour in DebugDraw.hpp. */
+std::uint32_t packLinear(const DebugColour& colour)
+{
+    const auto quantise = [](float value) {
+        const float clamped = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+        return static_cast<std::uint32_t>(clamped * 255.0f + 0.5f);
+    };
+    return quantise(colour.r) | (quantise(colour.g) << 8)
+         | (quantise(colour.b) << 16) | (quantise(colour.a) << 24);
+}
+
 constexpr uint32_t kShadowSize = 4096;
 
 /* HALF THE SHADOW MAP, and that is what pays for the extra channels.
@@ -455,8 +496,8 @@ bool ScenePipeline::initialise()
      * probes the asset roots and splices #include, which the new dialect still
      * uses. What it does NOT do here is compile: a device shader is the
      * device's to build. */
-    const std::string vertexSource   = ShaderLibrary::preprocess("rhi/depth_only.vs.glsl");
-    const std::string fragmentSource = ShaderLibrary::preprocess("rhi/depth_only.fs.glsl");
+    const std::string vertexSource   = ShaderLibrary::preprocess("rhi/scene/depth_only.vs.glsl");
+    const std::string fragmentSource = ShaderLibrary::preprocess("rhi/scene/depth_only.fs.glsl");
 
     if (vertexSource.empty() || fragmentSource.empty()) {
         LOGGER.error("ScenePipeline: rhi/depth_only shaders not found");
@@ -551,9 +592,9 @@ bool ScenePipeline::initialise()
      * NO CULLING, because a pane is a thin surface the sun may meet from either
      * side and both faces tint equally. */
     const std::string transmissionVertex =
-        ShaderLibrary::preprocess("rhi/transmission.vs.glsl");
+        ShaderLibrary::preprocess("rhi/scene/transmission.vs.glsl");
     const std::string transmissionFragment =
-        ShaderLibrary::preprocess("rhi/transmission.fs.glsl");
+        ShaderLibrary::preprocess("rhi/scene/transmission.fs.glsl");
 
     if (transmissionVertex.empty() || transmissionFragment.empty()) {
         LOGGER.error("ScenePipeline: rhi/transmission shaders not found");
@@ -590,8 +631,8 @@ bool ScenePipeline::initialise()
 
     /* ---- the depth prepass --------------------------------------------- */
 
-    const std::string prepassVertex   = ShaderLibrary::preprocess("rhi/prepass.vs.glsl");
-    const std::string prepassFragment = ShaderLibrary::preprocess("rhi/prepass.fs.glsl");
+    const std::string prepassVertex   = ShaderLibrary::preprocess("rhi/scene/prepass.vs.glsl");
+    const std::string prepassFragment = ShaderLibrary::preprocess("rhi/scene/prepass.fs.glsl");
 
     if (prepassVertex.empty() || prepassFragment.empty()) {
         LOGGER.error("ScenePipeline: rhi/prepass shaders not found");
@@ -642,7 +683,7 @@ bool ScenePipeline::initialise()
 
     /* ---- ambient occlusion ---------------------------------------------- */
 
-    const std::string occlusionSource = ShaderLibrary::preprocess("rhi/ssao.fs.glsl");
+    const std::string occlusionSource = ShaderLibrary::preprocess("rhi/post/ssao.fs.glsl");
     if (occlusionSource.empty()) {
         LOGGER.error("ScenePipeline: rhi/ssao.fs.glsl not found");
         return false;
@@ -695,7 +736,7 @@ void main()
 
     /* ---- and the blur that pays off its rotation ------------------------- */
 
-    const std::string blurSource = ShaderLibrary::preprocess("rhi/ssao_blur.fs.glsl");
+    const std::string blurSource = ShaderLibrary::preprocess("rhi/post/ssao_blur.fs.glsl");
     if (blurSource.empty()) {
         LOGGER.error("ScenePipeline: rhi/ssao_blur shader not found");
         return false;
@@ -713,7 +754,7 @@ void main()
 
     /* ---- the sky --------------------------------------------------------- */
 
-    const std::string skySource = ShaderLibrary::preprocess("rhi/sky.fs.glsl");
+    const std::string skySource = ShaderLibrary::preprocess("rhi/scene/sky.fs.glsl");
     if (skySource.empty()) {
         LOGGER.error("ScenePipeline: rhi/sky shader not found");
         return false;
@@ -811,8 +852,8 @@ void main()
 
     /* ---- the lit scene --------------------------------------------------- */
 
-    const std::string litVertex   = ShaderLibrary::preprocess("rhi/lit.vs.glsl");
-    const std::string litFragment = ShaderLibrary::preprocess("rhi/lit.fs.glsl");
+    const std::string litVertex   = ShaderLibrary::preprocess("rhi/scene/lit.vs.glsl");
+    const std::string litFragment = ShaderLibrary::preprocess("rhi/scene/lit.fs.glsl");
     if (litVertex.empty() || litFragment.empty()) {
         LOGGER.error("ScenePipeline: rhi/lit shaders not found");
         return false;
@@ -871,7 +912,7 @@ void main()
      * blending here would multiply the sky reflection by a 6% coverage and
      * erase the one cue that makes a pane read as glass rather than a hole. */
     const std::string transparentSource =
-        ShaderLibrary::preprocess("rhi/transparent.fs.glsl");
+        ShaderLibrary::preprocess("rhi/scene/transparent.fs.glsl");
     if (transparentSource.empty()) {
         LOGGER.error("ScenePipeline: rhi/transparent shader not found");
         return false;
@@ -894,6 +935,59 @@ void main()
     transparentPipeline_ = device_.createPipeline(transparent);
     if (!transparentPipeline_.valid()) return false;
     if (!litPipeline_.valid()) return false;
+
+    /* ---- debug lines, two pipelines over one buffer ----------------------
+     *
+     * NOT FATAL IF THEY FAIL. Every other pipeline here is the frame; these are
+     * a diagnostic, and a renderer that refused to start because a debug shader
+     * was missing would be one nobody could use to find out why. The draw is
+     * skipped and the log says so. */
+    const std::string debugVertex   = ShaderLibrary::preprocess("rhi/scene/debug_line.vs.glsl");
+    const std::string debugFragment = ShaderLibrary::preprocess("rhi/scene/debug_line.fs.glsl");
+
+    if (debugVertex.empty() || debugFragment.empty()) {
+        LOGGER.warn("ScenePipeline: rhi/scene/debug_line shaders not found - "
+                    "debug lines will not be drawn");
+    } else {
+        debugShader_ = device_.createShader("debug line", debugVertex.c_str(),
+                                            debugFragment.c_str());
+    }
+
+    if (debugShader_.valid()) {
+        PipelineDesc debug;
+        debug.name         = "debug line";
+        debug.shader       = debugShader_;
+        debug.vertexLayout = debugLineLayout();
+
+        debug.colourFormats[0] = TextureFormat::RGBA16F;   /* the scene target */
+        debug.colourCount      = 1;
+        debug.depthFormat      = TextureFormat::D32F;
+
+        debug.raster.primitive = PrimitiveType::Lines;
+        debug.raster.cull      = CullMode::None;
+
+        /* STRAIGHT ALPHA, so a caller can fade a line out. Nothing in the debug
+         * API asks for it yet; it costs nothing and its absence would be a
+         * surprise the first time someone passes a colour with an alpha. */
+        debug.blend = BlendState::alpha();
+
+        /* DEPTH TESTED, NEVER WRITTEN. A line that wrote depth would occlude the
+         * next one, and the twelve edges of a debug box would hide each other at
+         * every corner. */
+        debug.depth.test    = true;
+        debug.depth.write   = false;
+        debug.depth.compare = CompareFunc::LessEqual;
+
+        debugDepthPipeline_ = device_.createPipeline(debug);
+
+        debug.name       = "debug line xray";
+        debug.depth.test = false;
+
+        debugXrayPipeline_ = device_.createPipeline(debug);
+
+        if (!debugDepthPipeline_.valid() || !debugXrayPipeline_.valid())
+            LOGGER.warn("ScenePipeline: a debug line pipeline could not be built");
+    }
 
     /* ---- the probe capture's two pipelines -------------------------------
      *
@@ -955,7 +1049,7 @@ void main()
 
     /* ---- the resolve ----------------------------------------------------- */
 
-    const std::string resolveSource = ShaderLibrary::preprocess("rhi/tonemap.fs.glsl");
+    const std::string resolveSource = ShaderLibrary::preprocess("rhi/post/tonemap.fs.glsl");
     if (resolveSource.empty()) {
         LOGGER.error("ScenePipeline: rhi/tonemap.fs.glsl not found");
         return false;
@@ -1019,7 +1113,7 @@ void main()
      * A screen-space pass into one (probe, face, level) of the cube array. The
      * fullscreen vertex stage is shared with every other screen pass; the
      * fragment stage does the GGX convolution. */
-    const std::string prefilterSource = ShaderLibrary::preprocess("rhi/probe_prefilter.fs.glsl");
+    const std::string prefilterSource = ShaderLibrary::preprocess("rhi/scene/probe_prefilter.fs.glsl");
     if (prefilterSource.empty()) {
         LOGGER.error("ScenePipeline: rhi/probe_prefilter.fs.glsl not found");
         return false;
@@ -1928,6 +2022,11 @@ void ScenePipeline::render(const SceneFrame& frame, IGeometrySource& geometry)
      * solid. */
     drawTransparent(frame, geometry);
 
+    /* AFTER THE SCENE AND BEFORE THE RESOLVE. Debug geometry belongs over a
+     * finished frame, and it needs the scene's depth buffer, which the resolve
+     * is the end of. */
+    drawDebugLines(frame);
+
     drawResolve(frame);
 }
 
@@ -1975,6 +2074,123 @@ void ScenePipeline::drawTransparent(const SceneFrame& frame, IGeometrySource& ge
     encoder.bindUniformBuffer(2, materialBlock_);
 
     geometry.submit(encoder, GeometryPass::Transparent);
+
+    device_.endPass(encoder);
+}
+
+/* ---- debug lines ---------------------------------------------------------*/
+
+bool ScenePipeline::ensureDebugCapacity(uint32_t vertexCount)
+{
+    static_assert(sizeof(DebugVertex) == kDebugVertexStride,
+                  "debugLineLayout describes DebugVertex byte for byte");
+
+    if (vertexCount <= debugCapacity_ && debugMesh_.valid()) return true;
+
+    /* Grow with headroom, like the UI's buffers: a debug frame that gains a few
+     * segments as a trace lengthens should not recreate its buffer every frame
+     * on the way. */
+    const uint32_t wanted = std::max(vertexCount + vertexCount / 4u, 2048u);
+
+    if (debugMesh_.valid())     device_.destroy(debugMesh_);
+    if (debugVertices_.valid()) device_.destroy(debugVertices_);
+    debugMesh_ = {};
+
+    BufferDesc desc;
+    desc.name   = "debug lines";
+    desc.bytes  = static_cast<uint64_t>(wanted) * kDebugVertexStride;
+    desc.usage  = BufferUsageVertex;
+    desc.access = BufferAccess::CpuToGpuPerFrame;
+
+    debugVertices_ = device_.createBuffer(desc);
+    if (!debugVertices_.valid()) return false;
+
+    /* NON-INDEXED. Two vertices per segment with no sharing between them —
+     * an index buffer here would be 0,1,2,3… describing nothing. See
+     * IRenderDevice::createMesh, which takes an invalid index handle for
+     * exactly this case. */
+    debugMesh_ = device_.createMesh(debugLineLayout(), debugVertices_, wanted);
+    if (!debugMesh_.valid()) return false;
+
+    debugCapacity_ = wanted;
+    return true;
+}
+
+void ScenePipeline::drawDebugLines(const SceneFrame& frame)
+{
+    if (frame.debug == nullptr || frame.debug->empty()) return;
+    if (!sceneColour_.valid() || !sceneDepth_.valid()) return;
+    if (!debugDepthPipeline_.valid() || !debugXrayPipeline_.valid()) return;
+
+    CW_PROFILE_ZONE_N("debug lines");
+
+    /* BOTH PASSES BUILT INTO ONE BUFFER, depth-tested first so the x-ray range
+     * can be drawn second without a second upload. The two ranges are
+     * contiguous, so each is one draw. */
+    const std::vector<DebugSegment>& segments = frame.debug->segments();
+
+    debugScratch_.clear();
+    debugScratch_.reserve(segments.size() * 2);
+
+    const auto append = [&](const DebugSegment& segment) {
+        const std::uint32_t rgba = packLinear(segment.colour);
+        debugScratch_.push_back(DebugVertex{ segment.from.x, segment.from.y,
+                                             segment.from.z, rgba });
+        debugScratch_.push_back(DebugVertex{ segment.to.x, segment.to.y,
+                                             segment.to.z, rgba });
+    };
+
+    for (const DebugSegment& segment : segments) {
+        if (segment.depthTested) append(segment);
+    }
+    const uint32_t depthTestedVertices = static_cast<uint32_t>(debugScratch_.size());
+
+    for (const DebugSegment& segment : segments) {
+        if (!segment.depthTested) append(segment);
+    }
+    const uint32_t totalVertices = static_cast<uint32_t>(debugScratch_.size());
+    if (totalVertices == 0) return;
+
+    if (!ensureDebugCapacity(totalVertices)) return;
+
+    device_.updateBuffer(debugVertices_, debugScratch_.data(),
+                         static_cast<uint64_t>(totalVertices) * kDebugVertexStride, 0);
+
+    PassDesc pass;
+    pass.name = "debug lines";
+
+    pass.colours[0].texture = sceneColour_;
+    pass.colours[0].load    = LoadAction::Load;
+    pass.colours[0].store   = StoreAction::Store;
+    pass.colourCount = 1;
+
+    /* THE SCENE'S DEPTH, LOADED AND NOT WRITTEN. A debug line must not occlude
+     * the next one — twelve edges of a box would then hide each other at the
+     * corners — and it must not disturb anything reading depth afterwards. */
+    pass.hasDepth      = true;
+    pass.depth.texture = sceneDepth_;
+    pass.depth.load    = LoadAction::Load;
+    pass.depth.store   = StoreAction::Store;
+
+    ICommandEncoder& encoder = device_.beginPass(pass);
+
+    /* THE LIT PASS'S BLOCK, unchanged: the view projection and the exposure are
+     * the frame's, and the fragment stage divides the colour out of the latter
+     * — see rhi/scene/debug_line.fs.glsl. */
+    encoder.bindUniformBuffer(1, litBlock_);
+
+    /* TWO RANGES OF ONE BUFFER — which is what the vertex range on draw() was
+     * added for. The depth-tested segments were appended first, so they are
+     * [0, depthTestedVertices) and the x-ray ones are the rest. */
+    if (depthTestedVertices > 0) {
+        encoder.bindPipeline(debugDepthPipeline_);
+        encoder.draw(debugMesh_, depthTestedVertices, 0);
+    }
+
+    if (totalVertices > depthTestedVertices) {
+        encoder.bindPipeline(debugXrayPipeline_);
+        encoder.draw(debugMesh_, totalVertices - depthTestedVertices, depthTestedVertices);
+    }
 
     device_.endPass(encoder);
 }

@@ -111,6 +111,27 @@ public:
      * one by construction — see UiFontSet::rasterSize. */
     int sizePx() const { return sizePx_; }
 
+    /* ================= WHERE THE INK ACTUALLY SITS IN THE BOX ==============
+     *
+     * Both measured down from the TOP of the glyph box, which is what Glyph's
+     * offsetY is relative to and what a painter positions from.
+     *
+     * `baselinePx` is the ascender: every glyph sits on it. `capTopPx` is the
+     * top of a capital letter, taken from the rasterised 'H' rather than from
+     * the face's declared cap height — because it is the HINTED, integer pixel
+     * position that is wanted here, and a hinted 'H' does not land where the
+     * scaled design value says it should.
+     *
+     * WHAT THEY ARE FOR: centring text in a control. A line box is tall enough
+     * for ascenders AND descenders, and the kit's chips are SHOUTED — all caps,
+     * no descenders at all — so centring the line box leaves the reserved
+     * descender space as visible slack under the letters and the text reads as
+     * sitting low. Measured on this project's own gallery before this existed:
+     * a badge with 5 px above its letters and 2 px below, which is what "the
+     * padding is not equal" turned out to be. See UiFontSet::runOriginY. */
+    int baselinePx() const { return baseline_; }
+    int capTopPx() const { return capTop_; }
+
     /* Texels of empty space between packed glyphs. Only a consumer that has to
      * restate it to another library needs this — raylib's Font carries the
      * number — and it is exposed rather than assumed so the two cannot drift
@@ -136,6 +157,8 @@ private:
     int height_ = 0;
     int sizePx_ = 0;
     int padding_ = 0;
+    int baseline_ = 0;
+    int capTop_ = 0;
 
     std::vector<std::uint8_t> coverage_;
     Glyph                     glyphs_[kCodepointCount]{};

@@ -2,21 +2,33 @@
  *
  *   1. components are found by type, and absence is a null rather than a crash
  *   2. adding the same type twice replaces rather than duplicates
- *   3. tick reaches only the components that asked for it
- *   4. think fires on its interval, NOT every frame
- *   5. think is handed the REAL elapsed time, not the interval it asked for
- *   6. the interval is configurable, and takes effect live
- *   7. thinkers are staggered, so a squad built on one frame does not think
+ *   3. each pass reaches only the components that asked for it
+ *   4. the two clocks are separate: tick drives no simulation and vice versa
+ *   5. think fires on its interval, NOT every step
+ *   6. think is handed the elapsed SIMULATED time, exactly
+ *   7. the interval is configurable, and takes effect live
+ *   8. thinkers are staggered, so a squad built on one frame does not think
  *      in lockstep
- *   8. onDetach runs before the owner's memory goes
- *   9. destroy() flags for removal and fires onDestroyed exactly once
+ *   9. onDetach runs before the owner's memory goes
+ *  10. destroy() flags for removal and fires onDestroyed exactly once
+ *  11. the fixed step counts from elapsed TIME, not from frames
  *
- * Points 4-7 are the ones worth a test: think's accumulator is invisible from
- * the outside, and every failure mode of it (firing every frame, never firing,
+ * Points 5-8 are the ones worth a test: think's counter is invisible from the
+ * outside, and every failure mode of it (firing every step, never firing,
  * drifting, bunching) looks like "the AI feels wrong" rather than like a bug.
+ *
+ * Point 4 is the regression guard for the two-clock split. If think ever gets
+ * driven from tick() again, the simulation silently becomes frame-rate
+ * dependent and nothing else in the suite notices.
+ *
+ * Point 11 is the Fallout test, and it is the reason FixedTimestep exists: an
+ * engine that steps once per frame with a fixed step size runs the game faster
+ * on a faster machine. Feeding the same wall-clock second at two frame rates
+ * must produce the same number of steps.
  */
 #include "cromwell/entities/Entity.hpp"
 #include "cromwell/entities/EntityProps.hpp"
+#include "cromwell/entities/FixedTimestep.hpp"
 
 #include <cstdio>
 #include <vector>
@@ -39,10 +51,20 @@ struct Ticker : Component {
     void tick(float) override { ticks++; }
 };
 
+/* Runs on the fixed step, counts them. */
+struct Simulator : Component {
+    int   steps = 0;
+    float lastStep = 0.0f;
+    bool canEverSimulate() const override { return true; }
+    void simulate(float fixedSeconds) override { steps++; lastStep = fixedSeconds; }
+};
+
 /* Never asked for anything. */
 struct Inert : Component {
     int ticks = 0;
-    void tick(float) override { ticks++; }   /* must never be called */
+    int steps = 0;
+    void tick(float) override { ticks++; }          /* must never be called */
+    void simulate(float) override { steps++; }      /* nor this */
 };
 
 /* Thinks on the default 100ms. */
@@ -87,59 +109,83 @@ void addingTwiceReplaces()
           "a second component of the same type should replace the first");
 }
 
-void tickReachesOnlyTickers()
+void eachPassReachesOnlyItsOwn()
 {
     Entity entity;
-    Ticker& ticker = entity.addComponent<Ticker>();
-    Inert&  inert  = entity.addComponent<Inert>();
+    Ticker&    ticker    = entity.addComponent<Ticker>();
+    Simulator& simulator = entity.addComponent<Simulator>();
+    Inert&     inert     = entity.addComponent<Inert>();
 
     for (int i = 0; i < 5; i++) entity.tick(1.0f / 60.0f);
+    for (int i = 0; i < 7; i++) entity.simulate(1.0f / 60.0f);
 
     CHECK(ticker.ticks == 5, "ticker should have ticked 5 times, got %d", ticker.ticks);
+    CHECK(simulator.steps == 7, "simulator should have stepped 7 times, got %d",
+          simulator.steps);
     CHECK(inert.ticks == 0, "a component that never asked must not tick, got %d", inert.ticks);
+    CHECK(inert.steps == 0, "a component that never asked must not simulate, got %d",
+          inert.steps);
 }
 
-void thinkFiresOnIntervalNotEveryFrame()
+void theTwoClocksAreSeparate()
+{
+    /* THE REGRESSION GUARD FOR THE SPLIT. Presentation runs a different number
+     * of times on different machines, so anything the simulation depends on
+     * must not be reachable from it — and think, where the decisions live, is
+     * the one that was previously driven from tick. */
+    Entity entity;
+    Ticker&    ticker    = entity.addComponent<Ticker>();
+    Simulator& simulator = entity.addComponent<Simulator>();
+    Thinker&   thinker   = entity.addComponent<Thinker>();
+
+    for (int i = 0; i < 600; i++) entity.tick(1.0f / 60.0f);
+
+    CHECK(ticker.ticks == 600, "tick should reach tickers, got %d", ticker.ticks);
+    CHECK(simulator.steps == 0, "tick must not drive simulate, got %d", simulator.steps);
+    CHECK(thinker.thinks == 0, "tick must not drive think, got %d", thinker.thinks);
+
+    entity.simulate(1.0f / 60.0f);
+    CHECK(ticker.ticks == 600, "simulate must not drive tick, got %d", ticker.ticks);
+}
+
+void thinkFiresOnIntervalNotEveryStep()
 {
     Entity entity;
     Thinker& thinker = entity.addComponent<Thinker>();
 
-    /* One second at 60fps against a 100ms interval: ten thinks, not sixty.
+    /* One second of steps at 60 Hz against a 100ms interval: ten thinks, not
+     * sixty.
      *
      * The stagger does not change the COUNT, only where in the second the
      * thinks land — a phase of half an interval brings the first one forward
      * and pushes the eleventh past the end. The test is written against the
      * public surface for that reason: offsetThinkPhase is Entity's to call, so
      * a test that needed to reach it would be testing a seam nobody else has. */
-    for (int i = 0; i < 60; i++) entity.tick(1.0f / 60.0f);
+    for (int i = 0; i < 60; i++) entity.simulate(1.0f / 60.0f);
 
     CHECK(thinker.thinks == 10, "expected 10 thinks in a second at 100ms, got %d",
           thinker.thinks);
 }
 
-void thinkReceivesRealElapsedTime()
+void thinkReceivesElapsedSimulatedTime()
 {
     Entity entity;
     Thinker& thinker = entity.addComponent<Thinker>();
 
-    /* 1/60 does not divide 0.1 evenly, so the accumulator always overshoots.
-     * think() must report what actually elapsed, or anything integrating over
-     * it drifts. */
-    for (int i = 0; i < 60; i++) entity.tick(1.0f / 60.0f);
+    for (int i = 0; i < 60; i++) entity.simulate(1.0f / 60.0f);
 
-    CHECK(thinker.lastElapsed >= 0.1f,
-          "elapsed should be at least the interval, got %f", thinker.lastElapsed);
-    CHECK(thinker.lastElapsed < 0.13f,
-          "elapsed should be close to the interval, got %f", thinker.lastElapsed);
+    /* 100ms is exactly six steps at 60 Hz, so the elapsed time reported is
+     * exactly six steps' worth — every time, on every machine. It is worth
+     * asserting tightly: the value used to be whatever the frame rate happened
+     * to overshoot by, and code integrating over it (a cooldown, a move budget)
+     * inherited that jitter. */
+    CHECK(thinker.lastElapsed > 0.0999f && thinker.lastElapsed < 0.1001f,
+          "elapsed should be six steps of 1/60, got %f", thinker.lastElapsed);
 
-    /* No time may be lost: the reported elapsed times must sum to roughly the
-     * wall time that passed.
-     *
-     * The upper bound carries a tolerance because the wall time itself does:
-     * 1/60 is not representable in binary, and sixty of them sum to 1.00000008
-     * rather than 1.0. Asserting `<= 1.0f` fails by one ulp on arithmetic that
-     * is entirely correct. */
-    CHECK(thinker.totalElapsed > 0.95f && thinker.totalElapsed <= 1.001f,
+    /* No time may be lost: the reported elapsed times must sum to the second
+     * that passed. The tolerance is for the representation of 1/60, not for
+     * any slack in the schedule. */
+    CHECK(thinker.totalElapsed > 0.999f && thinker.totalElapsed <= 1.001f,
           "elapsed times should account for the second that passed, got %f",
           thinker.totalElapsed);
 }
@@ -150,7 +196,7 @@ void intervalIsConfigurable()
     Thinker& thinker = entity.addComponent<Thinker>();
     thinker.setThinkInterval(0.5f);   /* twice a second */
 
-    for (int i = 0; i < 60; i++) entity.tick(1.0f / 60.0f);
+    for (int i = 0; i < 60; i++) entity.simulate(1.0f / 60.0f);
 
     CHECK(thinker.thinks == 2, "at 500ms expected 2 thinks in a second, got %d",
           thinker.thinks);
@@ -162,21 +208,81 @@ void thinkersAreStaggered()
     Thinker& a = entity.addComponent<Thinker>();
 
     /* A second thinker on the same entity, same interval. If both started at
-     * zero they would fire on the same frame forever. */
+     * zero they would fire on the same step forever. */
     struct Thinker2 : Thinker {};
     Thinker2& b = entity.addComponent<Thinker2>();
 
-    int sameFrame = 0;
+    int sameStep = 0;
     for (int i = 0; i < 60; i++) {
         const int beforeA = a.thinks, beforeB = b.thinks;
-        entity.tick(1.0f / 60.0f);
-        if (a.thinks > beforeA && b.thinks > beforeB) sameFrame++;
+        entity.simulate(1.0f / 60.0f);
+        if (a.thinks > beforeA && b.thinks > beforeB) sameStep++;
     }
 
     CHECK(a.thinks > 0 && b.thinks > 0, "both thinkers should have run");
-    CHECK(sameFrame < a.thinks,
+    CHECK(sameStep < a.thinks,
           "thinkers should not fire together every time; %d of %d were shared",
-          sameFrame, a.thinks);
+          sameStep, a.thinks);
+}
+
+void stepsComeFromElapsedTimeNotFrames()
+{
+    /* THE FALLOUT TEST. One wall-clock second, delivered at two very different
+     * frame rates, must simulate the same amount of game. An engine that steps
+     * once per frame passes at 60 and runs at more than double speed at 144. */
+    const int rate = 60;
+
+    int stepsAt60 = 0;
+    FixedTimestep slow;
+    slow.withRate(rate);
+    for (int i = 0; i < 60; i++) stepsAt60 += slow.advance(1.0f / 60.0f);
+
+    int stepsAt144 = 0;
+    FixedTimestep fast;
+    fast.withRate(rate);
+    for (int i = 0; i < 144; i++) stepsAt144 += fast.advance(1.0f / 144.0f);
+
+    CHECK(stepsAt60 == 60, "a second at 60fps should be 60 steps, got %d", stepsAt60);
+    CHECK(stepsAt144 >= 59 && stepsAt144 <= 60,
+          "a second at 144fps should be the same second of game, got %d steps", stepsAt144);
+}
+
+void catchUpIsCapped()
+{
+    /* A ten-second stall must not demand six hundred steps, each of which makes
+     * the next frame later still. Past the cap the surplus is dropped and the
+     * game briefly runs slow, which is the survivable failure. */
+    FixedTimestep timestep;
+    timestep.withRate(60).withMaxCatchUp(0.25f);
+
+    const int steps = timestep.advance(10.0f);
+
+    CHECK(steps <= 15, "a ten second stall should be capped to the catch-up window, got %d",
+          steps);
+    CHECK(steps >= 14, "the cap should still deliver the window it allows, got %d", steps);
+}
+
+void blendReportsProgressThroughTheStep()
+{
+    /* Presentation blends with this when the step is coarser than the frame.
+     * Half a step banked and no step owed means halfway to the next one. */
+    FixedTimestep timestep;
+    timestep.withRate(60);
+
+    const int steps = timestep.advance(1.0f / 120.0f);
+
+    CHECK(steps == 0, "half a step is not a step, got %d", steps);
+    CHECK(timestep.blend() > 0.45f && timestep.blend() < 0.55f,
+          "blend should report about half a step, got %f", timestep.blend());
+}
+
+void rateIsRefusedRatherThanDividedByZero()
+{
+    FixedTimestep timestep;
+    timestep.withRate(0).withRate(-30);
+
+    CHECK(timestep.rate() == 60, "a non-positive rate must not be stored, got %d",
+          timestep.rate());
 }
 
 void destroyFiresOnceAndCallsBack()
@@ -275,11 +381,16 @@ int main()
 {
     componentsAreFoundByType();
     addingTwiceReplaces();
-    tickReachesOnlyTickers();
-    thinkFiresOnIntervalNotEveryFrame();
-    thinkReceivesRealElapsedTime();
+    eachPassReachesOnlyItsOwn();
+    theTwoClocksAreSeparate();
+    thinkFiresOnIntervalNotEveryStep();
+    thinkReceivesElapsedSimulatedTime();
     intervalIsConfigurable();
     thinkersAreStaggered();
+    stepsComeFromElapsedTimeNotFrames();
+    catchUpIsCapped();
+    blendReportsProgressThroughTheStep();
+    rateIsRefusedRatherThanDividedByZero();
     detachRunsBeforeDestruction();
     destroyFiresOnceAndCallsBack();
     componentCanBeRemoved();

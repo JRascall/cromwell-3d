@@ -14,7 +14,7 @@
  * centres its content without opening a window and looking.
  *
  * WEIGHTS, NOT FONT HANDLES. A widget asks for SemiBold at 16px; which file
- * that resolves to is the font library's problem (see ui/paint/UiFontSet.hpp).
+ * that resolves to is the font library's problem (see ui/text/UiFontSet.hpp).
  * The alternative — passing font objects through every widget signature — puts
  * a renderer type in the headless half's interface, which is the one thing the
  * split exists to prevent.

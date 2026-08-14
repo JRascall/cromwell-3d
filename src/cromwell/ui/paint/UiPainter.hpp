@@ -32,7 +32,7 @@
 
 #include "cromwell/ui/core/UiDrawList.hpp"
 #include "cromwell/ui/paint/IUiPainter.hpp"
-#include "cromwell/ui/paint/UiFontSet.hpp"
+#include "cromwell/ui/text/UiFontSet.hpp"
 
 namespace cromwell::ui {
 

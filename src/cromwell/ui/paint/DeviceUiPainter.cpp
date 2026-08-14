@@ -5,14 +5,14 @@
 #include "cromwell/gpu/ShaderLibrary.hpp"
 #include "cromwell/rhi/IRenderDevice.hpp"
 #include "cromwell/ui/core/UiDrawList.hpp"
-#include "cromwell/ui/paint/GlyphAtlas.hpp"
+#include "cromwell/ui/text/GlyphAtlas.hpp"
 
 /* RAYLIB ARRIVES THROUGH THIS, and only through this: UiFontSet still declares
  * a raylib Font for the painter it is being replaced by. Nothing below names
  * one — the text path here goes through GlyphAtlas, which is neutral by
  * construction — and the include stops being transitive the day UiPainter is
  * deleted at parity. */
-#include "cromwell/ui/paint/UiFontSet.hpp"
+#include "cromwell/ui/text/UiFontSet.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -44,24 +44,30 @@ VertexLayout uiLayout()
     return layout;
 }
 
-/* The glyph vertex: position, atlas UV, packed colour, twenty bytes. Same
- * reasoning as kVertexStride — stated once, beside the layout that depends on
- * it, and checked against the struct in ensureTextCapacity where the buffer is
- * sized. (The check lives in a member function because TextVertex is private,
- * which is where it belongs anyway: the assert and the allocation it protects
- * are the same line of reasoning.) */
-constexpr uint32_t kTextVertexStride = 20;
+/* The textured vertex: position, UV, packed colour, twenty bytes — shared by
+ * the glyph quads and the blur outlines. Same reasoning as kVertexStride —
+ * stated once, beside the layout that depends on it, and checked against the
+ * struct in ensureTexturedCapacity where the buffer is sized. (The check lives
+ * in a member function because TexturedVertex is private, which is where it
+ * belongs anyway: the assert and the allocation it protects are the same line
+ * of reasoning.) */
+constexpr uint32_t kTexturedVertexStride = 20;
 
-VertexLayout uiTextLayout()
+VertexLayout uiTexturedLayout()
 {
     VertexLayout layout;
-    layout.stride = kTextVertexStride;
+    layout.stride = kTexturedVertexStride;
     layout.attributeCount = 3;
     layout.attributes[0] = { 0, 0,  VertexFormat::Float2 };            /* position */
-    layout.attributes[1] = { 1, 8,  VertexFormat::Float2 };            /* atlas uv */
+    layout.attributes[1] = { 1, 8,  VertexFormat::Float2 };            /* uv       */
     layout.attributes[2] = { 2, 16, VertexFormat::UByte4Normalised };  /* colour   */
     return layout;
 }
+
+/* HOW MANY SEGMENTS A ROUNDED CORNER OF THE FROSTED REGION GETS. Eight, which
+ * is what UiPainter::executeBackdropBlur uses — borrowed rather than re-picked,
+ * so the two paths round a corner to the same silhouette. */
+constexpr int kBlurCornerSegments = 8;
 
 }  // namespace
 
@@ -87,12 +93,17 @@ void DeviceUiPainter::release()
     if (pipeline_.valid()) device_.destroy(pipeline_);
     if (shader_.valid())   device_.destroy(shader_);
 
-    if (textMesh_.valid())     device_.destroy(textMesh_);
-    if (textVertices_.valid()) device_.destroy(textVertices_);
-    if (textIndices_.valid())  device_.destroy(textIndices_);
-    if (textPipeline_.valid()) device_.destroy(textPipeline_);
-    if (textShader_.valid())   device_.destroy(textShader_);
-    if (glyphSampler_.valid()) device_.destroy(glyphSampler_);
+    if (texturedMesh_.valid())     device_.destroy(texturedMesh_);
+    if (texturedVertices_.valid()) device_.destroy(texturedVertices_);
+    if (texturedIndices_.valid())  device_.destroy(texturedIndices_);
+    if (textPipeline_.valid())     device_.destroy(textPipeline_);
+    if (textShader_.valid())       device_.destroy(textShader_);
+    if (glyphSampler_.valid())     device_.destroy(glyphSampler_);
+
+    if (blurPipeline_.valid())   device_.destroy(blurPipeline_);
+    if (blurShader_.valid())     device_.destroy(blurShader_);
+    if (captureSampler_.valid()) device_.destroy(captureSampler_);
+    if (captureTexture_.valid()) device_.destroy(captureTexture_);
 
     mesh_ = {};
     vertices_ = {};
@@ -100,17 +111,24 @@ void DeviceUiPainter::release()
     pipeline_ = {};
     shader_ = {};
 
-    textMesh_ = {};
-    textVertices_ = {};
-    textIndices_ = {};
+    texturedMesh_ = {};
+    texturedVertices_ = {};
+    texturedIndices_ = {};
     textPipeline_ = {};
     textShader_ = {};
     glyphSampler_ = {};
 
+    blurPipeline_ = {};
+    blurShader_ = {};
+    captureSampler_ = {};
+    captureTexture_ = {};
+    captureWidth_ = 0;
+    captureHeight_ = 0;
+
     vertexCapacity_ = 0;
     indexCapacity_ = 0;
-    textVertexCapacity_ = 0;
-    textIndexCapacity_ = 0;
+    texturedVertexCapacity_ = 0;
+    texturedIndexCapacity_ = 0;
     ready_ = false;
 }
 
@@ -118,8 +136,8 @@ bool DeviceUiPainter::initialise()
 {
     if (ready_) return true;
 
-    const std::string vertexSource   = ShaderLibrary::preprocess("rhi/ui.vs.glsl");
-    const std::string fragmentSource = ShaderLibrary::preprocess("rhi/ui.fs.glsl");
+    const std::string vertexSource   = ShaderLibrary::preprocess("rhi/ui/ui.vs.glsl");
+    const std::string fragmentSource = ShaderLibrary::preprocess("rhi/ui/ui.fs.glsl");
 
     if (vertexSource.empty() || fragmentSource.empty()) {
         LOGGER.error("DeviceUiPainter: rhi/ui shaders not found");
@@ -169,8 +187,8 @@ bool DeviceUiPainter::initialise()
 
     /* ---- text ---------------------------------------------------------- */
 
-    const std::string textVertexSource   = ShaderLibrary::preprocess("rhi/ui_text.vs.glsl");
-    const std::string textFragmentSource = ShaderLibrary::preprocess("rhi/ui_text.fs.glsl");
+    const std::string textVertexSource   = ShaderLibrary::preprocess("rhi/ui/ui_text.vs.glsl");
+    const std::string textFragmentSource = ShaderLibrary::preprocess("rhi/ui/ui_text.fs.glsl");
 
     if (textVertexSource.empty() || textFragmentSource.empty()) {
         LOGGER.error("DeviceUiPainter: rhi/ui_text shaders not found");
@@ -189,7 +207,7 @@ bool DeviceUiPainter::initialise()
     PipelineDesc textDesc = desc;
     textDesc.name         = "ui text";
     textDesc.shader       = textShader_;
-    textDesc.vertexLayout = uiTextLayout();
+    textDesc.vertexLayout = uiTexturedLayout();
 
     textPipeline_ = device_.createPipeline(textDesc);
     if (!textPipeline_.valid()) return false;
@@ -214,6 +232,45 @@ bool DeviceUiPainter::initialise()
 
     glyphSampler_ = device_.createSampler(glyph);
     if (!glyphSampler_.valid()) return false;
+
+    /* ---- backdrop blur -------------------------------------------------- */
+
+    const std::string blurVertexSource   = ShaderLibrary::preprocess("rhi/ui/ui_blur.vs.glsl");
+    const std::string blurFragmentSource = ShaderLibrary::preprocess("rhi/ui/ui_blur.fs.glsl");
+
+    if (blurVertexSource.empty() || blurFragmentSource.empty()) {
+        LOGGER.error("DeviceUiPainter: rhi/ui_blur shaders not found");
+        return false;
+    }
+
+    blurShader_ = device_.createShader("ui blur", blurVertexSource.c_str(),
+                                       blurFragmentSource.c_str());
+    if (!blurShader_.valid()) return false;
+
+    PipelineDesc blurDesc = textDesc;
+    blurDesc.name   = "ui blur";
+    blurDesc.shader = blurShader_;
+
+    blurPipeline_ = device_.createPipeline(blurDesc);
+    if (!blurPipeline_.valid()) return false;
+
+    /* TRILINEAR, and that is the whole mechanism rather than a quality setting:
+     * the blur IS a mip level, the level is fractional, and a fractional level
+     * has to interpolate between the two either side. A nearest mip filter would
+     * make the strength dial step through powers of two.
+     *
+     * CLAMPED, so the edge of the captured region does not wrap around and smear
+     * the opposite side of the panel into it. */
+    SamplerDesc capture;
+    capture.minify  = FilterMode::Linear;
+    capture.magnify = FilterMode::Linear;
+    capture.mip     = FilterMode::Linear;
+    capture.wrapU   = WrapMode::ClampToEdge;
+    capture.wrapV   = WrapMode::ClampToEdge;
+    capture.wrapW   = WrapMode::ClampToEdge;
+
+    captureSampler_ = device_.createSampler(capture);
+    if (!captureSampler_.valid()) return false;
 
     ready_ = true;
     return true;
@@ -272,50 +329,94 @@ bool DeviceUiPainter::ensureCapacity(uint32_t vertexCount, uint32_t indexCount)
     return true;
 }
 
-bool DeviceUiPainter::ensureTextCapacity(uint32_t vertexCount, uint32_t indexCount)
+bool DeviceUiPainter::ensureTexturedCapacity(uint32_t vertexCount, uint32_t indexCount)
 {
-    static_assert(sizeof(TextVertex) == kTextVertexStride,
-                  "uiTextLayout describes TextVertex byte for byte");
+    static_assert(sizeof(TexturedVertex) == kTexturedVertexStride,
+                  "uiTexturedLayout describes TexturedVertex byte for byte");
 
-    if (vertexCount <= textVertexCapacity_ && indexCount <= textIndexCapacity_
-        && textMesh_.valid())
+    if (vertexCount <= texturedVertexCapacity_ && indexCount <= texturedIndexCapacity_
+        && texturedMesh_.valid())
         return true;
 
     /* Same headroom rule as the shapes', with a smaller floor: a screen of HUD
-     * is a few hundred glyphs, where the shape list is a few thousand vertices
-     * before anything is typed. */
+     * is a few hundred glyphs and a handful of panels, where the shape list is a
+     * few thousand vertices before anything is typed. */
     const uint32_t wantedVertices = std::max(vertexCount + vertexCount / 4u, 512u);
     const uint32_t wantedIndices  = std::max(indexCount + indexCount / 4u, 768u);
 
-    if (textMesh_.valid())     device_.destroy(textMesh_);
-    if (textVertices_.valid()) device_.destroy(textVertices_);
-    if (textIndices_.valid())  device_.destroy(textIndices_);
-    textMesh_ = {};
+    if (texturedMesh_.valid())     device_.destroy(texturedMesh_);
+    if (texturedVertices_.valid()) device_.destroy(texturedVertices_);
+    if (texturedIndices_.valid())  device_.destroy(texturedIndices_);
+    texturedMesh_ = {};
 
     BufferDesc vertexDesc;
-    vertexDesc.name   = "ui text vertices";
-    vertexDesc.bytes  = static_cast<uint64_t>(wantedVertices) * kTextVertexStride;
+    vertexDesc.name   = "ui textured vertices";
+    vertexDesc.bytes  = static_cast<uint64_t>(wantedVertices) * kTexturedVertexStride;
     vertexDesc.usage  = BufferUsageVertex;
     vertexDesc.access = BufferAccess::CpuToGpuPerFrame;
 
-    textVertices_ = device_.createBuffer(vertexDesc);
-    if (!textVertices_.valid()) return false;
+    texturedVertices_ = device_.createBuffer(vertexDesc);
+    if (!texturedVertices_.valid()) return false;
 
     BufferDesc indexDesc;
-    indexDesc.name   = "ui text indices";
+    indexDesc.name   = "ui textured indices";
     indexDesc.bytes  = static_cast<uint64_t>(wantedIndices) * sizeof(uint32_t);
     indexDesc.usage  = BufferUsageIndex;
     indexDesc.access = BufferAccess::CpuToGpuPerFrame;
 
-    textIndices_ = device_.createBuffer(indexDesc);
-    if (!textIndices_.valid()) return false;
+    texturedIndices_ = device_.createBuffer(indexDesc);
+    if (!texturedIndices_.valid()) return false;
 
-    textMesh_ = device_.createMesh(uiTextLayout(), textVertices_, wantedVertices,
-                                   textIndices_, wantedIndices);
-    if (!textMesh_.valid()) return false;
+    texturedMesh_ = device_.createMesh(uiTexturedLayout(), texturedVertices_, wantedVertices,
+                                       texturedIndices_, wantedIndices);
+    if (!texturedMesh_.valid()) return false;
 
-    textVertexCapacity_ = wantedVertices;
-    textIndexCapacity_  = wantedIndices;
+    texturedVertexCapacity_ = wantedVertices;
+    texturedIndexCapacity_  = wantedIndices;
+    return true;
+}
+
+bool DeviceUiPainter::ensureCaptureTexture(uint32_t width, uint32_t height)
+{
+    if (width == 0 || height == 0) return false;
+
+    if (captureTexture_.valid() && width <= captureWidth_ && height <= captureHeight_)
+        return true;
+
+    /* GROWS ONLY. A panel that shrinks keeps the larger texture, so resizing a
+     * window does not churn a GPU allocation on every frame of the drag — the
+     * same rule UiPainter::ensureCaptureTexture follows, and the reason the
+     * shader has to scale its UVs by the used sub-rectangle. */
+    const uint32_t wantedWidth  = std::max(width, captureWidth_);
+    const uint32_t wantedHeight = std::max(height, captureHeight_);
+
+    /* THE FULL CHAIN, because the chain is the blur. Levels down to 1x1: the
+     * strength is log2 of a pixel radius, and a panel asking for a radius wider
+     * than the levels allow would otherwise clamp to a blur that is visibly not
+     * what was asked for. */
+    uint32_t mips = 1;
+    for (uint32_t size = std::max(wantedWidth, wantedHeight); size > 1u; size /= 2u) ++mips;
+
+    TextureDesc desc;
+    desc.name      = "ui backdrop capture";
+    desc.width     = wantedWidth;
+    desc.height    = wantedHeight;
+    desc.mipLevels = mips;
+
+    /* RGBA8, matching the backbuffer it is copied from — the UI runs past the
+     * tone map, so this is display colour and there is no radiance to preserve.
+     * CopyDest states what it is for; every backend but this one needs to know
+     * before it allocates. */
+    desc.format = TextureFormat::RGBA8;
+    desc.usage  = TextureUsageSampled | TextureUsageCopyDest;
+
+    const TextureHandle texture = device_.createTexture(desc);
+    if (!texture.valid()) return false;
+
+    if (captureTexture_.valid()) device_.destroy(captureTexture_);
+    captureTexture_ = texture;
+    captureWidth_   = wantedWidth;
+    captureHeight_  = wantedHeight;
     return true;
 }
 
@@ -372,31 +473,26 @@ DeviceUiPainter::TextRange DeviceUiPainter::appendRun(const TextRun& run, const 
      * the one thing per-size atlases exist to prevent. */
     const float drawSize = UiFontSet::rasterSize(run.style.sizePx);
 
-    /* The run's position is the top-left of the LINE BOX and glyphs are placed
-     * from the top of the GLYPH box, so the difference is split above and
-     * below — see the note on line height in UiFontSet.hpp.
+    /* The run's position is the top-left of the LINE BOX; this turns that into
+     * the top of the GLYPH box, centring the cap band rather than the whole
+     * line — see UiFontSet::runOriginY, which owns that decision for both
+     * painters.
      *
      * Y IS SNAPPED, X IS NOT. Vertical subpixel positioning buys nothing: text
      * sits on a baseline and every glyph in a run shares it, so rounding once
      * costs no precision anyone can see. Horizontal is different — that is
      * where fractional letter spacing accumulates — and it is handled per glyph
      * below by choosing a phase rather than by rounding. */
-    const float lineHeight = fonts.lineHeight(run.style);
-    const float originY = std::round(run.position.y + (lineHeight - drawSize) * 0.5f);
+    const float originY = fonts.runOriginY(run.position.y, run.style);
 
     const std::uint32_t rgba = run.style.colour.toSrgb8();
 
-    /* TRACKING, ROUNDED TO A WHOLE PIXEL, ONCE.
-     *
-     * FreeType's advanceX is already an integer, so letter spacing is the ONLY
-     * source of fractional drift in the pen - and the kit's shouted styles
-     * track at 1.8, 2.1 and 2.4 px. Accumulated and rounded per glyph, 2.4
-     * comes out as alternating 2s and 3s, which the eye reads as ragged rather
-     * than as tracking being 0.4 px off. Rounding here makes every gap
-     * identical, and as a side effect every pen position lands on a whole pixel
-     * by construction. See study/topics/surfaces/text_rendering.md section 3. */
-    const float tracking = std::round(run.style.letterSpacingPx * drawSize
-                                      / std::max(run.style.sizePx, 0.001f));
+    /* TRACKING, ROUNDED TO A WHOLE PIXEL, ONCE — and asked for rather than
+     * computed, because the LAYOUT above reserved space using the same answer.
+     * A painter with its own copy of this rounding is a painter that will one
+     * day disagree with the box it was given. See UiFontSet::trackingPx, which
+     * carries the reasoning and the bug that produced it. */
+    const float tracking = UiFontSet::trackingPx(run.style);
 
     const GlyphAtlas* batchAtlas = nullptr;
 
@@ -437,7 +533,7 @@ DeviceUiPainter::TextRange DeviceUiPainter::appendRun(const TextRun& run, const 
             if (atlas != batchAtlas) {
                 GlyphBatch batch;
                 batch.atlas      = atlas;
-                batch.indexBegin = static_cast<uint32_t>(textIndexScratch_.size());
+                batch.indexBegin = static_cast<uint32_t>(texturedIndexScratch_.size());
                 glyphBatches_.push_back(batch);
                 batchAtlas = atlas;
                 ++range.count;
@@ -457,18 +553,18 @@ DeviceUiPainter::TextRange DeviceUiPainter::appendRun(const TextRun& run, const 
             const float u1 = static_cast<float>(glyph.x + glyph.width) / texWidth;
             const float v1 = static_cast<float>(glyph.y + glyph.height) / texHeight;
 
-            const std::uint32_t base = static_cast<std::uint32_t>(textVertexScratch_.size());
-            textVertexScratch_.push_back(TextVertex{ left,  top,    u0, v0, rgba });
-            textVertexScratch_.push_back(TextVertex{ left,  bottom, u0, v1, rgba });
-            textVertexScratch_.push_back(TextVertex{ right, bottom, u1, v1, rgba });
-            textVertexScratch_.push_back(TextVertex{ right, top,    u1, v0, rgba });
+            const std::uint32_t base = static_cast<std::uint32_t>(texturedVertexScratch_.size());
+            texturedVertexScratch_.push_back(TexturedVertex{ left,  top,    u0, v0, rgba });
+            texturedVertexScratch_.push_back(TexturedVertex{ left,  bottom, u0, v1, rgba });
+            texturedVertexScratch_.push_back(TexturedVertex{ right, bottom, u1, v1, rgba });
+            texturedVertexScratch_.push_back(TexturedVertex{ right, top,    u1, v0, rgba });
 
-            textIndexScratch_.push_back(base + 0);
-            textIndexScratch_.push_back(base + 1);
-            textIndexScratch_.push_back(base + 2);
-            textIndexScratch_.push_back(base + 0);
-            textIndexScratch_.push_back(base + 2);
-            textIndexScratch_.push_back(base + 3);
+            texturedIndexScratch_.push_back(base + 0);
+            texturedIndexScratch_.push_back(base + 1);
+            texturedIndexScratch_.push_back(base + 2);
+            texturedIndexScratch_.push_back(base + 0);
+            texturedIndexScratch_.push_back(base + 2);
+            texturedIndexScratch_.push_back(base + 3);
 
             glyphBatches_.back().indexCount += 6;
         }
@@ -482,20 +578,87 @@ DeviceUiPainter::TextRange DeviceUiPainter::appendRun(const TextRun& run, const 
     return range;
 }
 
-void DeviceUiPainter::buildTextGeometry(const UiDrawList& drawList, const UiFontSet& fonts)
+DeviceUiPainter::BlurRegion DeviceUiPainter::appendBlur(const UiBackdropBlur& blur)
 {
-    textVertexScratch_.clear();
-    textIndexScratch_.clear();
+    BlurRegion region;
+
+    /* CLAMPED TO THE SURFACE FIRST. The copy reads the backbuffer, so the region
+     * has to be inside it — a panel hanging off the edge of the window would
+     * otherwise copy pixels that are undefined rather than empty. */
+    const UiRect clamped = blur.rect.intersected(
+        { 0.0f, 0.0f, static_cast<float>(surfaceWidth_), static_cast<float>(surfaceHeight_) });
+
+    /* One pixel is not a region: there is nothing to frost and the outline
+     * would be degenerate. */
+    if (clamped.width <= 1.0f || clamped.height <= 1.0f) return region;
+
+    /* STRENGTH IN PIXELS BECOMES A MIP LEVEL: each level halves the resolution,
+     * so a radius of 2^n pixels is level n. Borrowed from
+     * UiPainter::executeBackdropBlur rather than re-derived — the dial has been
+     * tuned against this curve. */
+    region.lod = std::log2(std::max(blur.strengthPx, 1.0f));
+
+    blurOutline_.buildRect(clamped, blur.cornerRadii, kBlurCornerSegments);
+    if (blurOutline_.size() < 3) return region;
+
+    region.indexBegin = static_cast<uint32_t>(texturedIndexScratch_.size());
+
+    /* THE UV IS THE POINT'S PLACE ON THE SCREEN, because the capture is the
+     * whole screen — see the note on captureTexture_. The scale onto a texture
+     * that may be larger than the surface is a push constant, decided at draw
+     * time when the size is final. */
+    const float surfaceW = static_cast<float>(surfaceWidth_);
+    const float surfaceH = static_cast<float>(surfaceHeight_);
+
+    const std::uint32_t base = static_cast<std::uint32_t>(texturedVertexScratch_.size());
+    for (std::size_t index = 0; index < blurOutline_.size(); ++index) {
+        const Vec2 point = blurOutline_.position(index);
+
+        const float u = point.x / surfaceW;
+
+        /* FLIPPED: the copy puts the screen's BOTTOM row at texture row 0,
+         * because GL's framebuffer origin is bottom-left and the UI's is
+         * top-left. Getting this wrong mirrors the frosting vertically, which
+         * over a blurred backdrop is almost invisible until the panel sits over
+         * something with a horizon in it. */
+        const float v = 1.0f - point.y / surfaceH;
+
+        texturedVertexScratch_.push_back(TexturedVertex{ point.x, point.y, u, v, 0xFFFFFFFFu });
+    }
+
+    /* Fan from point 0 — the outline is convex, so this is a valid
+     * triangulation without needing to prove anything about it. */
+    for (std::uint32_t index = 1; index + 1 < static_cast<std::uint32_t>(blurOutline_.size());
+         ++index) {
+        texturedIndexScratch_.push_back(base);
+        texturedIndexScratch_.push_back(base + index);
+        texturedIndexScratch_.push_back(base + index + 1);
+    }
+
+    region.indexCount =
+        static_cast<uint32_t>(texturedIndexScratch_.size()) - region.indexBegin;
+    return region;
+}
+
+void DeviceUiPainter::buildTexturedGeometry(const UiDrawList& drawList, const UiFontSet& fonts)
+{
+    texturedVertexScratch_.clear();
+    texturedIndexScratch_.clear();
     glyphBatches_.clear();
     textRanges_.clear();
+    blurRegions_.clear();
 
-    /* IN COMMAND ORDER, one entry per Text command. The draw loop below walks
-     * the same list and consumes these with a counter, which is what keeps the
-     * two in step without either of them indexing by payload — a run referenced
-     * twice would otherwise be drawn from one range in two places. */
+    /* IN COMMAND ORDER, one entry per Text and one per BackdropBlur command. The
+     * draw loop below walks the same list and consumes these with a counter,
+     * which is what keeps the two in step without either of them indexing by
+     * payload — a run referenced twice would otherwise be drawn from one range
+     * in two places. */
     for (const UiCommand& command : drawList.commands()) {
-        if (command.kind != UiCommandKind::Text) continue;
-        textRanges_.push_back(appendRun(drawList.textRuns()[command.payloadIndex], fonts));
+        if (command.kind == UiCommandKind::Text) {
+            textRanges_.push_back(appendRun(drawList.textRuns()[command.payloadIndex], fonts));
+        } else if (command.kind == UiCommandKind::BackdropBlur) {
+            blurRegions_.push_back(appendBlur(drawList.backdropBlurs()[command.payloadIndex]));
+        }
     }
 
     /* THE UPLOADS HAPPEN HERE, OUTSIDE ANY PASS. Creating a texture between
@@ -505,6 +668,28 @@ void DeviceUiPainter::buildTextGeometry(const UiDrawList& drawList, const UiFont
      * recorded, and the pass loop only binds what it is handed. */
     for (GlyphBatch& batch : glyphBatches_) {
         if (batch.atlas != nullptr) batch.texture = textureFor(*batch.atlas);
+    }
+
+    /* THE CAPTURE, SCREEN SIZED, once — see captureTexture_ for why the whole
+     * screen rather than each panel's own rectangle. Made only when something in
+     * this frame is actually frosted, so a HUD with no blur panels never
+     * allocates it at all. */
+    bool anyBlur = false;
+    for (const BlurRegion& region : blurRegions_) anyBlur = anyBlur || region.indexCount != 0;
+
+    if (anyBlur && !ensureCaptureTexture(surfaceWidth_, surfaceHeight_)) {
+        /* Every frosted panel this frame loses its frosting and says so. The
+         * fill underneath is still drawn, which is the degradation the raylib
+         * painter makes for the same failure.
+         *
+         * EMPTIED, NOT CLEARED: the draw loop consumes one of these per
+         * BackdropBlur command by position, so removing them would shift every
+         * later panel onto the wrong region. */
+        for (BlurRegion& region : blurRegions_) {
+            if (region.indexCount == 0) continue;
+            region.indexCount = 0;
+            ++skippedCommands_;
+        }
     }
 }
 
@@ -525,7 +710,7 @@ void DeviceUiPainter::draw(const UiDrawList& drawList, const UiFontSet& fonts)
         fontGeneration_ = fonts.generation();
     }
 
-    buildTextGeometry(drawList, fonts);
+    buildTexturedGeometry(drawList, fonts);
 
     const std::vector<UiVertex>& vertices = drawList.vertices();
     const std::vector<uint32_t>& indices  = drawList.indices();
@@ -534,12 +719,13 @@ void DeviceUiPainter::draw(const UiDrawList& drawList, const UiFontSet& fonts)
                         static_cast<uint32_t>(indices.size())))
         return;
 
-    const bool hasText = !textIndexScratch_.empty();
-    if (hasText && !ensureTextCapacity(static_cast<uint32_t>(textVertexScratch_.size()),
-                                       static_cast<uint32_t>(textIndexScratch_.size())))
+    const bool hasTextured = !texturedIndexScratch_.empty();
+    if (hasTextured
+        && !ensureTexturedCapacity(static_cast<uint32_t>(texturedVertexScratch_.size()),
+                                   static_cast<uint32_t>(texturedIndexScratch_.size())))
         return;
 
-    /* ONE UPLOAD EACH, BEFORE THE PASS OPENS. Every array is contiguous by
+    /* ONE UPLOAD EACH, BEFORE THE FIRST PASS OPENS. Every array is contiguous by
      * construction, and updating a buffer a pass is already reading is the kind
      * of hazard that works on one driver and tears on another. */
     if (!vertices.empty())
@@ -549,64 +735,66 @@ void DeviceUiPainter::draw(const UiDrawList& drawList, const UiFontSet& fonts)
         device_.updateBuffer(indices_, indices.data(),
                              indices.size() * sizeof(uint32_t), 0);
 
-    if (hasText) {
-        device_.updateBuffer(textVertices_, textVertexScratch_.data(),
-                             textVertexScratch_.size() * kTextVertexStride, 0);
-        device_.updateBuffer(textIndices_, textIndexScratch_.data(),
-                             textIndexScratch_.size() * sizeof(uint32_t), 0);
+    if (hasTextured) {
+        device_.updateBuffer(texturedVertices_, texturedVertexScratch_.data(),
+                             texturedVertexScratch_.size() * kTexturedVertexStride, 0);
+        device_.updateBuffer(texturedIndices_, texturedIndexScratch_.data(),
+                             texturedIndexScratch_.size() * sizeof(uint32_t), 0);
     }
 
     /* THE BACKBUFFER, LOADED. An attachment carrying no texture is the screen;
      * loading rather than clearing is what puts the UI ON the resolved scene
-     * rather than instead of it. */
+     * rather than instead of it — and it is what lets the pass be reopened after
+     * a blur without losing everything drawn before it. */
     PassDesc pass;
     pass.name = "ui";
     pass.colours[0].load  = LoadAction::Load;
     pass.colours[0].store = StoreAction::Store;
     pass.colourCount = 1;
 
-    ICommandEncoder& encoder = device_.beginPass(pass);
+    ICommandEncoder* encoder = &device_.beginPass(pass);
 
-    /* The surface size, for the vertex stage's pixels-to-clip conversion.
+    /* Which pipeline is bound, so a screen of shapes with three labels on it
+     * costs six binds rather than one per command. RESET WHENEVER THE PASS IS
+     * REOPENED: a new encoder has bound nothing, and remembering across the
+     * split would skip the bind and draw the panel with whatever the driver
+     * still had. */
+    enum class Bound { None, Shapes, Text, Blur };
+    Bound bound = Bound::None;
+
+    /* The surface size, for the vertex stage's pixels-to-clip conversion, plus
+     * whatever the bound pipeline needs after it.
      *
      * PUSHED AFTER EVERY PIPELINE BIND, not once per pass. Push constants are
      * emulated on GL as a uniform at location 0 of the CURRENT PROGRAM, so
      * switching pipeline abandons them — and a text pipeline that never
      * received the surface size divides by zero and puts every glyph at
      * infinity, which draws nothing and looks exactly like a missing font. */
-    const float push[4] = { static_cast<float>(surfaceWidth_),
-                            static_cast<float>(surfaceHeight_), 0.0f, 0.0f };
-
-    /* Which pipeline is bound, so a screen of shapes with three labels on it
-     * costs six binds rather than one per command. */
-    enum class Bound { None, Shapes, Text };
-    Bound bound = Bound::None;
+    float push[8] = { static_cast<float>(surfaceWidth_),
+                      static_cast<float>(surfaceHeight_), 0.0f, 0.0f,
+                      0.0f, 0.0f, 0.0f, 0.0f };
 
     std::uint32_t textCommandIndex = 0;
+    std::uint32_t blurCommandIndex = 0;
 
     for (const UiCommand& command : drawList.commands()) {
         /* CONSUMED FIRST AND UNCONDITIONALLY, before any of the reasons below
-         * to skip this command — the counter tracks the command list, not the
+         * to skip this command — the counters track the command list, not the
          * draws, and a range left unconsumed would shift every label after a
          * clipped-away one onto the wrong text. */
         TextRange range;
+        BlurRegion blur;
         if (command.kind == UiCommandKind::Text) {
-            if (textCommandIndex < textRanges_.size()) {
-                range = textRanges_[textCommandIndex];
-            }
+            if (textCommandIndex < textRanges_.size()) range = textRanges_[textCommandIndex];
             ++textCommandIndex;
-        }
-
-        if (command.kind == UiCommandKind::BackdropBlur) {
-            /* COUNTED, NOT IGNORED. Backdrop blur is not converted; saying how
-             * many were dropped is what separates "the HUD has no frosting yet"
-             * from "the HUD is not drawing". */
-            ++skippedCommands_;
-            continue;
+        } else if (command.kind == UiCommandKind::BackdropBlur) {
+            if (blurCommandIndex < blurRegions_.size()) blur = blurRegions_[blurCommandIndex];
+            ++blurCommandIndex;
         }
 
         if (command.kind == UiCommandKind::Triangles && command.indexCount == 0) continue;
         if (command.kind == UiCommandKind::Text && range.count == 0) continue;
+        if (command.kind == UiCommandKind::BackdropBlur && blur.indexCount == 0) continue;
 
         /* THE CLIP, AS A SCISSOR. Every command carries the rectangle it was
          * recorded under — already intersected with its parents by
@@ -623,26 +811,69 @@ void DeviceUiPainter::draw(const UiDrawList& drawList, const UiFontSet& fonts)
 
         if (right <= left || bottom <= top) continue;   /* clipped away entirely */
 
+        /* ---- the frosted panel, which splits the pass ---------------------
+         *
+         * Everything appended before this command has to be ON the backbuffer
+         * before it can be copied back — which is what ending the pass
+         * guarantees, and it is why a panel frosts the UI beneath it rather than
+         * only the scene. The raylib painter flushes rlgl's batch here for
+         * exactly the same reason. */
+        if (command.kind == UiCommandKind::BackdropBlur) {
+            device_.endPass(*encoder);
+
+            /* THE WHOLE SCREEN, ORIGIN AT THE BOTTOM LEFT — see captureTexture_
+             * for why the whole screen, and setScissor above for the same
+             * convention. Nothing to flip when the rectangle is everything. */
+            const bool copied = device_.copyBackbufferToTexture(captureTexture_, 0, 0,
+                                                                surfaceWidth_, surfaceHeight_);
+            if (copied) device_.generateMips(captureTexture_);
+            else        ++skippedCommands_;
+
+            encoder = &device_.beginPass(pass);
+            bound = Bound::None;
+
+            if (!copied) continue;
+
+            encoder->setScissor(left, static_cast<float>(surfaceHeight_) - bottom,
+                                right - left, bottom - top);
+
+            encoder->bindPipeline(blurPipeline_);
+            push[2] = blur.lod;
+
+            /* The screen's corner of a texture that only grows — a window
+             * resized smaller keeps the larger capture, so this is not always
+             * one. See appendBlur on why it is decided here. */
+            push[4] = static_cast<float>(surfaceWidth_) / static_cast<float>(captureWidth_);
+            push[5] = static_cast<float>(surfaceHeight_) / static_cast<float>(captureHeight_);
+            encoder->pushConstants(push, sizeof push);
+
+            encoder->bindTexture(0, captureTexture_, captureSampler_);
+            encoder->drawIndexed(texturedMesh_, blur.indexCount, blur.indexBegin);
+
+            bound = Bound::Blur;
+            continue;
+        }
+
         /* Y FLIPS HERE, and only here. The UI measures from the top and the
          * scissor box is measured from the bottom, so a panel clipped near the
          * top of the screen would otherwise be clipped near the bottom — which
          * looks like the clip rectangle being ignored rather than inverted. */
-        encoder.setScissor(left, static_cast<float>(surfaceHeight_) - bottom,
-                           right - left, bottom - top);
+        encoder->setScissor(left, static_cast<float>(surfaceHeight_) - bottom,
+                            right - left, bottom - top);
 
         if (command.kind == UiCommandKind::Triangles) {
             if (bound != Bound::Shapes) {
-                encoder.bindPipeline(pipeline_);
-                encoder.pushConstants(push, sizeof push);
+                encoder->bindPipeline(pipeline_);
+                encoder->pushConstants(push, sizeof push);
                 bound = Bound::Shapes;
             }
-            encoder.drawIndexed(mesh_, command.indexCount, command.indexBegin);
+            encoder->drawIndexed(mesh_, command.indexCount, command.indexBegin);
             continue;
         }
 
         if (bound != Bound::Text) {
-            encoder.bindPipeline(textPipeline_);
-            encoder.pushConstants(push, sizeof push);
+            encoder->bindPipeline(textPipeline_);
+            encoder->pushConstants(push, sizeof push);
             bound = Bound::Text;
         }
 
@@ -650,12 +881,12 @@ void DeviceUiPainter::draw(const UiDrawList& drawList, const UiFontSet& fonts)
             const GlyphBatch& batch = glyphBatches_[range.begin + i];
             if (batch.indexCount == 0 || !batch.texture.valid()) continue;
 
-            encoder.bindTexture(0, batch.texture, glyphSampler_);
-            encoder.drawIndexed(textMesh_, batch.indexCount, batch.indexBegin);
+            encoder->bindTexture(0, batch.texture, glyphSampler_);
+            encoder->drawIndexed(texturedMesh_, batch.indexCount, batch.indexBegin);
         }
     }
 
-    device_.endPass(encoder);
+    device_.endPass(*encoder);
 }
 
 }  // namespace cromwell::ui

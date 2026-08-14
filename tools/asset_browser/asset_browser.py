@@ -68,7 +68,18 @@ LIBRARIES = {
     'unigine': REPO / 'unigine_extracted',
     'siege':   Path(os.environ.get('R6_LIBRARY', r'D:\r6_extracted')),
     'mercs':   REPO / 'mercs_extracted',
+    # Broken Arrow, same situation as Siege: the sweep plus the Unity project it
+    # goes through is far too large for the repo's drive, so it lives elsewhere
+    # and is passed in.
+    'ba':      Path(os.environ.get('BA_LIBRARY', r'D:\ba_extracted')),
 }
+
+# Directories inside a library that are working state, not content. Broken
+# Arrow's tree holds an AssetRipper project and a Unity project beside its
+# output, and both contain thousands of meshes and textures that are *copies*
+# of what is already catalogued from the sweep - cataloguing them means every
+# search returns each asset three times.
+SCRATCH_DIRS = {'_tools', '_ripper_units', '_bake', '_probe', '_lists', '_done'}
 
 MESH_EXT = {'.obj', '.glb'}
 # Everything the mesh viewer can open. Split out because a composed world and a
@@ -113,6 +124,14 @@ def _kind_of(lib, path):
         if lib == 'hd2' and 'materials' in {p.lower() for p in path.parts}:
             return 'material'
         return 'mesh'
+    if lib == 'ba' and ext == '.png':
+        # Broken Arrow's textures arrive from two passes at different
+        # granularity: the sweep's texture/ tree keeps the game's own
+        # addressable paths, and model/ holds the per-rig maps AssetStudio
+        # wrote beside each FBX. Same pixels, different organisation, and both
+        # are worth having - the second is how you find "the maps for THIS
+        # soldier" without knowing the container path.
+        return 'texture'
     if ext not in TEX_EXT:
         return 'other'
     parts = {p.lower() for p in path.parts}
@@ -137,6 +156,21 @@ def _role_of(lib, name):
     # none of them.
     if lib == 'mercs':
         return 'diffuse'
+    # Broken Arrow is Unity URP/HDRP, so the suffixes are the pipeline's own and
+    # unambiguous. Checked before the generic rules because "MaskMap" would
+    # otherwise fall through to the substring soup below and land as 'mask'
+    # only by luck, while "BaseMap" matches none of them at all.
+    if lib == 'ba':
+        n = name.lower()
+        if 'normal' in n or '_nrm' in n:
+            return 'normal'
+        if 'maskmap' in n or '_mask' in n:
+            return 'mask'
+        if 'basemap' in n or 'albedo' in n or 'basecolor' in n or '_diff' in n:
+            return 'diffuse'
+        if 'emissive' in n or 'emission' in n:
+            return 'emissive'
+        return 'other'
     n = name.lower()
     if 'typenormal' in n or '_nrm' in n or '_n.' in n or 'normal' in n:
         return 'normal'
@@ -178,6 +212,14 @@ def _material_of(lib, kind, path, xcom_index):
         # they are 'dif' too. Reporting 'none' made every rigged character open
         # untextured, since the default view mode is chosen from this value.
         return 'dif'
+    if lib == 'ba':
+        # The .glb are the rigged units - geometry, skin and every animation
+        # clip - and their textures resolve per material through
+        # ba_materials.csv, so they are the ones worth opening textured. The
+        # .obj from the bundle sweep are raw individual meshes with no material
+        # link of any kind, and saying otherwise would open them in diffuse
+        # mode showing nothing.
+        return 'dif+msk+nrm' if path.suffix.lower() == '.glb' else 'none'
     return 'none'
 
 
@@ -222,7 +264,9 @@ def build_catalog(verbose=True):
             continue
         t0 = time.time()
         n = 0
-        for dirpath, _dirnames, filenames in os.walk(root):
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Prune working state in place, so os.walk never descends into it.
+            dirnames[:] = [x for x in dirnames if x not in SCRATCH_DIRS]
             d = Path(dirpath)
             for fn in filenames:
                 ext = os.path.splitext(fn)[1].lower()
@@ -391,6 +435,118 @@ def mercs_materials(mesh_path):
     return out
 
 
+def _in_library(path, lib):
+    """Is this path inside the named library's root?
+
+    Compared as resolved paths rather than by substring: the library roots are
+    configurable, so 'ba_extracted' in the string is a guess that breaks the
+    moment someone points BA_LIBRARY somewhere else.
+    """
+    root = LIBRARIES.get(lib)
+    if root is None:
+        return False
+    try:
+        Path(path).resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+_BA_MATS = None      # material name -> {albedo, mask, normal} png filenames
+_BA_TEX = None       # texture stem -> full path, over the whole sweep
+
+
+def _ba_texture_index():
+    """Every extracted Broken Arrow texture, keyed by the name a material uses.
+
+    The join needs one adjustment. ba_materials.csv names textures the way the
+    Unity project does - `ranger_low_Ranger_BaseMap.png` - while the sweep
+    writes them as `ranger_low_Ranger_BaseMap @-4133...png`, because names alone
+    collide constantly and the PathID suffix is what makes the file count add
+    up. So the index is keyed on the part before the ' @'.
+    """
+    global _BA_TEX
+    if _BA_TEX is not None:
+        return _BA_TEX
+    _BA_TEX = {}
+    lib = LIBRARIES['ba']
+    for sub in ('texture', 'model'):
+        root = lib / sub
+        if not root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [x for x in dirnames if x not in SCRATCH_DIRS]
+            for fn in filenames:
+                if not fn.lower().endswith('.png'):
+                    continue
+                stem = fn[:-4].split(' @')[0]
+                # First writer wins. The same texture appears under both trees;
+                # they are the same pixels, so which one is found is immaterial.
+                _BA_TEX.setdefault(stem, os.path.join(dirpath, fn))
+    return _BA_TEX
+
+
+def ba_materials(mesh_path):
+    """Per-material textures for a Broken Arrow .glb, shaped like glb_materials.
+
+    The .glb carry no pixels on purpose - the rigs share texture sets heavily
+    and embedding would multiply the library for no new information, see
+    tools/ba/ba_glb.py. What they do carry is the material NAME, which is the
+    key into ba_materials.csv, which was built by following the material
+    assets' texture GUIDs rather than by matching names. That distinction
+    matters here: `VDV.mat`, `VDV_Razvedka.mat` and `RU_VDVSpetsnaz.mat` are
+    three different soldiers whose names are substrings of one another.
+
+    Indexed by the mesh's material number so the renderer can pick per triangle,
+    which a unit needs - a rifleman is body, head, webbing and weapon over
+    separate maps.
+    """
+    global _BA_MATS
+    lib = LIBRARIES['ba']
+    csv_path = lib / 'ba_materials.csv'
+    if not csv_path.exists():
+        return []
+    if _BA_MATS is None:
+        _BA_MATS = {}
+        with csv_path.open(encoding='utf-8') as f:
+            for r in csv.DictReader(f):
+                _BA_MATS[r['material']] = r
+
+    names = glb_material_names(mesh_path)
+    if not names:
+        return []
+    index = _ba_texture_index()
+    out = []
+    for n in names:
+        # Blender's FBX round-trip can suffix a material that collided on
+        # import; the base name is what the csv knows.
+        row = _BA_MATS.get(n) or _BA_MATS.get(n.rsplit('.', 1)[0])
+        slots = {}
+        if row:
+            for col, slot in (('albedo', 'diffuse'), ('mask', 'mask'),
+                              ('normal', 'normal')):
+                fn = row.get(col)
+                if not fn:
+                    continue
+                path = index.get(fn[:-4] if fn.lower().endswith('.png') else fn)
+                if path:
+                    try:
+                        slots[slot] = load_texture(path)
+                    except Exception:
+                        pass
+        out.append(slots)
+    return out
+
+
+def glb_material_names(path):
+    """Material names from a .glb, in the file's own material order."""
+    try:
+        js, _read = _glb_chunks(path)
+    except Exception:
+        return []
+    return [m.get('name', '') for m in js.get('materials', [])]
+
+
 def obj_mtl_materials(mesh_path):
     """Textures from the .mtl beside an .obj, in the file's own usemtl order.
 
@@ -456,6 +612,13 @@ def mesh_materials(path):
     """
     sp = str(path)
     if sp.lower().endswith('.glb'):
+        # Broken Arrow's .glb name their materials but ship no pixels, so the
+        # generic glTF route returns a list of empty slots - which is not
+        # nothing, and would win over the csv lookup if tried first.
+        if _in_library(sp, 'ba'):
+            mats = ba_materials(path)
+            if any(m for m in mats):
+                return mats, []
         return glb_materials(path)
     mats = obj_mtl_materials(path)
     if any(m.get('diffuse') is not None for m in mats):

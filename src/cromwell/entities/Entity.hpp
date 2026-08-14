@@ -25,9 +25,22 @@
  * component rather than by testing what class the object is. That is what keeps
  * systems free of type checks.
  *
- * THE TICK LIST IS BUILT ONCE, at attach time, from canEverTick(). Walking
- * every component of every entity each frame to call an empty virtual is a cost
- * with no feature attached; only the components that asked appear in the list.
+ * THE PASS LISTS ARE BUILT ONCE, at attach time, from canEverSimulate() and
+ * canEverTick(). Walking every component of every entity each frame to call an
+ * empty virtual is a cost with no feature attached; only the components that
+ * asked appear in a list.
+ *
+ * TWO CLOCKS, TWO ENTRY POINTS. simulate() runs on the fixed step and drives
+ * everything the game's rules depend on; tick() runs once per drawn frame and
+ * drives presentation. Component.hpp explains which work belongs where and
+ * FixedTimestep.hpp explains why the split exists at all.
+ *
+ * THIS USED TO BE ONE ENTRY POINT, and the comment on it said a caller that had
+ * to remember two would eventually call one. That risk is real and has not gone
+ * away — it has moved. It is now answered one level up: whatever owns the
+ * entities exposes the same pair (see game/units/roster/UnitRoster.hpp) and the
+ * only caller of that pair is the frame loop itself, so there is exactly one
+ * place in the program where forgetting is possible.
  */
 #pragma once
 
@@ -121,14 +134,14 @@ public:
         components_[std::type_index(typeid(T))] = std::move(owned);
         ref.onAttach(*this);
         onComponentsChanged();
+        if (ref.canEverSimulate()) simulating_.push_back(&ref);
         if (ref.canEverTick()) ticking_.push_back(&ref);
         if (ref.canEverThink()) {
             /* Stagger, so a squad spawned on one frame does not think in
              * lockstep forever after. Deterministic — derived from how many
-             * thinkers this entity already has and from the entity's own
-             * phase, never from a clock or a random source, so a replay and a
-             * test see the same schedule. */
-            ref.offsetThinkPhase(nextThinkPhase(ref.thinkInterval()));
+             * thinkers this entity already has, never from a clock or a random
+             * source, so a replay and a test see the same schedule. */
+            ref.offsetThinkPhase(nextThinkPhase());
             thinking_.push_back(&ref);
         }
         return ref;
@@ -158,6 +171,7 @@ public:
 
         Component* raw = it->second.get();
         raw->onDetach();
+        simulating_.erase(std::remove(simulating_.begin(), simulating_.end(), raw), simulating_.end());
         ticking_.erase(std::remove(ticking_.begin(), ticking_.end(), raw), ticking_.end());
         thinking_.erase(std::remove(thinking_.begin(), thinking_.end(), raw), thinking_.end());
         components_.erase(it);
@@ -188,9 +202,10 @@ public:
     /* How many components are attached, and how many take part in each rate.
      * Diagnostics: an entity that thinks when it should not is invisible
      * otherwise. */
-    std::size_t componentCount() const { return components_.size(); }
-    std::size_t tickingCount()    const { return ticking_.size(); }
-    std::size_t thinkingCount()   const { return thinking_.size(); }
+    std::size_t componentCount()   const { return components_.size(); }
+    std::size_t simulatingCount()  const { return simulating_.size(); }
+    std::size_t tickingCount()     const { return ticking_.size(); }
+    std::size_t thinkingCount()    const { return thinking_.size(); }
 
     /* For components the caller knows are present — the ones its own factory
      * put there. Undefined if absent, exactly like dereferencing the pointer
@@ -199,27 +214,37 @@ public:
     template <class T>
     T& component() const { return *findComponent<T>(); }
 
-    /* ---- the frame ------------------------------------------------------
-     * ONE ENTRY POINT PER FRAME. tick() drives both rates: the per-frame work
-     * directly, and the accumulators that decide whether anything is due to
-     * think. A caller that had to remember to call both would eventually call
-     * one. */
-    virtual void tick(float deltaSeconds)
+    /* ---- the simulation step --------------------------------------------
+     * ONE ENTRY POINT PER CLOCK. simulate() drives both rates that belong to
+     * the simulation: the per-step work directly, and the counters that decide
+     * whether anything is due to think.
+     *
+     * Called a whole number of times per frame — sometimes twice, sometimes not
+     * at all — and always with the same fixedSeconds. */
+    virtual void simulate(float fixedSeconds)
     {
-        for (Component* c : ticking_) c->tick(deltaSeconds);
-        for (Component* c : thinking_) c->advanceThink(deltaSeconds);
+        for (Component* c : simulating_) c->simulate(fixedSeconds);
+        for (Component* c : thinking_) c->advanceThink(fixedSeconds);
 
         if (canEverThink()) {
-            thinkTimer_ += deltaSeconds;
-            if (thinkTimer_ >= thinkInterval_) {
-                const float elapsed = thinkTimer_;
-                thinkTimer_ = 0.0f;
-                think(elapsed);
+            const int due = dueThinkSteps(fixedSeconds);
+            if (++stepsSinceThink_ >= due) {
+                stepsSinceThink_ = 0;
+                think(static_cast<float>(due) * fixedSeconds);
             }
         }
     }
 
-    /* ---- the slow frame, for the entity itself --------------------------
+    /* ---- the frame ------------------------------------------------------
+     * Presentation only. Exactly once per drawn frame, with real frame time.
+     * Nothing the simulation reads may be written from here — see
+     * Component.hpp. */
+    virtual void tick(float deltaSeconds)
+    {
+        for (Component* c : ticking_) c->tick(deltaSeconds);
+    }
+
+    /* ---- the slow step, for the entity itself ---------------------------
      * The same contract as Component::think — see Component.hpp. An entity
      * overrides this when the decision belongs to the whole thing rather than
      * to one of its parts. */
@@ -230,13 +255,19 @@ public:
     void  setThinkInterval(float seconds) { thinkInterval_ = seconds > 0.0f ? seconds : 0.0f; }
 
 private:
-    /* Spreads first-thinks evenly across the interval rather than bunching
-     * them: the Nth thinker starts N/(N+1) of the way through its own period.
-     * Cheap, deterministic, and enough to break lockstep. */
-    float nextThinkPhase(float interval) const
+    /* Spreads first-thinks evenly rather than bunching them: the Nth thinker
+     * starts N/(N+1) of the way through its own period. Cheap, deterministic,
+     * and enough to break lockstep. Returned as a slot rather than a time
+     * because the step size is not known until the simulation runs — the
+     * component resolves it on its first step. */
+    int nextThinkPhase() const { return static_cast<int>(thinking_.size()) + 1; }
+
+    /* The entity's own think interval in steps. At least one, for the same
+     * reason as Component::dueSteps. */
+    int dueThinkSteps(float fixedSeconds) const
     {
-        const float slot = static_cast<float>(thinking_.size() + 1);
-        return interval * (slot / (slot + 1.0f));
+        const int steps = static_cast<int>(thinkInterval_ / fixedSeconds + 0.5f);
+        return steps > 0 ? steps : 1;
     }
 
     Vec3  location_;
@@ -245,11 +276,12 @@ private:
 
     /* Seeded from EntityProps, which reads the engine-wide default. */
     float thinkInterval_ = EntityProps::defaultThinkInterval();
-    float thinkTimer_ = 0.0f;
+    int   stepsSinceThink_ = 0;
 
     std::unordered_map<std::type_index, std::unique_ptr<Component>> components_;
 
     /* Raw pointers into components_, which owns them and outlives these. */
+    std::vector<Component*> simulating_;
     std::vector<Component*> ticking_;
     std::vector<Component*> thinking_;
 };

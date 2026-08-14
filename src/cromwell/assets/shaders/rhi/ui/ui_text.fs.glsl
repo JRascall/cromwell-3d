@@ -6,7 +6,7 @@
  * ================== ONE CHANNEL, AND IT IS ALREADY CURVED =================
  *
  * The atlas holds the fraction of each pixel the glyph covers, with the gamma
- * curve applied at bake time — see the long note in ui/paint/GlyphAtlas.cpp for
+ * curve applied at bake time — see the long note in ui/text/GlyphAtlas.cpp for
  * why that curve exists and why it is not applied here. NOTHING IN THIS FILE
  * MAY TOUCH IT. Decoding it as though it were an sRGB value would be the
  * classic double correction, and on light-on-dark text — which is this entire

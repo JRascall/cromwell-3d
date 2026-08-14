@@ -1,8 +1,9 @@
-#include "cromwell/ui/paint/UiFontSet.hpp"
+#include "cromwell/ui/text/UiFontSet.hpp"
 
 #include "cromwell/diag/Logger.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <vector>
 
@@ -104,6 +105,32 @@ UiFontSet::~UiFontSet()
 float UiFontSet::rasterSize(float sizePx)
 {
     return static_cast<float>(atlasSizeFor(sizePx));
+}
+
+float UiFontSet::trackingPx(const TextStyle& style)
+{
+    /* Scaled to the size the glyphs are RASTERISED at, not the style's, because
+     * that is the grid the pen walks on. The two differ the moment a display
+     * scale multiplies a style. */
+    const float drawSize = rasterSize(style.sizePx);
+    return std::round(style.letterSpacingPx * drawSize / std::max(style.sizePx, 0.001f));
+}
+
+float UiFontSet::runOriginY(float lineTopY, const TextStyle& style) const
+{
+    const float line = lineHeight(style);
+
+    const GlyphAtlas* atlas = atlasFor(style.weight, style.sizePx, 0);
+    if (atlas == nullptr) {
+        return std::round(lineTopY + (line - rasterSize(style.sizePx)) * 0.5f);
+    }
+
+    const float capTop   = static_cast<float>(atlas->capTopPx());
+    const float baseline = static_cast<float>(atlas->baselinePx());
+
+    /* Centre the cap band in the line box, then step back up to the glyph box's
+     * top, which is what a painter positions from. */
+    return std::round(lineTopY + (line - (baseline - capTop)) * 0.5f - capTop);
 }
 
 int UiFontSet::atlasSizeFor(float sizePx)
@@ -298,8 +325,11 @@ Vec2 UiFontSet::measure(std::string_view text, const TextStyle& style) const
     }
     endLine();
 
+    /* THE TRACKING THE PAINTER WILL ACTUALLY USE, not the style's fractional
+     * value — see trackingPx. Measuring with one and drawing with the other is
+     * what put the labels' padding out. */
     const float spacing = widestChars > 1
-        ? static_cast<float>(widestChars - 1) * style.letterSpacingPx : 0.0f;
+        ? static_cast<float>(widestChars - 1) * trackingPx(style) : 0.0f;
 
     return { widest + spacing, height };
 }

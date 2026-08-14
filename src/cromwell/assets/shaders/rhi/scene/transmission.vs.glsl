@@ -21,7 +21,7 @@ layout(std140, binding = 1) uniform PassBlock {
     mat4 uViewProjection;   /* the SUN's, in this pass */
 };
 
-#include "rhi/object.glsl"
+#include "rhi/include/object.glsl"
 
 layout(location = 0) out vec4 vLightClip;
 

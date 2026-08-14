@@ -30,8 +30,8 @@
  * flatten into paper and shadowed ones crush to black.
  */
 #include "common/brdf.glsl"
-#include "rhi/scene_block.glsl"
-#include "rhi/material_block.glsl"
+#include "rhi/include/scene_block.glsl"
+#include "rhi/include/material_block.glsl"
 
 layout(location = 0) in vec3 vWorldPosition;
 layout(location = 1) in vec3 vNormal;
@@ -51,12 +51,12 @@ layout(binding = 2) uniform sampler2D uShadowDepth;
  * rhi/transmission.fs.glsl. */
 layout(binding = 3) uniform sampler2D uShadowTransmission;
 
-#include "rhi/sky.glsl"
-#include "rhi/shadow.glsl"
+#include "rhi/include/sky.glsl"
+#include "rhi/include/shadow.glsl"
 
 /* AFTER rhi/sky.glsl, which it calls, and after the sampler declarations above
  * — it adds one of its own at slot 4. */
-#include "rhi/probes.glsl"
+#include "rhi/include/probes.glsl"
 
 void main()
 {

@@ -15,8 +15,8 @@
  * The Tween cases are about the failures that survive review: an animation that
  * settles at 99.99% of its target, and a retarget that jumps.
  */
-#include "cromwell/math/Easing.hpp"
-#include "cromwell/math/Tween.hpp"
+#include "cromwell/math/curve/Easing.hpp"
+#include "cromwell/math/curve/Tween.hpp"
 
 #include <cmath>
 #include <cstdio>

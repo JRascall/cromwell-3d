@@ -174,8 +174,8 @@ add_library(cromwell_base STATIC
     # arithmetic over a float and a clock, wanted by the UI, by the camera and
     # by anything that moves - so it sits with the vector types rather than
     # behind the renderer. See math/Easing.hpp.
-    src/cromwell/math/Easing.cpp
-    src/cromwell/math/Tween.cpp
+    src/cromwell/math/curve/Easing.cpp
+    src/cromwell/math/curve/Tween.cpp
     # ---- the portable half of the platform layer ------------------------
     # HERE RATHER THAN IN A PLATFORM FOLDER, because it needs no platform.
     #
@@ -808,15 +808,21 @@ if(XC_BUILD_APP)
         src/cromwell/ribbon/RibbonShader.cpp
         src/cromwell/ribbon/StripSet.cpp
         # The UI kit's renderer half. Everything else about the widgets is in
-        # cromwell_base; these files are where a draw list becomes pixels and a
-        # weight becomes a rasterised font. See ui/paint/UiPainter.hpp.
+        # cromwell_base; these files are where a weight becomes a rasterised
+        # font and a draw list becomes pixels.
         #
-        # GlyphAtlas is the odd one out and is here only because FreeType is
-        # linked into this target: it names no graphics API and needs no window,
-        # so moving it down to cromwell_base is a CMake edit rather than a
-        # rewrite the day the headless half wants to measure text.
-        src/cromwell/ui/paint/GlyphAtlas.cpp
-        src/cromwell/ui/paint/UiFontSet.cpp
+        # TWO SUBSYSTEMS, TWO FOLDERS. ui/text turns a font file into coverage
+        # and answers "how wide is this string" — the seam the headless layout
+        # measures against, and it draws nothing. ui/paint turns a UiDrawList
+        # into draw calls. They were one folder until text grew a second unit;
+        # see ui/paint/UiPainter.hpp and ui/text/UiFontSet.hpp.
+        #
+        # GlyphAtlas is here only because FreeType is linked into this target:
+        # it names no graphics API and needs no window, so moving it down to
+        # cromwell_base is a CMake edit rather than a rewrite the day the
+        # headless half wants to measure text.
+        src/cromwell/ui/text/GlyphAtlas.cpp
+        src/cromwell/ui/text/UiFontSet.cpp
         src/cromwell/ui/paint/DeviceUiPainter.cpp
         src/cromwell/ui/paint/UiPainter.cpp
         src/cromwell/ui/paint/WorldAnchor.cpp

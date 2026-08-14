@@ -53,7 +53,7 @@
  */
 #pragma once
 
-#include "cromwell/math/Easing.hpp"
+#include "cromwell/math/curve/Easing.hpp"
 
 namespace cromwell {
 

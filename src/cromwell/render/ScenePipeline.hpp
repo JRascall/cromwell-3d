@@ -53,7 +53,15 @@
 #include "cromwell/math/Vec3.hpp"
 #include "cromwell/rhi/Handles.hpp"
 
+#include <cstdint>
+#include <vector>
+
 namespace cromwell {
+
+/* Forward-declared rather than included: SceneFrame only carries a pointer to
+ * one, and DebugDraw drags in the whole segment queue for callers that never
+ * ask for a debug line. */
+class DebugDraw;
 
 class IGeometrySource;
 namespace rhi { class IRenderDevice; }
@@ -137,6 +145,19 @@ struct SceneFrame {
 
     /* The backbuffer's clear colour, in linear terms. */
     float clearColour[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+    /* THE DEBUG LINES TO DRAW OVER THE SCENE, or null for none.
+     *
+     * BORROWED, AND NOT CONSUMED. The queue is aged once a frame by whoever
+     * owns it — see DebugDraw::advance — precisely so that a caller drawing the
+     * scene twice does not silently eat everything on the first pass. This
+     * pipeline reads it and leaves it alone.
+     *
+     * A POINTER RATHER THAN A REFERENCE because a frame legitimately has none:
+     * a probe capture, a thumbnail bake and a test all draw a scene with no
+     * diagnostic geometry in it, and requiring an empty queue to be constructed
+     * to say so is ceremony. */
+    const DebugDraw* debug = nullptr;
 };
 
 class ScenePipeline {
@@ -259,6 +280,15 @@ private:
      * MATERIAL property, so which surfaces land here is authored rather than
      * coded — see DeviceMaterials::isTranslucent. */
     void drawTransparent(const SceneFrame& frame, IGeometrySource& geometry);
+
+    /* The debug queue's segments, over the finished scene and before the
+     * resolve. Nothing when the frame carries no queue or it is empty — and in
+     * that case not even a pass is opened, because an empty pass on a tiler
+     * still stores and reloads the attachment. */
+    void drawDebugLines(const SceneFrame& frame);
+
+    /* Grows the line vertex buffer to hold at least this many vertices. */
+    bool ensureDebugCapacity(uint32_t vertexCount);
 
     /* What the sun becomes crossing anything translucent, into a plane the lit
      * passes tint their sunlight by. Runs immediately after the shadow map,
@@ -391,6 +421,41 @@ private:
      * whose .mat says `blend translucent`. */
     rhi::ShaderHandle   transparentShader_;
     rhi::PipelineHandle transparentPipeline_;
+
+    /* ---- debug lines ----------------------------------------------------
+     *
+     * TWO PIPELINES OVER ONE BUFFER, which is the depth test being a baked
+     * pipeline state rather than something an encoder can poke. The raylib
+     * renderer flips it between two loops and has to flush rlgl's batch in
+     * between or the state applies to lines already queued; here the two states
+     * are two objects and there is nothing to get wrong.
+     *
+     * ORDER: depth-tested first, x-ray over the top. An x-ray line that lost to
+     * a depth-tested one would not be x-ray. Same reasoning as
+     * DebugRenderer.hpp, which is the raylib half of this. */
+    rhi::ShaderHandle   debugShader_;
+    rhi::PipelineHandle debugDepthPipeline_;
+    rhi::PipelineHandle debugXrayPipeline_;
+
+    /* One end of a debug segment: world position and a packed LINEAR colour,
+     * sixteen bytes. Nested and private because nothing outside builds one —
+     * the queue holds Vec3s and this is the device's shape for them. */
+    struct DebugVertex {
+        float         x = 0.0f;
+        float         y = 0.0f;
+        float         z = 0.0f;
+        std::uint32_t rgba = 0xFFFFFFFFu;
+    };
+
+    rhi::BufferHandle   debugVertices_;
+    rhi::MeshHandle     debugMesh_;
+    uint32_t            debugCapacity_ = 0;
+
+    /* KEPT ACROSS FRAMES FOR ITS CAPACITY, cleared rather than freed. A debug
+     * frame is rebuilt every frame from a queue that is itself rebuilt every
+     * frame, so this settles at the high-water mark and then allocates
+     * nothing. */
+    std::vector<DebugVertex> debugScratch_;
 
     /* ---- the reflection probes ------------------------------------------
      *

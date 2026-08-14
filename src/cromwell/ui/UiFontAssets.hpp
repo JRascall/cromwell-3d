@@ -16,7 +16,7 @@
  * cromwell also deliberately does not link ImGui (see the note on the cromwell
  * target in CMakeLists.txt), so the ImGui binding could not live here even if
  * it wanted to; it is game/render/dev/DevFonts. The browser's is a generated
- * stylesheet. The widget kit's will be ui/paint/UiFontSet, and this is what it
+ * stylesheet. The widget kit's will be ui/text/UiFontSet, and this is what it
  * will be built on.
  *
  * THE FILES ARE NOT IN GIT. They are licensed binaries — Inter under the OFL,
@@ -39,7 +39,7 @@ public:
     /* Every weight in FontWeight has a file here, and that is not a
      * coincidence to be maintained by hand — the widget kit's enum IS Inter's
      * weight list, so a second enumeration in this header would be a second
-     * place for the two to disagree. When ui/paint/UiFontSet arrives it asks
+     * place for the two to disagree. When ui/text/UiFontSet arrives it asks
      * this the same question a widget already asks the layout: "SemiBold",
      * not a filename.
      *

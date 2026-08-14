@@ -126,19 +126,37 @@ void WidgetGallery::draw(GameUi& gameUi, const ui::UiInput& input,
 
     context_ = &gameUi.begin(input);
 
-    /* A scrim over the scene, so the widgets are judged against a flat ground
-     * rather than against whatever happens to be behind them. The blur still
-     * runs, so the pass is still exercised at full-screen size.
+    /* A scrim over the scene, so the widgets are judged against a settled
+     * ground rather than against whatever happens to be behind them.
      *
-     * OPAQUE, not the 0.55 it used to be. A translucent scrim leaves the scene
-     * showing through as a mid grey, and mid grey is the worst possible ground
-     * for judging text: it hides both the colour fringing that subpixel
-     * antialiasing produces and the contrast that small labels depend on.
-     * Black is the honest test surface - every artefact the text has is
-     * visible against it. */
+     * ================= TRANSLUCENT, AND THE LADDER GETS ITS OWN =============
+     *
+     * This was opaque black, for a good reason that is written out below and
+     * still holds — and being opaque made the one thing it was blurring
+     * invisible. A full-screen backdrop blur whose result is covered by a solid
+     * fill is a pass you cannot tell is running, let alone running correctly,
+     * which is exactly the case where a renderer bug lives for months. (One
+     * did: see the mip-chain trap in cromwell/rhi/MIGRATION.md, which was
+     * only visible once this alpha came down.)
+     *
+     * So the two needs are separated rather than traded. The scrim is
+     * translucent, which is what makes the blur legible across the widget
+     * columns; the type specimen paints its OWN opaque black band underneath
+     * itself, which is what keeps the text judgeable. See drawTypeSpecimen.
+     *
+     * The original note, which is why that band exists:
+     *
+     *   A translucent scrim leaves the scene showing through as a mid grey, and
+     *   mid grey is the worst possible ground for judging text: it hides both
+     *   the colour fringing that subpixel antialiasing produces and the
+     *   contrast that small labels depend on. Black is the honest test surface
+     *   - every artefact the text has is visible against it.
+     *
+     * 0.55 is the value it carried before it went opaque, borrowed rather than
+     * re-picked. */
     ui::BlurPanelSpec scrim;
     scrim.blurStrengthPx = 10.0f;
-    scrim.fillColour = ui::UiColor::black();
+    scrim.fillColour = ui::UiColor::black().withAlpha(0.55f);
     scrim.contentPadding = ui::UiPadding::all(kMargin);
     const ui::UiRect content = ui::drawBlurPanel(*context_, context_->screenRect(),
                                                  ui::scaled(scrim, context_->scale()));
@@ -153,18 +171,51 @@ void WidgetGallery::draw(GameUi& gameUi, const ui::UiInput& input,
                            content.y, columnWidth, content.height };
     };
 
-    drawLoaders(column(0));
-    drawGauges(column(1));
-    drawControls(column(2));
-    drawPanels(column(3));
+    /* WHERE EACH COLUMN ACTUALLY ENDS, asked rather than guessed — see the
+     * header on why these report a y, and the plate below for what uses it. */
+    const float columnsBottom = std::max(std::max(drawLoaders(column(0)), drawGauges(column(1))),
+                                         std::max(drawControls(column(2)), drawPanels(column(3))));
+    const float panelsBottom = columnsBottom;
+
+    /* The band the widget columns leave empty, across the whole content rect
+     * rather than as a fifth column: a size ladder is only readable if the
+     * large sizes have room to be large. */
+    const ui::UiRect band{ content.x, content.y + content.height * 0.52f,
+                           content.width, content.height * 0.48f };
+
+    /* ================= THE LADDER'S OPAQUE GROUND, AND ITS SHAPE ===========
+     *
+     * The type specimen needs black behind it — mid grey hides both the colour
+     * fringing subpixel antialiasing produces and the contrast small labels
+     * depend on — while the scrim above stays translucent so the blur it runs is
+     * actually visible. See the note on the scrim.
+     *
+     * IT IS AN L, NOT A RECTANGLE, and that is not fussiness. The columns do not
+     * all end at the same height: the three on the left finish well above the
+     * band, and PANELS runs down into it. A full-width plate painted over the
+     * bottom of that column — covering the frosted panel, which is the one
+     * widget the scrim was made translucent to show. Starting the whole band
+     * below the lowest column instead is the other obvious fix, and it does not
+     * fit: the ladder needs its full height, and giving it only what clears
+     * PANELS costs it the 56 px sample that makes the ladder worth having.
+     *
+     * So the plate takes the space that is actually free — full width below
+     * every column, and everything but the PANELS column above that. */
+    const float panelsLeft = column(3).x - columnGap * 0.5f;
+    const float shoulder = std::min(std::max(panelsBottom, band.y), band.bottom());
+
+    if (shoulder > band.y) {
+        ui::shapes::addRect(context_->drawList(),
+                            { band.x, band.y, panelsLeft - band.x, shoulder - band.y },
+                            ui::UiColor::black());
+    }
+    ui::shapes::addRect(context_->drawList(),
+                        { band.x, shoulder, band.width, band.bottom() - shoulder },
+                        ui::UiColor::black());
 
     /* Last, so the badges sit over the scrim — they are anchored to the world
      * behind it, which is exactly the point. */
-    /* The lower half, which the four widget columns leave empty. Taken as a
-     * band across the whole content rect rather than as a fifth column: a size
-     * ladder is only readable if the large sizes have room to be large. */
-    drawTypeSpecimen(ui::UiRect{ content.x, content.y + content.height * 0.52f,
-                                 content.width, content.height * 0.48f });
+    drawTypeSpecimen(band);
 
     drawWorldAnchors(rig);
     if (worldTextSample_) drawMsdfSample(rig);
@@ -173,7 +224,7 @@ void WidgetGallery::draw(GameUi& gameUi, const ui::UiInput& input,
     context_ = nullptr;
 }
 
-void WidgetGallery::drawLoaders(ui::UiRect col)
+float WidgetGallery::drawLoaders(ui::UiRect col)
 {
     const float scale = context_->scale();
     float y = heading(col, col.y, "LOADERS");
@@ -249,10 +300,12 @@ void WidgetGallery::drawLoaders(ui::UiRect col)
         ui::drawLoadingBar(*context_, ui::UiContext::id("gallery.bar.square"),
                            { col.x, y, col.width, px(12.0f) }, ui::scaled(spec, scale));
         caption({ col.x, y + px(14.0f), col.width, px(kCaptionHeight) }, "square ends");
+        y += px(14.0f + kCaptionHeight);
     }
+    return y;
 }
 
-void WidgetGallery::drawGauges(ui::UiRect col)
+float WidgetGallery::drawGauges(ui::UiRect col)
 {
     const float scale = context_->scale();
     float y = heading(col, col.y, "GAUGES");
@@ -337,10 +390,12 @@ void WidgetGallery::drawGauges(ui::UiRect col)
             x += size.x + px(6.0f);
         }
         caption({ col.x, y + px(30.0f), col.width, px(kCaptionHeight) }, "labels - click to select");
+        y += px(30.0f + kCaptionHeight);
     }
+    return y;
 }
 
-void WidgetGallery::drawControls(ui::UiRect col)
+float WidgetGallery::drawControls(ui::UiRect col)
 {
     const float scale = context_->scale();
     float y = heading(col, col.y, "CONTROLS");
@@ -431,10 +486,12 @@ void WidgetGallery::drawControls(ui::UiRect col)
 
         caption({ col.x, y + px(26.0f), col.width, px(kCaptionHeight) },
                 "stepper - click either side");
+        y += px(26.0f + kCaptionHeight);
     }
+    return y;
 }
 
-void WidgetGallery::drawPanels(ui::UiRect col)
+float WidgetGallery::drawPanels(ui::UiRect col)
 {
     const float scale = context_->scale();
     float y = heading(col, col.y, "PANELS");
@@ -522,11 +579,16 @@ void WidgetGallery::drawPanels(ui::UiRect col)
 
         caption({ col.x, bounds.bottom() + px(4.0f), col.width, px(kCaptionHeight) },
                 "blur panel - 24px");
+        y = bounds.bottom() + px(4.0f + kCaptionHeight);
     }
+    return y;
 }
 
 void WidgetGallery::drawTypeSpecimen(ui::UiRect band)
 {
+    /* THE OPAQUE GROUND THIS SECTION SITS ON IS PAINTED BY THE CALLER, because
+     * its shape depends on where the widget columns ended and this function has
+     * no idea. See draw(). */
     float y = heading(band, band.y, "TYPE - SIZE LADDER");
 
     /* Deliberately spanning well past what the kit uses. The kit tops out

@@ -168,7 +168,7 @@ consistent, and the earlier one is the reason the later one must use `fwidth`.
 
 **Small screen-space text.** No hinting, and below roughly 12–14 px the field
 cannot carry enough detail. The UI kit rasterises per size with FreeType light
-hinting instead — see `ui/paint/UiFontSet.hpp`.
+hinting instead — see `ui/text/UiFontSet.hpp`.
 
 ## 10. Known limits
 

@@ -1,4 +1,4 @@
-#include "cromwell/math/Tween.hpp"
+#include "cromwell/math/curve/Tween.hpp"
 
 #include <algorithm>
 #include <cmath>

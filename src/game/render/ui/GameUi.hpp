@@ -29,7 +29,7 @@
 #pragma once
 
 #include "cromwell/ui/core/UiContext.hpp"
-#include "cromwell/ui/paint/UiFontSet.hpp"
+#include "cromwell/ui/text/UiFontSet.hpp"
 #include "cromwell/ui/paint/IUiPainter.hpp"
 #include "cromwell/ui/paint/UiPainter.hpp"
 

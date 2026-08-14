@@ -36,11 +36,26 @@ public:
 
     int size() const { return static_cast<int>(units_.size()); }
 
-    /* Passes the frame to every unit, which passes it to whichever of its
-     * components asked for it — every frame for tick, on their own interval
-     * for think. This is the ONLY thing that drives the entity update cycle,
-     * so a component that stops updating is either not in this roster or did
-     * not say canEverTick/canEverThink. */
+    /* ---- the two clocks -------------------------------------------------
+     * BOTH OF THESE MUST BE CALLED, and by the frame loop only. Together they
+     * are the ONLY thing that drives the entity update cycle, so a component
+     * that stops updating is either not in this roster or did not say
+     * canEverSimulate/canEverTick/canEverThink.
+     *
+     * Why the pair rather than the one entry point this used to be: the
+     * simulation runs on a step of fixed size so its results do not depend on
+     * the frame rate, and presentation runs once per drawn frame because that
+     * is what it is for. Entity.hpp and FixedTimestep.hpp carry the reasoning.
+     * Keeping both here — rather than letting callers reach Unit::simulate and
+     * Unit::tick directly — is what keeps "somebody forgot one" to a single
+     * place in the program. */
+
+    /* One simulation step. Called however many times the elapsed real time is
+     * worth, which may be twice in a frame or not at all, always with the same
+     * fixedSeconds. */
+    void simulate(float fixedSeconds);
+
+    /* One drawn frame, real frame time. Presentation only. */
     void tick(float deltaSeconds);
     bool empty() const { return units_.empty(); }
 

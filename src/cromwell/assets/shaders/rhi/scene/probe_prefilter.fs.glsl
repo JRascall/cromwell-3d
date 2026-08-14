@@ -49,7 +49,7 @@
  * is what makes rendering into level N while reading level N-1 of the same
  * texture legal rather than undefined. See DeviceProbeSet::levelSampler.
  */
-#include "rhi/probe_face.glsl"
+#include "rhi/include/probe_face.glsl"
 
 layout(binding = 0) uniform samplerCubeArray uSource;
 

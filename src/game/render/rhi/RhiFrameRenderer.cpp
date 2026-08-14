@@ -1,5 +1,7 @@
 #include "game/render/rhi/RhiFrameRenderer.hpp"
 
+#include "cromwell/debug/DebugDraw.hpp"
+
 #include "cromwell/diag/Logger.hpp"
 #include "cromwell/diag/Profile.hpp"
 #include "cromwell/platform/IPlatform.hpp"
@@ -385,6 +387,13 @@ void RhiFrameRenderer::render(const FrameView& view)
     frame.clearColour[1] = palette::kBackground.g / 255.0f;
     frame.clearColour[2] = palette::kBackground.b / 255.0f;
     frame.clearColour[3] = 1.0f;
+
+    /* THE PROCESS-WIDE DEBUG QUEUE. Borrowed, not consumed — Application ages it
+     * once at the top of the frame, so handing it to a second renderer or a
+     * second pass would not eat it. Gated by the same view layer the raylib
+     * path uses, so one switch hides debug geometry on both. */
+    if (view.camera != nullptr && view.camera->layers().features.debugDraw)
+        frame.debug = &cromwell::DebugDraw::get();
 
     pipeline_.render(frame, *this);
 

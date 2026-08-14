@@ -106,6 +106,8 @@ public:
     void updateTexture(TextureHandle texture, const void* pixels,
                        uint32_t layer, uint32_t mip) override;
     void generateMips(TextureHandle texture) override;
+    bool copyBackbufferToTexture(TextureHandle destination, uint32_t x, uint32_t y,
+                                 uint32_t width, uint32_t height) override;
 
     ICommandEncoder& beginPass(const PassDesc& desc) override;
     void             endPass(ICommandEncoder& encoder) override;

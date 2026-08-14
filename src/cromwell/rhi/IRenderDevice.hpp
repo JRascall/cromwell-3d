@@ -145,6 +145,37 @@ public:
 
     virtual void generateMips(TextureHandle texture) = 0;
 
+    /* A REGION OF THE BACKBUFFER, INTO A TEXTURE — what has actually been drawn
+     * so far, copied to `destination`'s origin. False when the copy could not
+     * be made.
+     *
+     * NOT readTexture. That one goes to the CPU and stalls the pipeline; this
+     * stays on the device and does not. They read the same pixels and are
+     * otherwise nothing alike, which is why they are not one call with a flag.
+     *
+     * ============== BETWEEN PASSES, AND THAT IS THE WHOLE DESIGN ============
+     *
+     * It is a device call rather than an encoder one, and calling it inside a
+     * pass is an error. GL would not care — a copy from the bound framebuffer is
+     * legal wherever you like — but Vulkan forbids an image copy inside a render
+     * pass outright, and Metal needs a blit encoder, which is a different
+     * encoder. An interface that allowed it here would be one that cannot be
+     * implemented on three of four targets without secretly splitting the pass
+     * behind the caller's back.
+     *
+     * So the caller splits it, visibly, and pays what it costs. On a tiler that
+     * cost is real — a split stores and reloads the attachment — and a UI with
+     * four frosted panels should be able to see in its own code that it asked
+     * for four of them.
+     *
+     * `x` and `y` have their ORIGIN AT THE BOTTOM LEFT, matching setScissor and
+     * every backend's copy rectangle. A UI measuring from the top flips on the
+     * way in; doing that here instead would make this the one call in the
+     * interface with its own convention. */
+    virtual bool copyBackbufferToTexture(TextureHandle destination,
+                                         uint32_t x, uint32_t y,
+                                         uint32_t width, uint32_t height) = 0;
+
     /* ---- the frame ------------------------------------------------------
      *
      * beginPass HANDS BACK AN ENCODER, valid until the matching endPass. The
@@ -260,7 +291,17 @@ public:
      * instead. */
     virtual void setStencilReference(uint32_t value) = 0;
 
-    virtual void draw(MeshHandle mesh, uint32_t instances = 1) = 0;
+    /* `vertexCount` 0 means the whole mesh, which is what almost every pass
+     * wants and what this took exclusively until debug lines arrived.
+     *
+     * THE RANGE IS HERE BECAUSE drawIndexed ALREADY HAD ONE. A caller with two
+     * runs of vertices in one buffer — the debug pass has exactly that, its
+     * depth-tested segments and then its x-ray ones — could otherwise draw them
+     * only by keeping two buffers, or by inventing an index buffer that says
+     * 0,1,2,3… and describes nothing. Every backend takes a first and a count
+     * on a non-indexed draw; there was no reason for this one not to. */
+    virtual void draw(MeshHandle mesh, uint32_t vertexCount = 0,
+                      uint32_t firstVertex = 0, uint32_t instances = 1) = 0;
     virtual void drawIndexed(MeshHandle mesh, uint32_t indexCount,
                              uint32_t firstIndex = 0, uint32_t instances = 1) = 0;
 

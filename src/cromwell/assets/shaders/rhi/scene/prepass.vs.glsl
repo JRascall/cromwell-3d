@@ -22,7 +22,7 @@ layout(std140, binding = 1) uniform PassBlock {
     mat4 uViewProjection;
 };
 
-#include "rhi/object.glsl"
+#include "rhi/include/object.glsl"
 
 layout(location = 0) out vec3 vNormal;
 

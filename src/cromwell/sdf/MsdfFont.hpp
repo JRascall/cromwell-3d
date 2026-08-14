@@ -4,7 +4,7 @@
  * is in it. It lays out a string into quads; it does not draw them, and it
  * knows nothing about cameras, billboards or materials.
  *
- * WHY THIS EXISTS ALONGSIDE ui/paint/UiFontSet, WHICH IS ALSO "a font".
+ * WHY THIS EXISTS ALONGSIDE ui/text/UiFontSet, WHICH IS ALSO "a font".
  * They answer different questions and the difference is not stylistic:
  *
  *   UiFontSet rasterises a glyph at exactly the pixel size it will be drawn

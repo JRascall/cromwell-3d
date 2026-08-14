@@ -1,6 +1,6 @@
 #include "game/render/ui/SplashOverlay.hpp"
 
-#include "cromwell/math/Easing.hpp"
+#include "cromwell/math/curve/Easing.hpp"
 #include "cromwell/ui/core/UiTheme.hpp"
 #include "cromwell/ui/loader/LoadingBar.hpp"
 #include "cromwell/ui/shape/Shapes.hpp"

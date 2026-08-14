@@ -826,8 +826,27 @@ int Application::run()
              * this line with their own controller's intent. */
             playerTwoRig_.orbit(Vec2{ 20.0f * input.deltaSeconds, 0.0f });
 
-            /* The entity update cycle: every unit ticks, and its components
-             * tick or think from there. */
+            /* THE ENTITY UPDATE CYCLE, ON BOTH CLOCKS.
+             *
+             * The fixed step first, however many times the elapsed real time is
+             * worth — none on a fast frame, several after a hitch, and the
+             * surplus past FixedTimestep's cap discarded rather than relived.
+             * Everything the game's rules depend on runs in here, so its
+             * results do not depend on the frame rate.
+             *
+             * Then presentation, exactly once, with real frame time.
+             *
+             * BOTH CALLS LIVE HERE AND NOWHERE ELSE. Splitting one entry point
+             * into two reintroduces the "somebody will call only one" risk that
+             * Entity's old comment named; keeping the pair adjacent, in the one
+             * loop, is what bounds it. See UnitRoster.hpp. */
+            {
+                CW_PROFILE_ZONE_N("fixed step");
+                const int steps = timestep_.advance(input.deltaSeconds);
+                for (int step = 0; step < steps; step++)
+                    state_.roster().simulate(timestep_.stepSeconds());
+            }
+
             {
                 CW_PROFILE_ZONE_N("entity tick");
                 state_.roster().tick(input.deltaSeconds);

@@ -102,7 +102,7 @@ Hence: a parallel path, chosen at startup, deleted at parity.
 | Geometry | `IGeometrySource` | **Game.** Two methods: `submit(encoder, pass)` and `worldBounds` |
 | Materials | `.mat` files → `DeviceMaterials` | Data, never C++ |
 | Probes | `DeviceProbeSet` + `ProbePlacement` | **Engine** owns the array and the schedule; **game** says where the rooms are |
-| UI | `ui::IUiPainter` | `DeviceUiPainter` vs the raylib `UiPainter` |
+| UI | `ui::IUiPainter` | `DeviceUiPainter` vs the raylib `UiPainter`. **Every command kind converted** |
 | Text | `ui::GlyphAtlas` | **Engine.** The bake is neutral; each painter does its own upload |
 
 **The rule:** if converting a pass grows `RhiFrameRenderer`, something
@@ -163,8 +163,11 @@ cube filtering, a dev-panel preview of a layer, and re-placement after
 destruction — the rhi world is built once and never rebuilt, so there is nothing
 to hook that to yet.
 
-**UI**
+**UI — complete**
 - `IUiPainter`; `DeviceUiPainter` does shapes, clipping and screen mapping
+- **Backdrop blur** — the pass splits at each frosted panel to copy the
+  backbuffer, mip it and read a fractional level. `IRenderDevice::copyBackbufferToTexture`
+  is the one interface addition it needed
 - **Text.** `GlyphAtlas` is the bake — FreeType, native hinting, the phase
   shift, the shelf pack and the coverage curve — and it names no graphics API.
   `UiFontSet` caches those and builds a raylib `Font` from one lazily; the
@@ -176,6 +179,12 @@ to hook that to yet.
   operation; and `measure()` no longer goes through `MeasureTextEx`, so the
   layout above it is arithmetic over the atlas's own metrics and both painters
   advance the pen by the same numbers
+- **Two placement decisions now live in `UiFontSet` and are ASKED FOR by both
+  painters and by the layout** — `trackingPx` and `runOriginY`. Each replaced a
+  copy of the arithmetic in every caller, and each copy had drifted into a
+  visible bug: text drawn wider than the box measured for it, and text centred
+  on a line box rather than on the ink. Both were reported as "the padding looks
+  uneven". The reasoning is on those two functions
 
 ## 4. Remaining, in order
 
@@ -253,9 +262,55 @@ a one-command test. Captures and the ×8 amplified diff are in
 
 The remaining blur difference is the honest measure of what §4.2 is worth.
 
-### 4.2 UI backdrop blur — NEXT
-Needs to read the target it is drawing into: copy a region, mip it, sample back.
-The device can express it; it wants a scratch texture and a second pipeline.
+### 4.2 ~~UI backdrop blur~~ — done
+
+`DeviceUiPainter` now draws every command kind the draw list has, and
+`skippedCommands()` reports zero on the gallery screen. **The UI is converted.**
+
+It needed one addition to the interface: **`IRenderDevice::copyBackbufferToTexture`**,
+which is a device call rather than an encoder one and refuses to run inside a
+pass. GL would not care — copying from the bound framebuffer is legal anywhere —
+but Vulkan forbids an image copy inside a render pass and Metal needs a different
+encoder, so an interface that allowed it here is one that cannot be implemented
+on three of four targets without secretly splitting the pass behind the caller.
+
+So the painter splits it, visibly: each frosted panel ends the pass, copies,
+generates mips, and reopens with `LoadAction::Load`. That is the cost, it is in
+the caller's own code where a tiler's bill can be seen, and it fixes the ordering
+for free — everything appended before the blur is on the backbuffer when the copy
+happens, so a panel frosts the UI beneath it and not merely the scene.
+
+**A MIP LEVEL SETS THE RADIUS; IT DOES NOT SET THE LOOK.** Reading the level with
+a single `textureLod` — the obvious implementation, and what `UiPainter` does —
+comes out visibly blocky, reported as "pixelated and stair-steppy". Two causes
+stack: `glGenerateMipmap` is a box filter, so a bright object leaves a square
+smear rather than a soft falloff; and magnifying level 3 of a 1280-wide capture
+means stretching 160 texels over 1280 pixels, which the bilinear unit does
+piecewise-linearly and the eye reads as creases at every texel boundary. No
+number of extra mip levels fixes the second one — the data really does have only
+160 samples.
+
+`rhi/ui_blur.fs.glsl` gathers eight taps at the sampled level instead, in the
+dual-filter (Kawase) upsample pattern. Overlapping tents sum to something close
+to a Gaussian, which has no creases. Eight texture reads, no extra targets, no
+extra passes, inside a draw that was happening anyway. A genuinely wide blur
+still wants the full downsample/upsample ladder and its own targets.
+
+Two smaller decisions worth keeping:
+
+- **The blur level is a push constant read by `textureLod`, not a sampler LOD
+  clamp.** The raylib painter has to pin the texture's LOD range and put it back
+  afterwards, because rlgl's shader cannot be told a level. A clamp is state on a
+  shared object: two panels at different strengths in one frame need two samplers
+  or two round trips, and forgetting the restore leaves every later read of that
+  texture pinned to a blur.
+- **Glyph quads and blur outlines share one vertex buffer.** Both are position,
+  UV and colour; they differ in what the UV addresses and which shader reads it,
+  which is what a pipeline is for and not what a second buffer is for.
+
+**AND IT FOUND A REAL BUG IN THE SHIPPING RENDERER — see §5.** The device path is
+correct here and `UiPainter` is not, so this is the one place the two paths are
+expected to differ.
 
 ### 4.3 Reflection probes — done; what is left of them
 The capture, the selection and the sampling all landed (see §3). Since then, from
@@ -352,10 +407,50 @@ The visible surface is small and that is expected: only the ladder (roughness
 0.35) and the window (0.05) are smooth enough to show a probe. Everything else on
 the board is 0.8, where the term has already blended back to the analytic sky.
 
-### 4.4 Game overlays
-Cover markers, path preview, selection rings. These go through the UI kit, so
-§4.1 landing is most of what they needed — what is left is checking that each
-one is shapes and text rather than something that reaches past the draw list.
+### 4.4 Game overlays — HALF DONE, and bigger than this entry used to claim
+
+It said these "go through the UI kit, so §4.1 landing is most of what they
+needed". **They do not.** `game/render/overlay/OverlayRenderer` — visibility
+field, cover shields, hover plate, path preview — draws WORLD-SPACE geometry
+with `DrawCube` and `DrawLine3D` straight into raylib's immediate mode. It never
+touches a `UiDrawList`. Converting text bought it nothing.
+
+So the entry was an estimate written from the name of the thing rather than from
+its code, which is the same mistake §4.1's note made about `UiFontSet`. Read the
+file before believing an entry here.
+
+The work decomposes into two halves that are worth keeping apart:
+
+1. ~~**`cromwell/debug/DebugDraw` needs a device renderer.**~~ **Done.** It is a
+   pass on `ScenePipeline` rather than a class of its own — the lines need the
+   scene's depth buffer and the view projection, both of which the pipeline
+   owns, and a separate renderer would have had to be handed them. `SceneFrame`
+   carries the queue as a borrowed pointer; two pipelines over one vertex buffer
+   give the depth-tested and x-ray passes.
+
+   It needed one interface addition: **a vertex range on `ICommandEncoder::draw`**.
+   `drawIndexed` already had `firstIndex`, `draw` had nothing, so two runs of
+   vertices in one buffer could only be drawn by keeping two buffers or by
+   inventing an index buffer that says 0,1,2,3… and describes nothing. Every
+   backend takes a first and a count on a non-indexed draw.
+
+   **The trap that cost the time: adding that parameter changed what the second
+   argument MEANS.** `draw(mesh, 1)` was one instance and became one VERTEX, so
+   the pass ran, bound, uploaded and drew a single vertex of a line list — which
+   is nothing at all, with no error anywhere. Every pre-existing call site passed
+   the mesh alone and was unaffected; the only casualty was the new code written
+   in the same edit. If a defaulted parameter is inserted before an existing one,
+   the compiler cannot help.
+
+2. **`OverlayRenderer` is the hard half, and it is really §4.12 arriving early.**
+   Its cubes are solid geometry, not lines, and it issues them itself — a game
+   deciding WHAT is drawn and HOW, which is the exact seam the render scene is
+   meant to close. Porting it as-is means inventing a second way for the game to
+   push triangles at the device, and then deleting that when the scene lands.
+
+   The cheap version is to let these become debug-draw primitives (a box is
+   twelve lines) and accept the look changing. The right version is renderables
+   the game registers. Worth deciding before writing either.
 
 ### 4.5 Dev panel
 imgui on the rhi path. The widget gallery, which was going to be the first task
@@ -459,8 +554,138 @@ disappears; `RhiStatics`/`RhiBodies` become things that POPULATE a scene rather
 than things that draw. The game never implements a pass callback and never learns
 what a shadow pass wants.
 
-Not before parity — it is a second migration on top of this one, and doing both
-at once would leave neither finishable.
+**THIS ENTRY USED TO SAY "not before parity — doing both at once would leave
+neither finishable". THAT IS NOW WRONG, and the reversal is deliberate.**
+
+It was written when most of the frame was unconverted. Since then the UI, the
+probes and the text have landed, and what REMAINS to convert — decals, ribbons,
+textures, props, the overlays — would otherwise be written against
+`IGeometrySource` and then moved again. Switching first means each of them is
+written once. The "second migration" cost is real only if you switch AFTER the
+remaining work rather than before it.
+
+It also unblocks §4.3's leftover for free. Probe re-placement is stuck on "the
+rhi renderer builds its static world once and never rebuilds it, so there is
+nothing to hook to". A scene the game adds to and removes from IS that signal.
+
+---
+
+## THE DESIGN
+
+### The renderable
+
+```cpp
+struct RenderableDesc {
+    rhi::MeshHandle mesh;
+    MaterialId      material;      /* into DeviceMaterials */
+    Mat4            transform;
+    Vec4            tint;
+    Aabb            localBounds;   /* the engine transforms it on add/update */
+    bool            castsShadow = true;
+    std::uint32_t   filterKey = ~0u;   /* GAME-DEFINED — see below */
+};
+```
+
+Configured with `withX` chaining per CLAUDE.md — it has more than three optional
+knobs and is filled at a call site, which is exactly the case that rule names.
+
+`RenderScene` hands back a `RenderableId` and takes `remove`, `setTransform`,
+`setVisible`, `setFilterKey`. Nothing else. **The game never sees an encoder, a
+pass or a pipeline again.**
+
+### The three things the game currently decides, and where each goes
+
+| Today the game branches on | Becomes |
+|---|---|
+| casters only, for the sun | `castsShadow` on the renderable |
+| opaque vs translucent | **the material's blend mode** — already data, already in the `.mat`. The engine reads it and stops asking |
+| whole lattice vs the player's cutaway | a filter mask — below |
+
+That is the whole of `GeometryPass`. It disappears, and with it the requirement
+that a second project know what a shadow pass wants.
+
+### THE CUTAWAY, WHICH IS THE ONLY HARD PART
+
+The engine must not learn what a storey is. So: **every renderable carries a
+32-bit key the game assigns, every VIEW carries a 32-bit mask, and the engine
+draws where `(key & mask) != 0`.** One AND per renderable. The engine never
+learns what a bit means.
+
+The game spends the bits: one per storey, four for wall facings, the rest spare.
+Hiding everything above the iso level is a mask with the low storey bits set;
+stripping the facings the camera looks through clears four more. This is the
+"the game may EXTEND the vocabulary" clause in §0 actually being built, and it is
+the same mechanism as Unreal's visibility flags and Unity's layer masks.
+
+**THE MASK BELONGS TO THE VIEW, NOT THE FRAME**, and that is what makes the
+existing bug class impossible rather than merely fixed. The sun's view and a
+probe capture's view carry an all-bits mask; only the camera's view carries the
+cutaway. Today that correctness lives in game code — `RhiFrameRenderer::submit`
+passes `CutawayView::whole()` for `Shadow` and `ProbeOpaque` and the player's cut
+otherwise — and getting it wrong made the lighting change when the player
+changed floor. After this the game cannot express the wrong thing.
+
+So a **View** is: matrices, a filter mask, and which passes it runs. Three views
+exist — camera, sun, probe face — and the pipeline already has all three.
+
+### Culling, and what the current shape is hiding
+
+Frustum-cull world bounds per renderable per view. That needs per-renderable
+bounds, which needs the statics **chunked** — one renderable per (chunk,
+material) rather than one per material for the whole map. A chunk of 8x8 tiles
+per storey is the obvious grain.
+
+`IGeometrySource` let us not think about this, because one giant mesh per bucket
+has no useful bounds. Chunking is therefore real added work, and it pays twice:
+culling gets something to cull, and a world edit re-uploads one chunk instead of
+the whole map — which is the same granularity §4.3's probe re-placement wants.
+
+### Sorting
+
+Opaque sorts by pipeline and material, to cut state changes. **Translucent sorts
+back-to-front by view distance**, which fixes the bug this entry already calls
+"the limitation most likely to force the issue": two overlapping panes currently
+blend in bucket order.
+
+Batching and instancing become POSSIBLE here and are not built yet. The engine
+owning the list is the precondition; wanting them is a measurement.
+
+### What this does to the overlays (§4.4)
+
+They stop being a special case. A cover marker is a mesh, a transform and a
+material — a renderable like any other, with a filter bit so the cutaway hides
+it with the floor it belongs to.
+
+**One shape change is required of the game and it is an improvement.** The
+visibility overlay currently emits one draw per standable cell EVERY FRAME. As
+renderables that would be thousands of registrations a frame, which is the wrong
+use of a retained scene. It becomes one mesh rebuilt when the field CHANGES —
+on selection or a move, not per frame — and one renderable. That is strictly
+less work than today; the per-frame loop only looked cheap because immediate
+mode hid it.
+
+### The order of work, keeping a working frame throughout
+
+Each step leaves the tree building and drawing a correct frame.
+
+1. `RenderScene`, `RenderableDesc`, `View`. Nothing uses it. `ScenePipeline`
+   traverses the scene AND still calls `IGeometrySource`.
+2. **Statics**, chunked. `RhiStatics` registers instead of drawing, and its
+   `submit()` goes empty — so the frame is drawn once, by the scene, from the
+   first converted producer onward.
+3. **Bodies.** `RhiBodies` registers; transforms updated per frame.
+4. **Overlays** (§4.4 dissolves).
+5. Delete `IGeometrySource`, `GeometryPass`, and the `submit` halves.
+
+### What is deliberately NOT in this
+
+- **No scene graph.** A flat array of renderables with world transforms. Parents
+  and local transforms are an animation and attachment problem, and nothing here
+  has one yet.
+- **No render graph.** `ScenePipeline` already owns the pass order explicitly and
+  it is readable; a graph solves a problem this frame does not have.
+- **No instancing or batching**, per above.
+- **No LODs, no occlusion culling.** Frustum only.
 
 ### 4.13 At parity
 Delete `FrameRenderer`, `StaticsMesh`, `UnitRenderer`, `ISceneSource`,
@@ -581,6 +806,49 @@ white stands in — but `texelFetch` out of range is *undefined*, not zero, so t
 fetch has to be clamped to the bound texture's size for the stand-in to work at
 all. Leaving the slot unbound instead reads black on most drivers, and black
 occlusion is a cubemap in which every room is a cave.
+
+**A MIP CHAIN OVER A PARTIALLY-WRITTEN TEXTURE — and this one is a live bug in
+the RAYLIB painter, found by porting it.**
+
+The obvious way to blur a backdrop is to copy the rectangle behind the panel,
+mip it, and read a level. `UiPainter::executeBackdropBlur` does exactly that, the
+device version was written to match, and it is wrong.
+
+The capture texture only ever GROWS, so a small panel copies into the corner of a
+texture sized by the largest one. `glGenerateMipmap` then averages the WHOLE
+texture, including every texel the copy did not touch — which still holds
+whatever the last, bigger capture left there. At a 24-pixel radius one texel of
+the level being read covers a 24-pixel square of source, so the stale content
+bleeds in from the edge and, a few levels up, dominates.
+
+**Measured, on this project's own gallery screen: a frosted panel over an OPAQUE
+BLACK scrim comes out (255, 255, 255) on the raylib path.** A blur of black is
+black. With the scrim made translucent so there is something to actually blur,
+the whole screen collapses to a flat grey instead of a blurred scene.
+
+The device path captures the WHOLE SCREEN instead, so the chain is built over a
+fully valid image and there are no unwritten texels to average in. It reads
+(15, 15, 15) on that panel, which is the 6% white fill over black — correct.
+Bleeding across a panel's edge then becomes right rather than a bug: real frosted
+glass gathers light from just outside its frame too.
+
+The cost is a full-screen copy and mip chain per frosted panel rather than a
+region-sized one. **That is the price of the correct answer**, and if it ever
+matters the fix is not to go back — it is a chain that can be built over a
+sub-rectangle, which means generating the levels by hand.
+
+**`UiPainter` STILL HAS THE BUG, AND IS NOT GOING TO BE FIXED.** Decided
+deliberately, so nobody rediscovers the white panel and spends a day on it:
+
+- Nothing in the game asks for a backdrop blur. The only callers are the widget
+  gallery and `TipPanel`'s media area when `blurMediaBackground` is set, which
+  only the gallery sets. It has never been on screen during play.
+- The gallery runs on both renderers now, and on the rhi path it is correct.
+- §4.13 deletes `UiPainter`.
+
+Which makes the fix work on a file that is going, to correct a defect that only
+appears on a screen that has a working version beside it. The bug is documented
+above; that is what it earns.
 
 **Push constants do not survive a pipeline switch.** They are emulated on GL as
 a uniform at location 0 of the CURRENT PROGRAM (`glUniform4fv`), so binding a

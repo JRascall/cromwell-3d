@@ -23,6 +23,7 @@
 #pragma once
 
 #include "cromwell/camera/CameraDirector.hpp"
+#include "cromwell/entities/FixedTimestep.hpp"
 #include "cromwell/input/FrameInput.hpp"
 #include "cromwell/input/InputHandler.hpp"
 #include "cromwell/platform/IPlatform.hpp"
@@ -99,6 +100,17 @@ private:
 
     CliOptions options_;
     GameState  state_;
+
+    /* THE SIMULATION CLOCK, and the rate is this game's decision rather than
+     * the engine's — see FixedTimestep.hpp on why an engine that serves an RTS,
+     * a shooter and this cannot pick one number. Sixty is chosen here because
+     * the simulation is turn-based and event-driven, so the rate buys nothing
+     * above the frame rate and nothing is gained by going lower; a lockstep RTS
+     * on this engine would sensibly run a quarter of it.
+     *
+     * Speed control, if this game ever wants one, scales what is handed to
+     * advance() — pause passes zero — and never touches the rate. */
+    cromwell::FixedTimestep timestep_ = cromwell::FixedTimestep{}.withRate(60);
 
     /* Declared before the controller: the controller borrows the renderer's
      * DecalSet, and members are constructed in declaration order. */

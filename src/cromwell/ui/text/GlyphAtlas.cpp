@@ -1,4 +1,4 @@
-#include "cromwell/ui/paint/GlyphAtlas.hpp"
+#include "cromwell/ui/text/GlyphAtlas.hpp"
 
 #include "cromwell/diag/Logger.hpp"
 
@@ -283,6 +283,17 @@ GlyphAtlas GlyphAtlas::bake(const std::string& path, int sizePx, int phase, int 
     atlas.height_  = atlasHeight;
     atlas.sizePx_  = sizePx;
     atlas.padding_ = padding;
+    atlas.baseline_ = ascender;
+
+    /* THE HINTED CAP TOP, read off the rasterised 'H'. Its offsetY is already
+     * (ascender - bitmap_top), which is exactly the distance from the top of the
+     * glyph box to the top of a capital — see the header on why this comes from
+     * a bitmap rather than from the face's declared cap height.
+     *
+     * A face with no 'H' falls back to the ascender, which centres on the whole
+     * box and is the behaviour this replaced: wrong, but not broken. */
+    const int capitalH = GlyphAtlas::indexOf('H');
+    atlas.capTop_ = raster[capitalH].height > 0 ? raster[capitalH].offsetY : 0;
     return atlas;
 }
 

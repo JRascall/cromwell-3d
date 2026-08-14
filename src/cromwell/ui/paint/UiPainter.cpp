@@ -202,8 +202,7 @@ void UiPainter::executeText(const TextRun& run, const UiFontSet& fonts)
      * costs no precision anyone can see. Horizontal is different — that is
      * where fractional letter spacing accumulates — and it is handled per glyph
      * below by choosing a phase rather than by rounding. */
-    const float lineHeight = fonts.lineHeight(run.style);
-    const float originY = std::round(run.position.y + (lineHeight - drawSize) * 0.5f);
+    const float originY = fonts.runOriginY(run.position.y, run.style);
 
     const Color colour = toRaylibColour(run.style.colour.toSrgb8());
 
@@ -217,17 +216,19 @@ void UiPainter::executeText(const TextRun& run, const UiFontSet& fonts)
      * 3,2,3,2,3,2,2,3. The eye does not read that as "tracking is 0.4 px off",
      * it reads it as ragged, and ragged reads as low quality.
      *
-     * Rounding here instead makes every gap identical, and as a side effect
-     * every pen position lands on a whole pixel by construction rather than by
-     * the rounding below - which is the condition the hinted glyphs want
-     * anyway.
+     * Rounding instead makes every gap identical, and as a side effect every
+     * pen position lands on a whole pixel by construction rather than by the
+     * rounding below - which is the condition the hinted glyphs want anyway.
      *
      * The alternative is subpixel positioning, and it is not available: it
      * requires hinting to be off or light, and native hinting is what makes
      * these glyphs crisp in the first place. Uniform-but-0.4px-narrow beats
-     * accurate-but-ragged. See study/topics/surfaces/text_rendering.md section 3. */
-    const float tracking = std::round(run.style.letterSpacingPx * drawSize
-                                      / std::max(run.style.sizePx, 0.001f));
+     * accurate-but-ragged. See study/topics/surfaces/text_rendering.md section 3.
+     *
+     * ASKED FOR RATHER THAN COMPUTED, because the LAYOUT reserved space with the
+     * same answer — see UiFontSet::trackingPx. Both painters holding their own
+     * copy of the rounding is how the drawn run and its box drift apart. */
+    const float tracking = UiFontSet::trackingPx(run.style);
 
     /* Bound once for the whole run. Every phase of a given weight and size is a
      * separate atlas, so a run genuinely can switch texture between glyphs —

@@ -11,27 +11,19 @@
  * layout and the shapes above them cannot tell which is running — which is the
  * property that made the UI far cheaper to port than the renderer.
  *
- * ====================== WHAT IS NOT CONVERTED YET =========================
+ * ================= UNTEXTURED AND TEXTURED, NOT ONE OF EACH ===============
  *
- * BACKDROP BLUR, and only that. It needs to READ the target it is drawing into
- * — copy a region, mip it, sample it back. The device can express that; it
- * wants a scratch texture and a second pipeline, and a panel without its
- * frosting still shows its fill, so it is last. It is named in the switch and
- * counted rather than silently dropped.
+ * Two vertex buffers and three pipelines, split along whether a thing samples
+ * anything — which is the split the draw list itself already has.
  *
- * ========================= TWO PIPELINES, NOT ONE =========================
- *
- * Shapes and text are drawn by different pipelines over different vertex
- * buffers, and that split is the whole shape of this file.
- *
- * A shape here is exact vertex geometry with a feathered edge — see
- * ui/shape/Shapes.hpp for why that beats a rounded-box shader at these sizes —
- * so it has a position and a colour and nothing else. Text is the only thing in
- * the kit that samples a texture. Giving every shape vertex a UV to unify them
- * would add eight bytes to every corner of every panel to carry a constant, and
- * branching in the fragment shader would put the decision on every fragment in
- * the frame; a second pipeline puts it on the handful of commands that are
- * actually text.
+ * A shape is exact vertex geometry with a feathered edge — see ui/shape/Shapes.hpp
+ * for why that beats a rounded-box shader at these sizes — so it is a position
+ * and a colour, twelve bytes, and nothing samples. Glyph quads and frosted
+ * regions both carry a UV as well, so both are the same twenty bytes and both
+ * live in the SAME buffer; only their shader differs, which is precisely what a
+ * pipeline is for. Giving every shape vertex a UV to unify all three would add
+ * eight bytes to every corner of every panel to carry a constant, and branching
+ * in the fragment shader would put the decision on every fragment in the frame.
  *
  * PAINTER'S ORDER SURVIVES THE SPLIT, which is the part worth being careful
  * about. The pass walks the command list in order and switches pipeline
@@ -40,12 +32,30 @@
  * be faster and would draw every label on top of the panel that was meant to
  * cover it.
  *
+ * ================= A FROSTED PANEL SPLITS THE PASS ========================
+ *
+ * The blur reads the backbuffer it is drawing into, and a copy out of a render
+ * target cannot happen inside a render pass on three of the four target
+ * backends — see IRenderDevice::copyBackbufferToTexture. So each backdrop blur
+ * ends the pass, copies the region behind it, generates its mip chain, and opens
+ * a new pass that LOADS what was there.
+ *
+ * THAT COST IS VISIBLE HERE ON PURPOSE. On a tiler a split stores and reloads
+ * the whole attachment, so four frosted panels is four of them, and a UI that
+ * quietly did this behind a call named `drawBlur` would be one nobody could
+ * find. The raylib painter pays the same shape of cost — it flushes rlgl's
+ * batch — and pays it invisibly.
+ *
+ * It also fixes the ordering for free: everything appended before the blur is on
+ * the backbuffer when the copy happens, so a panel frosts the UI beneath it and
+ * not merely the scene.
+ *
  * ================= ONE UPLOAD A FRAME, FOUR GROWING BUFFERS ===============
  *
  * The draw list arrives as two contiguous arrays, so this uploads each once and
- * then issues a draw per command. Glyph quads are built into two more arrays
- * before the pass opens and uploaded the same way — one pass over the text runs
- * rather than a buffer update between draws.
+ * then issues a draw per command. Glyph quads and blur outlines are built into
+ * two more arrays before the first pass opens and uploaded the same way — one
+ * walk of the command list rather than a buffer update between draws.
  *
  * All four grow to the high-water mark and stay there — a UI redrawn every
  * frame settles after a few frames and then neither allocates nor reallocates,
@@ -59,6 +69,11 @@
 
 #include "cromwell/rhi/Handles.hpp"
 #include "cromwell/ui/paint/IUiPainter.hpp"
+
+/* For the blur's outline ring, kept as a member so it stops allocating after
+ * the first frosted panel — see the reuse note in Outline.hpp. It brings
+ * UiDrawList.hpp with it, which is this class's input anyway. */
+#include "cromwell/ui/shape/Outline.hpp"
 
 #include <cstdint>
 #include <vector>
@@ -97,21 +112,25 @@ public:
 
     void release() override;
 
-    /* Commands skipped because their kind is not converted, counted over the
-     * last draw. A diagnostic: "the HUD has no frosting" and "the HUD is not
-     * drawing" look identical on screen and have different causes.
+    /* Commands that did not reach the screen, counted over the last draw.
      *
-     * A text run whose weight could not be rasterised counts here too. It is
-     * the same class of fact — something in the list did not reach the screen —
-     * and a HUD silently missing one label is exactly what this exists to make
-     * visible. */
+     * EVERY KIND IS CONVERTED NOW, so this is no longer a statement about the
+     * migration — it is a diagnostic, and a more useful one for it. A text run
+     * whose weight never rasterised counts here, and so does a frosted panel
+     * whose capture texture could not be made. "The HUD has no labels" and "the
+     * HUD is not drawing" look identical on screen and have different causes;
+     * this is what separates them. */
     int skippedCommands() const { return skippedCommands_; }
 
 private:
-    /* One glyph quad corner. A DIFFERENT VERTEX FROM THE SHAPES', which is the
-     * point of the two-pipeline split — see the header. Twenty bytes: position,
-     * atlas UV, packed colour, in the order ui_text.vs.glsl declares them. */
-    struct TextVertex {
+    /* One corner of anything that SAMPLES — a glyph quad or a frosted region.
+     * Twenty bytes: position, UV, packed colour, in the order both
+     * ui_text.vs.glsl and ui_blur.vs.glsl declare them.
+     *
+     * ONE VERTEX FOR BOTH, and therefore one buffer: they differ in what the UV
+     * addresses and in which shader reads it, and neither of those is a reason
+     * to grow, upload and keep in step a second array of the same layout. */
+    struct TexturedVertex {
         float         x = 0.0f;
         float         y = 0.0f;
         float         u = 0.0f;
@@ -143,6 +162,20 @@ private:
         std::uint32_t count = 0;
     };
 
+    /* One frosted region: how blurred, and the outline fan to draw it with.
+     *
+     * NO RECTANGLE, because the capture is the WHOLE SCREEN — see the note on
+     * captureTexture_ for why copying only the region behind each panel is the
+     * version that does not work. */
+    struct BlurRegion {
+        /* log2 of the strength in pixels — the mip level to read. Fractional,
+         * and deliberately so; see ui_blur.fs.glsl. */
+        float         lod = 0.0f;
+
+        std::uint32_t indexBegin = 0;
+        std::uint32_t indexCount = 0;
+    };
+
     /* An atlas uploaded to the device. KEYED BY ADDRESS, which is sound because
      * UiFontSet caches atlases in a std::map and a map keeps its elements put —
      * see the note on cacheKey there. The generation guard below is what makes
@@ -157,18 +190,26 @@ private:
      * keeping them otherwise. False if either could not be created. */
     bool ensureCapacity(uint32_t vertexCount, uint32_t indexCount);
 
-    /* The same, for the glyph quads. */
-    bool ensureTextCapacity(uint32_t vertexCount, uint32_t indexCount);
+    /* The same, for the textured geometry — glyphs and blur outlines together. */
+    bool ensureTexturedCapacity(uint32_t vertexCount, uint32_t indexCount);
 
-    /* Builds every text run's quads into the scratch arrays and fills the batch
-     * lists. One pass before the render pass opens, so the buffers are uploaded
-     * once rather than updated between draws — updating a buffer a pass is
-     * already reading is the kind of hazard that works on one driver and tears
-     * on another. */
-    void buildTextGeometry(const UiDrawList& drawList, const UiFontSet& fonts);
+    /* Grows the capture texture to cover at least this much, keeping it
+     * otherwise. GROWS ONLY, so dragging a window smaller does not churn a GPU
+     * allocation on every frame of the drag. */
+    bool ensureCaptureTexture(uint32_t width, uint32_t height);
+
+    /* Builds the glyph quads and blur outlines into the scratch arrays and
+     * fills the batch lists. One walk before the first pass opens, so the
+     * buffers are uploaded once rather than updated between draws — updating a
+     * buffer a pass is already reading is the kind of hazard that works on one
+     * driver and tears on another. */
+    void buildTexturedGeometry(const UiDrawList& drawList, const UiFontSet& fonts);
 
     /* Appends one run's quads, returning the range of batches it produced. */
     TextRange appendRun(const TextRun& run, const UiFontSet& fonts);
+
+    /* Appends one frosted region's outline fan. */
+    BlurRegion appendBlur(const UiBackdropBlur& blur);
 
     /* The device texture for this atlas, uploading it on first use. Invalid
      * when it could not be created, which makes the run draw nothing. */
@@ -194,20 +235,59 @@ private:
     rhi::PipelineHandle textPipeline_;
     rhi::SamplerHandle  glyphSampler_;
 
-    rhi::BufferHandle textVertices_;
-    rhi::BufferHandle textIndices_;
-    rhi::MeshHandle   textMesh_;
+    rhi::ShaderHandle   blurShader_;
+    rhi::PipelineHandle blurPipeline_;
+    rhi::SamplerHandle  captureSampler_;
 
-    uint32_t textVertexCapacity_ = 0;
-    uint32_t textIndexCapacity_ = 0;
+    /* WHAT IS BEHIND THE PANELS: the whole screen, with a full mip chain,
+     * because the chain IS the blur. One texture reused by every frosted region
+     * in the frame — they are drawn one at a time, each copying into it just
+     * before it is read, so a second would buy nothing.
+     *
+     * ======= WHY THE WHOLE SCREEN AND NOT JUST THE REGION BEHIND EACH =======
+     *
+     * Copying only the panel's own rectangle is the obvious economy, it is what
+     * UiPainter does, and it is wrong — measurably, on this project's own
+     * gallery screen, where a frosted panel over a BLACK scrim came out WHITE.
+     *
+     * The texture only grows, so a small panel copies into the corner of a
+     * texture sized by the largest one. glGenerateMipmap then averages the WHOLE
+     * texture, including every texel the copy did not touch — which still holds
+     * whatever the last, bigger capture left there. At a blur radius of 24 px a
+     * single texel of the level being read covers a 24-px square of source, so
+     * the stale content bleeds in from the edge of the used sub-rectangle and, a
+     * few levels up, dominates.
+     *
+     * Capturing the whole screen means the chain is built over a fully valid
+     * image, so there are no unwritten texels to average in. Bleeding across a
+     * panel's edge then becomes CORRECT rather than a bug: real frosted glass
+     * gathers light from just outside its frame too.
+     *
+     * The cost is a full-screen copy and mip chain per frosted panel rather than
+     * a region-sized one. That is the price of the correct answer, and if it
+     * ever matters the fix is not to go back — it is a chain that can be built
+     * over a sub-rectangle, which means generating the levels by hand. */
+    rhi::TextureHandle captureTexture_;
+    uint32_t           captureWidth_ = 0;
+    uint32_t           captureHeight_ = 0;
+
+    rhi::BufferHandle texturedVertices_;
+    rhi::BufferHandle texturedIndices_;
+    rhi::MeshHandle   texturedMesh_;
+
+    uint32_t texturedVertexCapacity_ = 0;
+    uint32_t texturedIndexCapacity_ = 0;
 
     /* KEPT ACROSS FRAMES FOR THEIR CAPACITY, cleared rather than freed — the
      * same steady state the draw list itself reaches, and the reason a HUD
      * redrawn sixty times a second allocates nothing after the first few. */
-    std::vector<TextVertex>    textVertexScratch_;
-    std::vector<std::uint32_t> textIndexScratch_;
-    std::vector<GlyphBatch>    glyphBatches_;
-    std::vector<TextRange>     textRanges_;
+    std::vector<TexturedVertex> texturedVertexScratch_;
+    std::vector<std::uint32_t>  texturedIndexScratch_;
+    std::vector<GlyphBatch>     glyphBatches_;
+    std::vector<TextRange>      textRanges_;
+    std::vector<BlurRegion>     blurRegions_;
+
+    Outline blurOutline_;
 
     /* A handful of entries — one per (weight, size, phase) the UI has actually
      * asked for, which is five or six across the whole kit. A vector scanned
