@@ -41,7 +41,7 @@
 /* THE RESERVED LOCATION. ICommandEncoder::pushConstants writes here on every
  * backend — real push constants on Vulkan and Metal, a uniform array at
  * location 0 on GL. Eight vec4s is the 128 bytes every backend guarantees;
- * five are used. */
+ * six are used. */
 layout(location = 0) uniform vec4 uPushConstants[8];
 
 /* COLUMNS, IN ORDER. GLSL's mat4(vec4,vec4,vec4,vec4) takes columns, and
@@ -61,6 +61,17 @@ mat4 objectTransform()
 vec4 objectTint()
 {
     return uPushConstants[4];
+}
+
+/* WHAT THIS OBJECT IS, for the one pass that asks — the custom depth /
+ * stencil value, 0-255, which that pass writes into a colour channel for a
+ * later effect to find. Every other shader ignores it.
+ *
+ * A FLOAT CARRYING AN INTEGER, and exact: the push path is a vec4 uniform on
+ * GL and every integer to 2^24 is represented exactly. See ObjectPush. */
+float objectStencil()
+{
+    return uPushConstants[5].x;
 }
 
 #endif

@@ -205,6 +205,13 @@ public:
     }
 
     /* The dev panel is drawn by this class, so its lifetime is too. */
+    /* THE ONE DEV PANEL IN THE PROCESS, borrowed by whichever renderer is
+     * drawing. There is a single ImGui context and it owns the input state,
+     * the open/closed tabs and every slider position, so a second DevView
+     * would be a second answer to "is the layers tab open". Same reasoning as
+     * GameUi's one painter; see DevView::setDeferredPresent. */
+    DevView& devView() { return devView_; }
+
     void setupDevView(int storeys);
     void setDevViewVisible(bool visible);
     void toggleDevView();

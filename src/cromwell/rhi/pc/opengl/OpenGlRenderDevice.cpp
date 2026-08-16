@@ -114,6 +114,21 @@ GlFormat translate(TextureFormat format)
     }
 }
 
+uint32_t translate(StencilOp op)
+{
+    switch (op) {
+        case StencilOp::Keep:           return GL_KEEP;
+        case StencilOp::Zero:           return GL_ZERO;
+        case StencilOp::Replace:        return GL_REPLACE;
+        case StencilOp::IncrementClamp: return GL_INCR;
+        case StencilOp::DecrementClamp: return GL_DECR;
+        case StencilOp::Invert:         return GL_INVERT;
+        case StencilOp::IncrementWrap:  return GL_INCR_WRAP;
+        case StencilOp::DecrementWrap:  return GL_DECR_WRAP;
+    }
+    return GL_KEEP;
+}
+
 uint32_t translate(CompareFunc compare)
 {
     switch (compare) {
@@ -299,6 +314,16 @@ private:
     uint32_t        program_ = 0;
     bool            compute_ = false;
     int             debugDepth_ = 0;
+
+    /* ---- what setStencilReference must not destroy ----------------------
+     *
+     * glStencilFunc sets the comparison, the reference and the read mask in one
+     * call, so changing the reference per draw means restating the other two.
+     * Latched at bindPipeline; the defaults are the identity, for a reference
+     * set before any pipeline is bound. */
+    uint32_t        stencilCompare_ = GL_ALWAYS;
+    uint32_t        stencilReadMask_ = 0xFFu;
+    uint32_t        stencilReference_ = 0;
 };
 
 void OpenGlRenderDevice::Encoder::bindPipeline(PipelineHandle handle)
@@ -330,6 +355,46 @@ void OpenGlRenderDevice::Encoder::bindPipeline(PipelineHandle handle)
         glPolygonOffset(pipeline->depth.biasSlope, pipeline->depth.biasConstant);
     } else {
         glDisable(GL_POLYGON_OFFSET_FILL);
+    }
+
+    /* ---- Stencil ---------------------------------------------------------
+     *
+     * THE REFERENCE IS THE ENCODER'S AND IS REMEMBERED HERE, which is the whole
+     * reason this is not three lines. `glStencilFunc` takes the comparison, the
+     * reference and the read mask TOGETHER, so setStencilReference cannot change
+     * one without restating the other two — and the first version of that
+     * function passed GL_ALWAYS, which silently disabled every test a pipeline
+     * had asked for. Latching the pipeline's two halves is what lets the
+     * reference move per draw without taking the comparison with it.
+     *
+     * THE REFERENCE IS RESET TO ZERO ON A BIND, deliberately. Carrying it across
+     * a pipeline change would mean a pass inheriting a value from whatever ran
+     * before it, which is the push-constant trap in MIGRATION.md 5 with a
+     * different name. A pass that wants a reference sets one. */
+    stencilCompare_  = translate(pipeline->stencil.compare);
+    stencilReadMask_ = pipeline->stencil.readMask;
+    stencilReference_ = 0;
+
+    if (pipeline->stencil.enabled) {
+        glEnable(GL_STENCIL_TEST);
+        glStencilFunc(stencilCompare_, static_cast<GLint>(stencilReference_),
+                      stencilReadMask_);
+        glStencilOp(static_cast<GLenum>(translate(pipeline->stencil.onStencilFail)),
+                    static_cast<GLenum>(translate(pipeline->stencil.onDepthFail)),
+                    static_cast<GLenum>(translate(pipeline->stencil.onPass)));
+        glStencilMask(pipeline->stencil.writeMask);
+    } else {
+        glDisable(GL_STENCIL_TEST);
+
+        /* THE WRITE MASK IS RESTORED EVEN WHEN THE TEST IS OFF, and this is the
+         * trap the whole state is most likely to spring. glStencilMask gates
+         * the CLEAR as well as the ops — so a pipeline that left it at zero
+         * would make every later glClearBufferfi write nothing, and the next
+         * pass to use the stencil would inherit the previous frame's values
+         * with no call anywhere near it to blame. beginPass resets it too; both
+         * are cheap and neither alone is sufficient, because a pass can bind
+         * several pipelines. */
+        glStencilMask(0xFFu);
     }
 
     /* Blend. */
@@ -438,7 +503,20 @@ void OpenGlRenderDevice::Encoder::setScissor(float x, float y, float width, floa
 
 void OpenGlRenderDevice::Encoder::setStencilReference(uint32_t value)
 {
-    glStencilFunc(GL_ALWAYS, static_cast<int>(value), 0xFF);
+    /* THE PIPELINE'S COMPARISON AND READ MASK, NOT GL_ALWAYS AND 0xFF.
+     *
+     * This function used to pass both literally, which meant that setting a
+     * reference silently turned off whatever test the pipeline had asked for —
+     * a masking pass would draw everywhere the moment it named the value it was
+     * supposed to be masking against. It had no callers, so nothing had found
+     * it yet; see MIGRATION.md 4.10, which records the interface as
+     * half-built.
+     *
+     * The two latched fields come from bindPipeline. A reference set before any
+     * pipeline is bound uses the defaults, which is Always with a full mask —
+     * the identity, and the only sensible answer to a call made out of order. */
+    stencilReference_ = value;
+    glStencilFunc(stencilCompare_, static_cast<GLint>(value), stencilReadMask_);
 }
 
 void OpenGlRenderDevice::Encoder::draw(MeshHandle handle, uint32_t vertexCount,
@@ -1085,7 +1163,8 @@ PipelineHandle OpenGlRenderDevice::createPipeline(const PipelineDesc& desc)
      * the second backend arrives. */
     Pipeline pipeline;
     pipeline.shader = desc.shader;
-    pipeline.depth  = desc.depth;
+    pipeline.depth   = desc.depth;
+    pipeline.stencil = desc.stencil;
     pipeline.blend  = desc.blend;
     pipeline.raster = desc.raster;
     pipeline.layout = desc.vertexLayout;
@@ -1497,6 +1576,14 @@ ICommandEncoder& OpenGlRenderDevice::beginPass(const PassDesc& desc)
         const float depth = desc.depth.clearTo;
 
         if (desc.depth.stencilLoad == LoadAction::Clear) {
+            /* THE WRITE MASK GATES THE CLEAR, which is the one thing about GL's
+             * stencil that surprises everybody exactly once. A pipeline bound
+             * in a previous pass may have left it at zero — a masking pass sets
+             * exactly that — and the clear would then write nothing at all,
+             * leaving the previous frame's values in a buffer this pass
+             * believes it has just emptied. Opening it here costs one call and
+             * removes a failure whose cause is in a different pass. */
+            glStencilMask(0xFFu);
             glClearBufferfi(GL_DEPTH_STENCIL, 0, depth,
                             static_cast<int>(desc.depth.stencilClearTo));
         } else {

@@ -1,0 +1,37 @@
+# overlay — the interface drawn into the world.
+#
+# Visibility plates, cover shields, the hover marker, the path preview. Not a
+# surface the world is made of: see SurfaceKind::Overlay.
+#
+# `blend translucent` is the ONLY thing that puts this in the transparent pass,
+# exactly as it is for glass. No C++ names this surface.
+
+blend               translucent
+
+# FLAT. Roughness one and no metal is the closest this material system can get
+# to "unlit" today: it spreads the specular lobe until the plate reads as a
+# matte colour rather than a wet one. The honest answer is `shading unlit`,
+# which needs the per-material shaders of MIGRATION.md 4.9.
+roughness           1.0
+metalness           0.0
+
+# ---- opacity ------------------------------------------------------------
+# THE ALPHA COMES FROM THE VERTEX COLOUR, not from here, which is why the
+# angle dependence is switched off entirely. Glass ramps its opacity with view
+# angle because a dielectric genuinely does; a marker painted on the floor has
+# no such physics, and a Fresnel ramp on one would make the far side of the
+# board brighter than the near side for no reason a player could name.
+#
+# The palette carries a different alpha per grade - a directly-seen cell is
+# stronger than a peek-only one - so the mesh's own colours are the authority
+# and this only has to get out of the way. opacityScale 0 does that.
+
+baseOpacity         1.0
+edgeFalloff         1.0
+edgeMaxOpacity      1.0
+opacityScale        0.0     # no angle dependence at all
+edgeThickness       0.0
+edgeColour          1.0 1.0 1.0
+
+transmissionColour  1.0 1.0 1.0
+transmissionAmount  0.0

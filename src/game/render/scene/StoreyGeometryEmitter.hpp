@@ -34,6 +34,30 @@ public:
 
     void emit(int storey, SurfaceBuffers& out) const;
 
+    /* ONE RECTANGLE OF TILES OF ONE STOREY, half-open in x and y.
+     *
+     * WHY A REGION EXISTS AT ALL: the device renderer registers the static
+     * world as renderables the engine culls, and a culler needs something to
+     * cull. One mesh per (storey, kind, facing) for a whole map has bounds the
+     * size of the map, so it is either wholly visible or wholly not — which is
+     * to say never not. Chunking is what turns those bounds into something a
+     * frustum can reject, and it pays a second time: editing the world
+     * re-uploads one chunk instead of every storey.
+     *
+     * IT IS A CLEAN PARTITION AND THAT IS NOT LUCK. Walls are stored
+     * CANONICALLY — the slab between two cells lives on the northern or eastern
+     * one's edge, see emitEdges — so every tile emits its own geometry and
+     * nobody else's. The union of the regions is therefore exactly the whole
+     * storey, with no seam to reconcile and no triangle emitted twice. If that
+     * ever stops being true, this splits chunks along shared geometry and the
+     * symptom is a flicker at chunk boundaries.
+     *
+     * NEIGHBOURS ARE STILL READ, which is a different thing from emitted: the
+     * outward-facing test and the blocked-mass test both look at the cells
+     * around a tile. Those reads are unclipped, so a chunk edge looks the same
+     * as it would in a whole-storey emit. */
+    void emit(int storey, int minX, int minY, int maxX, int maxY, SurfaceBuffers& out) const;
+
 private:
     void emitFloor(const Tile& tile, int storey, float cellBase,
                    float fx, float fy, SurfaceBuffers& out) const;

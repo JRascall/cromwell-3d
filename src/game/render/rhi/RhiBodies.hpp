@@ -1,14 +1,29 @@
-/* RhiBodies.hpp — units, as device geometry.
+/* RhiBodies.hpp — units, as renderables the engine owns.
  *
- * SINGLE RESPONSIBILITY: own one unit cube on the device, and submit the boxes
- * that make up every visible body under it.
+ * SINGLE RESPONSIBILITY: own one unit cube on the device, and keep one
+ * renderable per body part registered in a RenderScene and up to date. It draws
+ * nothing.
+ *
+ * ================ IT USED TO SUBMIT, AND NOW IT SYNCHRONISES ==============
+ *
+ * The same conversion RhiStatics went through, with one difference that
+ * matters: the static world is registered ONCE and never touched again, while a
+ * body moves. So this is not "register and forget" — it is a reconciliation
+ * that runs every frame and writes a transform per part.
+ *
+ * WHICH IS STILL FAR LESS WORK THAN SUBMITTING WAS. Submitting meant walking
+ * the roster once per PASS — the shadow map, the prepass, the lit pass, the
+ * probe capture — building the same matrices four or five times a frame and
+ * throwing them away. This walks it once and writes only what changed. The
+ * engine then culls the result per view, which the old shape could not do at
+ * all.
  *
  * ================ WHY THIS EXISTS BESIDE UnitRenderer =====================
  *
  * The same bargain RhiStatics makes against StaticsMesh: UnitRenderer draws
- * bodies for the raylib renderer and is untouched, this one draws them for the
- * device, and one of the two is deleted at parity. Both derive their boxes from
- * the same `drawBody` recipe — the part offsets and sizes are copied, not
+ * bodies for the raylib renderer and is untouched, this one feeds the device,
+ * and one of the two is deleted at parity. Both derive their boxes from the
+ * same `drawBody` recipe — the part offsets and sizes are copied, not
  * reinvented — so a soldier cannot end up a different shape in the two
  * renderers while both exist.
  *
@@ -18,41 +33,44 @@
  * baking it would mean re-uploading a vertex buffer per unit per frame — a
  * transfer measured in kilobytes to draw a box that is already on the card.
  *
- * So there is exactly ONE 1x1x1 cube here, and each part is a transform pushed
- * before a draw. Four draws for a vehicle, one for a soldier; a hundred bodies
- * is a few hundred draws with an eighty-byte constant each, which is nothing
- * against a pass that already draws the whole lattice.
+ * So there is exactly ONE 1x1x1 cube here and every part is a renderable
+ * referencing it with its own transform. That the cube is shared by every body
+ * is also what makes instancing possible later: the engine now knows two
+ * renderables carry the same mesh, which is precisely the fact
+ * `IGeometrySource` destroyed by handing over finished draws.
  *
- * BoxMesh does this for the raylib path and is the direct ancestor. It cannot
- * be shared: it holds a raylib Mesh and calls DrawMesh, and the whole point of
- * the port is that neither exists below the platform layer.
+ * THE CUBE IS OWNED HERE AND NOT BY THE ASSET LAYER, for now. It is a shared
+ * mesh and RenderAssets is where a shared mesh belongs — but it is shared
+ * between the BODIES of one world, not between worlds, and moving it before
+ * there is a second world would be inventing an asset layer's API against one
+ * caller. The rule is written down in RenderScene.hpp; this is the case it does
+ * not yet apply to.
  *
- * ================== NO CULLING, AND THAT IS DELIBERATE ====================
+ * ================== NO CULLING HERE, AND NOW THAT IS FREE =================
  *
- * Beyond the storey cut the cutaway already implies, nothing here rejects a
- * body the camera cannot see. A frustum test per unit would be the obvious
- * addition and is not worth writing yet: the counts are in the dozens, the
- * geometry is a box, and the cost of getting it wrong — a unit that pops out of
- * existence at the screen edge — is far larger than the cost of drawing it.
- * When bodies are real meshes in the thousands, this is where that goes.
+ * This class rejects nothing beyond what the cutaway's filter bits already say.
+ * It used to be a deliberate omission with a cost attached; now the engine
+ * frustum-culls every renderable per view, so bodies get culling they never had
+ * without a line of code here. That is the change in one sentence.
  */
 #pragma once
 
+#include "cromwell/render/Renderable.hpp"
 #include "cromwell/rhi/Handles.hpp"
 
-namespace cromwell {
-namespace rhi { class ICommandEncoder; class IRenderDevice; }
-}  // namespace cromwell
+#include <array>
+#include <vector>
 
-namespace cromwell { class DeviceMaterials; }
+namespace cromwell {
+class RenderScene;
+namespace rhi { class IRenderDevice; }
+}  // namespace cromwell
 
 namespace game {
 
-class MoveAnimator;
 class Unit;
 class UnitRoster;
 class World;
-struct PathPoint;
 
 class RhiBodies {
 public:
@@ -67,56 +85,74 @@ public:
      * an empty battlefield. */
     bool build();
 
-    /* Every living body at or below `maxStorey`, as boxes.
+    /* ONE PASS OVER THE ROSTER, WRITING WHAT MOVED.
      *
      * `animating` (may be null) is the unit walking a path: its logical cell and
-     * its drawn position differ while the animation runs, so it is skipped in
-     * the roster sweep and drawn separately at `animatedPosition`. Passing the
-     * position in rather than the animator keeps this class ignorant of how a
-     * move is interpolated, which is a question about the game's rules and not
-     * about geometry. */
-    /* `materials` BINDS SurfaceKind::Body ONCE, before anything is drawn, and
-     * passing null is the depth-only case — the sun's pass has no material
-     * block to bind, exactly as RhiStatics treats it.
+     * its drawn position differ while the animation runs, so it is placed at
+     * `animated*` rather than at its cell. Passing the position in rather than
+     * the animator keeps this class ignorant of how a move is interpolated,
+     * which is a question about the game's rules and not about geometry.
      *
-     * IT IS NOT OPTIONAL ON A SHADED PASS, and the reason is a real bug rather
-     * than tidiness. Bodies are submitted AFTER the statics in the same pass,
-     * and the statics bind a material per bucket — so a body that binds none
-     * inherits whichever surface kind happened to be drawn last. The cutaway
-     * decides which buckets are submitted, so the ISO LEVEL silently changed
-     * what every soldier was made of: mirror-smooth at one storey cut and matte
-     * at another, with nothing in the material system to explain it. */
-    void submit(cromwell::rhi::ICommandEncoder& encoder, const UnitRoster& roster,
-                const World& world, int maxStorey,
-                const Unit* animating, float animatedX, float animatedHeight,
-                float animatedY,
-                const cromwell::DeviceMaterials* materials = nullptr) const;
+     * A DEAD UNIT IS HIDDEN RATHER THAN REMOVED. The roster keeps its entry —
+     * `isDead()` is a state, not a deletion — so removing the renderable would
+     * mean re-registering it if anything ever revives or replays. Visibility is
+     * one bool on a record; a remove recycles a slot and invalidates an id. */
+    void sync(cromwell::RenderScene& scene, const UnitRoster& roster, const World& world,
+              const Unit* animating, float animatedX, float animatedHeight, float animatedY);
 
-    int drawCalls() const { return drawCalls_; }
+    /* Removes every renderable and destroys the cube. Called by the destructor;
+     * separate so a world teardown can do it without one. */
+    void release();
+
+    int renderableCount() const { return renderableCount_; }
 
 private:
-    /* One body's boxes, at a world position. The recipe — which parts, what
-     * size, what colour — is UnitRenderer::drawBody's, kept in step with it by
-     * hand for as long as both exist. */
-    void submitBody(cromwell::rhi::ICommandEncoder& encoder, const Unit& unit,
-                    float x, float baseHeight, float y) const;
+    /* THE MOST PARTS ANY BODY HAS: a vehicle's hull, turret and barrel. Named so
+     * that adding a fourth is a compile error in the one place that fills the
+     * array rather than a silent truncation at the call site. */
+    static constexpr int kMaxParts = 3;
 
-    void submitPart(cromwell::rhi::ICommandEncoder& encoder,
-                    float centreX, float centreY, float centreZ,
-                    float sizeX, float sizeY, float sizeZ,
-                    unsigned char r, unsigned char g, unsigned char b) const;
+    /* ONE PART OF ONE BODY, AS THE ENGINE SEES IT. The offsets and sizes are
+     * UnitRenderer::drawBody's, verbatim. */
+    struct Part {
+        cromwell::Vec3 offset;   /* from the body's base, in world units */
+        cromwell::Vec3 size;
+        cromwell::Vec4 tint = cromwell::Vec4::one();
+    };
 
-    void release();
+    /* THE PARTS ONE UNIT IS MADE OF. Returns how many were written. */
+    static int partsOf(const Unit& unit, std::array<Part, kMaxParts>& out);
+
+    struct Body {
+        /* WHICH UNIT THIS IS, so a roster that changed shape can be noticed
+         * rather than assumed. Compared by ADDRESS, which is sound because the
+         * roster owns its units by unique_ptr and does not move them — and
+         * which is checked rather than trusted, because a stale pointer here
+         * would move the wrong soldier. */
+        const Unit* unit = nullptr;
+
+        std::array<cromwell::RenderableId, kMaxParts> parts{};
+        int partCount = 0;
+    };
+
+    /* Tears down every registration and builds one per part of every unit in
+     * the roster. Runs on the first sync and whenever the roster's shape
+     * changes; the ordinary frame does none of it. */
+    void reregister(cromwell::RenderScene& scene, const UnitRoster& roster);
+
+    void removeAll();
 
     cromwell::rhi::IRenderDevice& device_;
     cromwell::rhi::MeshHandle     cube_;
     cromwell::rhi::BufferHandle   cubeVertices_;
 
-    /* Counted per submission for the log line, so "the bodies are not drawing"
-     * can be told apart from "the bodies are drawing somewhere I cannot see".
-     * Mutable because submit() is const — it is a diagnostic, not state the
-     * renderer reads. */
-    mutable int drawCalls_ = 0;
+    /* THE SCENE THE BODIES ARE IN, remembered so they can be taken out again —
+     * the same arrangement RhiStatics has, and for the same reason: a mesh may
+     * not be destroyed while a renderable still names it. */
+    cromwell::RenderScene* scene_ = nullptr;
+
+    std::vector<Body> bodies_;
+    int               renderableCount_ = 0;
 };
 
 }  // namespace game

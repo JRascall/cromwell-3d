@@ -58,6 +58,22 @@ layout(binding = 3) uniform sampler2D uShadowTransmission;
  * — it adds one of its own at slot 4. */
 #include "rhi/include/probes.glsl"
 
+/* THE DECAL PLANES, at slots 5, 6 and 7.
+ *
+ * THE OPAQUE SHADER READS THESE AND THE TRANSPARENT ONE DELIBERATELY DOES NOT,
+ * which looks like an omission and is the opposite. The DBuffer describes the
+ * surface the PREPASS recorded at each pixel — an opaque one — and a pane of
+ * glass in front of that surface is a different surface at the same pixel. A
+ * transparent shader reading the planes would paint the wall's decal onto the
+ * window as well, and then composite the wall behind it with the decal already
+ * on it: the same mark, twice, one of them floating in mid air.
+ *
+ * A decal ON glass is a real thing to want and this is not how it would be
+ * done; it needs the decal in the translucent surface's own material, because
+ * there is no depth buffer describing a surface that was never written to
+ * one. */
+#include "rhi/include/dbuffer.glsl"
+
 void main()
 {
     vec3 normal = normalize(vNormal);
@@ -97,7 +113,48 @@ void main()
     float roughness = clamp(uMaterialFactors.x, 0.045, 1.0);
     float metalness = clamp(uMaterialFactors.y, 0.0, 1.0);
 
-    vec3 albedo        = vColour.rgb;
+    vec3 albedo = vColour.rgb;
+
+    /* ---- AND WHAT THE DECALS DID TO ALL OF IT ---------------------------
+     *
+     * READ ONCE, APPLIED TO FOUR INPUTS, AND THEN THE SURFACE LIGHTS NORMALLY.
+     * That is the whole technique: a decal changes what the material IS, and
+     * the material is lit once — with this fragment's shadow, this fragment's
+     * probe and this fragment's occlusion already in hand. A decal drawn as its
+     * own lit quad would have to recompute every one of them.
+     *
+     * BY gl_FragCoord OVER THE OCCLUSION PLANE'S SIZE, which is this pass's own
+     * resolution — reused rather than asking for a second textureSize of the
+     * same thing. The DBuffer is HALF that, so these are bilinear upsamples:
+     * deliberate, and the reason the planes are premultiplied. See
+     * rhi/dbuffer.glsl.
+     *
+     * INSIDE A PROBE CAPTURE THIS IS SWITCHED OFF, like SSAO and for the same
+     * reason: screen space means nothing in a 128-pixel cube face, and the
+     * capture binds a 1x1 stand-in whose single texel would otherwise ink the
+     * entire face with whatever decal happened to be at the top left. */
+    DecalLayer decals = readDecals(gl_FragCoord.xy / vec2(max(occlusionSize, ivec2(1))),
+                                   uDecalParams.x);
+
+    albedo    = applyDecalAlbedo(decals, albedo);
+    normal    = applyDecalNormal(decals, normal);
+    roughness = clamp(applyDecalScalar(decals.roughness, roughness, decals.transmit),
+                      0.045, 1.0);
+    metalness = clamp(applyDecalScalar(decals.metalness, metalness, decals.transmit),
+                      0.0, 1.0);
+
+    /* THE NORMAL MOVED, SO EVERY DOT PRODUCT TAKEN FROM IT IS STALE. nDotL and
+     * nDotV were computed above from the geometric normal, and a decal with a
+     * normal map that did not relight would be a bump you can see in the
+     * diffuse and not in the highlight — which reads as the normal map being
+     * too weak rather than as an ordering mistake.
+     *
+     * The SHADOW is not recomputed: it is a visibility term about where this
+     * point is relative to the sun, and a bump in a decal does not move the
+     * point. Recomputing it would cost twenty-four taps to get the same
+     * answer. */
+    nDotL = max(dot(normal, toSun), 0.0);
+    nDotV = clamp(dot(normal, V), 1e-4, 1.0);
     vec3 f0            = mix(vec3(0.04), albedo, metalness);
     vec3 diffuseAlbedo = albedo * (1.0 - metalness);
 
@@ -139,7 +196,49 @@ void main()
      * what the sun can reach, and darkening direct sunlight with a screen-space
      * term is what makes SSAO look like dirt. The intensity is on the diffuse
      * half alone because the specular half took it above. */
-    vec3 ambient = ambientDiffuse * uExposureAndAmbient.y * ao + ambientSpecular * ao;
+    /* ---- AND THE DEV PANEL'S PER-TERM SWITCHES --------------------------
+     *
+     * THE ONE PLACE EVERY TERM MEETS, which is why the gating is here rather
+     * than at each term's computation. Removing a term is the whole question
+     * this panel exists to answer — "is that artefact the reflections" — and an
+     * answer is only worth having if the term is genuinely GONE rather than
+     * computed and then multiplied by something small. Zeroing at the sum is
+     * the version that cannot be partly true.
+     *
+     * A BRANCH PER TERM AND NOT A MULTIPLY BY A FLOAT. Uniform-driven, so every
+     * fragment in the draw takes the same side and the hardware costs nothing
+     * for it; and a multiply by zero would keep a NaN produced upstream, which
+     * is precisely the case somebody would be using these switches to find. */
+    vec3 direct = effectOn(kEffectDirectSun)
+                ? sun.diffuse + sun.specular : vec3(0.0);
 
-    outRadiance = vec4(sun.diffuse + sun.specular + ambient, 1.0);
+    vec3 ambient = vec3(0.0);
+    if (effectOn(kEffectAmbientDiffuse))  ambient += ambientDiffuse * uExposureAndAmbient.y * ao;
+    if (effectOn(kEffectAmbientSpecular)) ambient += ambientSpecular * ao;
+
+    /* ---- and what the surface makes on its own account -------------------
+     *
+     * ADDED RAW, AFTER EVERYTHING, MULTIPLIED BY NOTHING — not the shadow, not
+     * the occlusion plane, not the ambient intensity, not the albedo. Every one
+     * of those describes light ARRIVING at a surface, and this is light
+     * leaving it. A sign whose glow dimmed when a cloud crossed the sun would
+     * be a reflection with extra steps.
+     *
+     * NOT SCALED BY THE ALBEDO EITHER, which is the mistake available here and
+     * the one the decal path DOES make on purpose (`decalEmissive` multiplies
+     * by albedo, because a decal's emission is a MASK over a colour it does not
+     * own). A material's emission is authored as the colour it emits, so
+     * multiplying by the surface colour would make a red strip light on a blue
+     * wall come out black — read as the emissive not working. */
+    vec3 emissive = effectOn(kEffectEmissive) ? uEmissive.rgb : vec3(0.0);
+
+    /* A SELF-LIT DECAL, taking its hue from whatever albedo ended up here —
+     * which is the decal's own wherever its mask is non-zero. One channel in
+     * the surface plane instead of a fourth attachment; see rhi/dbuffer.glsl.
+     * Gated by the same switch as a material's own emission, because from the
+     * panel's point of view they are the same question. */
+    if (effectOn(kEffectEmissive))
+        emissive += decalEmissive(decals, albedo, uDecalParams.y);
+
+    outRadiance = vec4(direct + ambient + emissive, 1.0);
 }

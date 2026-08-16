@@ -62,8 +62,21 @@ struct MaterialBlockData {
      * multiplied together here: that split exists because the raylib path's
      * transmission plane is one channel and cannot hold a colour. Ours can. */
     float sunTransmittance[4] = { 1.0f, 1.0f, 1.0f, 0.0f };
+
+    /* RADIANCE THE SURFACE PRODUCES, in linear units, PREMULTIPLIED — the
+     * authored colour times the authored strength.
+     *
+     * PACKED AS A PRODUCT rather than carried as a colour and a scalar, which
+     * is the same choice sunTransmittance above makes and for the same reason:
+     * the shader wants the radiance, the two halves never vary per fragment,
+     * and splitting them would be a multiply in every pixel of every emissive
+     * surface to preserve a distinction only the .mat file cares about.
+     *
+     * ZERO BY DEFAULT, so a material that says nothing about emission adds a
+     * constant zero and nothing changes. w spare. */
+    float emissive[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 };
-static_assert(sizeof(MaterialBlockData) == 96, "std140: six vec4");
+static_assert(sizeof(MaterialBlockData) == 112, "std140: seven vec4");
 
 /* THE PER-MATERIAL BINDING, from the frequency table in CONVENTIONS.md: 0 is
  * the frame, 1 the pass, 2 the material, 3 the object. Named here because this
@@ -201,6 +214,13 @@ void DeviceMaterials::setMaterial(SurfaceKind kind, const PbrMaterial& material)
     block.sunTransmittance[1] = material.transmissionTint.y * material.paneTransmittance;
     block.sunTransmittance[2] = material.transmissionTint.z * material.paneTransmittance;
 
+    /* THE PRODUCT AGAIN, for the same reason: the shader wants radiance, and
+     * neither half varies per fragment. A material that authored no emission
+     * leaves this at zero and the surface shaders add nothing. */
+    block.emissive[0] = material.emissiveColour.x * material.emissiveStrength;
+    block.emissive[1] = material.emissiveColour.y * material.emissiveStrength;
+    block.emissive[2] = material.emissiveColour.z * material.emissiveStrength;
+
     /* NOTHING FOR GRIME, DELIBERATELY — see the note on the block. Marks on a
      * pane belong in a texture feeding opacity, roughness and base colour,
      * which are all above. PbrMaterial still carries the raylib path's grime
@@ -213,6 +233,45 @@ void DeviceMaterials::bind(rhi::ICommandEncoder& encoder, SurfaceKind kind) cons
 {
     const std::size_t index = indexOf(kind);
     if (index >= blocks_.size() || !blocks_[index].valid()) return;
+
+    encoder.bindUniformBuffer(kMaterialSlot, blocks_[index]);
+}
+
+/* ---- the same table, addressed by opaque id — see the header -------------*/
+
+MaterialId DeviceMaterials::idOf(SurfaceKind kind)
+{
+    return MaterialId{ static_cast<std::uint32_t>(indexOf(kind)) + 1u };
+}
+
+int DeviceMaterials::slotOf(MaterialId material)
+{
+    if (!material.valid()) return -1;
+
+    const int slot = static_cast<int>(material.value) - 1;
+    return slot < kSurfaceKindCount ? slot : -1;
+}
+
+bool DeviceMaterials::isTranslucent(MaterialId material) const
+{
+    const int slot = slotOf(material);
+
+    /* AN ID THIS TABLE CANNOT ANSWER FOR IS OPAQUE, which is the safe half of
+     * the guess — see IMaterialQuery.hpp. An unknown surface in the blended
+     * pass would draw without depth writes over whatever was behind it, which
+     * reads as a transparency bug rather than as a missing material. */
+    if (slot < 0) return false;
+
+    return blendModes_[static_cast<std::size_t>(slot)] == AlphaMode::Blend;
+}
+
+void DeviceMaterials::bind(rhi::ICommandEncoder& encoder, MaterialId material) const
+{
+    const int slot = slotOf(material);
+    if (slot < 0) return;
+
+    const std::size_t index = static_cast<std::size_t>(slot);
+    if (!blocks_[index].valid()) return;
 
     encoder.bindUniformBuffer(kMaterialSlot, blocks_[index]);
 }

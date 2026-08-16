@@ -221,6 +221,46 @@ void testMultiReportsAWallOnlyOnce()
     CHECK(walls == 1, "the shared face is reported exactly once (saw %d)", walls);
 }
 
+void testWallIsFoundByARayThatLeavesTheCellInsideTheSlab()
+{
+    World world = groundWorld();
+    buildWall(world, 4, 4, 0, Dir::East);   /* the face at x = 5 */
+
+    const WorldTrace trace(world);
+
+    /* THE CASE THAT BROKE THE DECAL TOOL, and it is about the WALK rather than
+     * about walls.
+     *
+     * A wall slab STRADDLES the boundary it sits on — 4.5 cm either side of
+     * x = 5 — so half of it lies in the cell to the west. The walk visits the
+     * cells the ray crosses, and each face has ONE owner, so that western half
+     * is only ever tested if the ray also reaches the OWNING cell.
+     *
+     * Usually it does. This ray does not: it is aimed so that it enters the
+     * slab at x = 4.955 and crosses into the next cell in Z four hundredths of
+     * a unit later, still short of x = 5. Every cell it visits from there on
+     * belongs to a different boundary, so the wall it demonstrably passed
+     * through is never tested and the ray sails on to the floor beyond.
+     *
+     * On screen that is a cursor that slides off a plain wall at particular
+     * camera angles and lands on the ground behind it, taking the decal's
+     * orientation with it — the normal comes back pointing UP. The window is
+     * only 4.5 cm wide, which is exactly why it reads as intermittent. */
+    WorldTrace::Params params;
+    params.start = Vec3{ 4.0f, 0.3f, 4.9f };
+    params.direction = Vec3{ 1.0f, 0.0f, 0.102f };
+    params.maxDistance = 20.0f;
+    params.filter = cursorFilter();
+
+    const auto hit = trace.single(params);
+    CHECK(hit.has_value(), "the ray meets something");
+    if (!hit) return;
+
+    CHECK(hit->layer == layer::kWall, "and it is the wall it passed through, not the floor");
+    CHECK(nearly(hit->point.x, 4.955f, 1.0e-2f), "on the near face of the slab");
+    CHECK(nearly(hit->normal.x, -1.0f), "with the normal out of the wall, not up off the floor");
+}
+
 /* ---- layers ------------------------------------------------------------ */
 
 void testAWindowIsNotAWall()
@@ -379,6 +419,7 @@ int main()
 
     testWallIsFoundOnceFromEitherSide();
     testMultiReportsAWallOnlyOnce();
+    testWallIsFoundByARayThatLeavesTheCellInsideTheSlab();
 
     testAWindowIsNotAWall();
     testSightPassesGlassAndReportsIt();

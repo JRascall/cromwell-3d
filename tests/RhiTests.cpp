@@ -97,7 +97,7 @@ public:
     void setViewport(float, float, float, float) override {}
     void setScissor(float, float, float, float) override {}
     void setStencilReference(uint32_t value) override { stencil = value; }
-    void draw(MeshHandle, uint32_t) override { draws++; }
+    void draw(MeshHandle, uint32_t, uint32_t, uint32_t) override { draws++; }
     void drawIndexed(MeshHandle, uint32_t, uint32_t, uint32_t) override { draws++; }
     void drawFullscreen() override { draws++; }
     void dispatch(uint32_t, uint32_t, uint32_t) override { dispatches++; }
@@ -174,7 +174,15 @@ public:
      * IRenderDevice::readTexture. This one refuses, which is the honest answer
      * for a device with no pixels. */
     bool readTexture(TextureHandle, uint32_t, uint32_t, uint32_t, uint32_t,
-                     std::vector<uint8_t>&) override
+                     std::vector<uint8_t>&, uint32_t) override
+    {
+        return false;
+    }
+
+    /* NOR CAN IT COPY THE BACKBUFFER, for the same reason: there are no pixels
+     * to copy. The UI's backdrop blur is what added this to the interface. */
+    bool copyBackbufferToTexture(TextureHandle, uint32_t, uint32_t,
+                                 uint32_t, uint32_t) override
     {
         return false;
     }

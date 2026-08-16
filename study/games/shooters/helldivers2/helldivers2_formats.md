@@ -7,6 +7,11 @@ section so a future build can be re-validated cheaply.
 
 Implemented in [`tools/hd2/hd2_dsar.py`](../../../../tools/hd2/hd2_dsar.py).
 
+**What this unlocks is read in [`helldivers2.md`](helldivers2.md)** and its four
+topic notes — [rendering](helldivers2_rendering.md),
+[creatures](helldivers2_creatures.md), [world generation](helldivers2_worldgen.md),
+[navigation](helldivers2_navigation.md) and [networking](helldivers2_networking.md).
+
 ## Why the public tools find nothing
 
 Helldivers 2 runs on Autodesk Stingray (ex-Bitsquid). Historically its `data/`
@@ -159,6 +164,57 @@ every one of their schemas.
 They are loose on disk but **not readable**: all 256 byte values occur in the
 first 64 KB and the longest ASCII runs are noise. Encrypted, or compressed with
 an unidentified scheme. The open-source DL magic is absent. Not pursued.
+
+**The typelib is shut too**, checked since: a strings pass over the 905 KB
+`dl_library.dl_typelib` at a 4-character minimum yields 10,861 runs of which
+**136** look like identifiers, and those are noise (`i0ihea`, `ndoc8k`,
+`ptrswz`). A real DL typelib is a string table of type and member names; this
+is not one. So the schemas are as closed as the data, and every
+`generated_*.dl_bin` filename is evidence that a system *exists* while yielding
+no value from it — which is the standing caveat in
+[`helldivers2.md`](helldivers2.md).
+
+## The executables are shut as well
+
+Recorded here because it is the same question — what is readable — and because
+it determines the method every other note in this folder had to use.
+
+`bin/helldivers2.exe` and `data/game/game.dll` are **string-obfuscated and
+IAT-packed**. Their identifier tables are seven-character tokens (`wucug19`,
+`ow2d10s`, `b2bzv5p`), and `pefile` resolves **one import per DLL** — a single
+anchor such as `kernel32!GetModuleHandleA` or `lua51!lua_pushvfstring` — rather
+than the real list. What survives is:
+
+* **Export tables.** `game.dll` exports exactly `get_plugin_api`, and so does
+  `level_generation_pluginw64_release.dll`. This is the single most useful fact
+  recoverable from the binaries — see [`helldivers2.md`](helldivers2.md) §2.
+* **The debug directory.** The exe's PDB path is
+  `…\sr_bin_dir\engine\win64\release\stingray_win64_release.pdb`.
+* **Whichever plugins were not obfuscated.** The level-generation plugin kept
+  its source paths, including `spherical_voronoi.cpp`.
+* **The dependency list**, by inspection of `bin/` — Havok is implicit,
+  but PlayFab Party, PlayFab Multiplayer, Wwise, libcurl, Bink, DirectStorage
+  and three upscalers are all named DLLs.
+
+The productive channels are therefore **PE export tables, DXBC reflection
+(`RDEF` survives because the D3D runtime needs the names) and the resource
+inventory**. Nothing in this folder rests on reading gameplay code, because
+gameplay code cannot be read.
+
+## Tool version, and drift
+
+The bundle layout is not the only thing that moves. **A filediver build that
+worked on 2026-08-09 fails outright on the 2026-08-13 update** with
+
+```
+error loading skin overrides: error parsing unit customization settings:
+error parsing hash lookup: invalid format for 0x7056bc19c69f0f07.hash_lookup,
+expected final bytes read to be 0xDEADBEE7 but were 0x00000000
+```
+
+— a startup failure, so no `--types` filter avoids it. **v0.7.40** reads this
+build. Pin the tool version next to the read date whenever a count from these
+notes is quoted; the counts differ between the two dates above.
 
 ## Caveats
 

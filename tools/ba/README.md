@@ -314,6 +314,234 @@ exported with 21 correctly-named, entirely empty takes.
 **Final: 422 FBX, 4.99 GB — one per rig, zero missing, zero stale**, diffed
 against the manifest rather than counted.
 
+## Into the asset browser
+
+`tools/asset_browser` reads `.obj` and `.glb` and plays animation from any
+rigged `.glb` — clip list, playback, repeat. So the FBX are converted rather
+than the browser taught a new format:
+
+```
+.\tools\ba\ba_anim.ps1 -Stage glb              # 6 Blender shards + fallback
+py -3 tools/ba/ba_materials.py --bundles <aa/PC>   # material -> texture table
+py -3 tools/asset_browser/asset_browser.py --refresh
+```
+
+**422 glb, 1.62 GB, 4,845 clips.** In the catalogue as `ba mesh dif+msk+nrm`
+(the rigs) and `ba mesh none` (11,056 raw OBJ from the sweep), plus textures
+split by role.
+
+### What is solid, and what is not
+
+| | |
+|---|---|
+| rigs converted | 423 / 423 |
+| load with a clip list | 423 (4,873 clips) |
+| with geometry | 423 |
+| textures resolve | 416 |
+| unloadable | 0 |
+| humanoid rigs on the real Avatar | 221 |
+
+The two without textures — `US_DELTA_FORCE` and `Destroyed_Arleigh_Burke` — bind
+no texture in **any** slot in the bundle, checked by reading the Material
+objects directly. That is the game's data, not a gap in the join, so 420 is the
+ceiling.
+
+A third of the roster has *some* untextured material, and that is also correct:
+almost all of them are canopy and window glass, which carries no albedo.
+
+### The Avatar, which is why every human animation was wrong
+
+The single biggest defect in this whole extraction, and the one that survived
+every headless check. Reported by eye - "the majority of the human animations
+were all odd", "feet coming up past their waist" - while clip counts, keyframe
+totals, joint counts and posed bounding boxes all read healthy.
+
+**Humanoid clips are muscle values.** They carry no bone transforms at all; they
+retarget onto whatever the Avatar maps and leave everything it does not map
+frozen in the rest pose. The Avatar AssetRipper reconstructs resolves **22 of
+Unity's 55 human bones**, so hips, spine, head, both shoulders, one hip, one
+knee and one foot never moved. Measured on `Stand_run`: 11 bones moving out of
+47, `LeftUpLeg` 51 degrees against `RightUpLeg` 0.0, `RightLeg` 55 against
+`LeftLeg` 0.0. Alternating down each limb, which is what "half the body" looks
+like in numbers.
+
+It also explains the split that was visible from the start: **vehicles were
+always fine** because generic clips carry transform curves directly and never
+touch an Avatar.
+
+`ba_avatars.py` pulls the game's own `Avatar` objects out of the bundles. Two
+things come from there and neither can be inferred:
+
+- `m_TOS` + `m_Human.m_HumanBoneIndex` - the real human bone mapping.
+- `m_Human.m_SkeletonPose` - **the reference pose the muscles were authored
+  against.** Rebuilding the mapping from bone names alone gets the first and
+  misses this, and Unity then treats the rig's current pose as the T-pose. These
+  rigs are not in a T-pose, so every clip retargets onto a bad reference and
+  plays crouched. That intermediate attempt is worth knowing about because it
+  looks like progress: full bone coverage, wrong poses.
+
+**Unity's internal human bone order is not the `HumanBodyBones` enum order.**
+`UpperChest` sits between `Chest` and `Neck` in `m_HumanBoneIndex`, where the
+enum appends it last as bone 54. Getting that wrong shifts everything from index
+9 and still produces a *plausible-looking* mapping - `Head`→`Neck`,
+`LeftShoulder`→`Head`. The tell is the left/right swap it creates:
+`LeftHand`→`RightForeArm`. A correct mapping never crosses sides.
+
+Result on `Stand_run`, per bone:
+
+| bone | broken Avatar | real Avatar |
+|---|---:|---:|
+| Hips | 0.0° | 7.8° |
+| Spine | 0.0° | 5.1° |
+| Head | 0.0° | 4.9° |
+| LeftShoulder | 0.0° | 13.8° |
+| LeftArm | 0.0° | 20.7° |
+| RightUpLeg | 0.0° | 44.5° |
+| LeftLeg | 0.0° | 75.2° |
+| RightFoot | 0.0° | 65.3° |
+
+Moving bones 11 → 23, and symmetric left to right. Visually: `Stand_aim` goes
+from arms hanging limp to the rifle shouldered in a firing stance, and
+`Kneel_reload` from standing to actually kneeling.
+
+Re-baking is `BaExport.Export -baAvatarData avatars.txt`, which rebuilds the
+Avatar per rig before sampling. 221 humanoid rigs.
+
+**How to check this, since nothing automated caught it:** render the clip from
+Unity itself with `BaPreview.Shoot` and compare against the browser. Anything
+downstream of Unity - the FBX exporter, Blender, the glTF loader, the viewer's
+rasteriser - can be the culprit, and only a reference drawn by the engine that
+owns the clip distinguishes them. `BaPreview.Ranges` prints per-bone rotation
+ranges for both sampling paths, which is what turned "looks odd" into "22 of 55
+bones are frozen".
+
+### The crew-rig problem, which is the big one
+
+Found by rendering every rig and looking, after every headless check had passed.
+Pilots and vehicle crew appeared **huge and lying sideways**, swamping their
+vehicle — a blue-suited pilot 185 m across against an 18 m MiG-35. It reads as
+broken animation and is not: it is a broken bind pose.
+
+**These prefabs contain two skeletons** — an airframe rig (`root`/`body`) and a
+crew rig (`Hips`) — 134 of the 422. Unity's FBX exporter writes the second one's
+mesh into a mangled bind space: the pilot lands 145 m from the aircraft with a
+185 m span. Nothing in Unity shows this; no renderer sits more than 20 m from
+the root there. It is also what Blender's importer chokes on
+(`KeyError: root`), so the two symptoms share a cause.
+
+Three fixes, and it took all three:
+
+1. **Inverse bind matrices are per (skin, joint), not per joint.** The
+   multi-skin support below deduplicated by bone node and kept the first skin's
+   matrix, so a pilot sharing a node with the airframe inherited the
+   *aircraft's* bind. Now keyed by the pair.
+2. **`-baOneSkeleton`**: group skinned meshes by `rootBone` and export only the
+   largest group, dropping 250 crew skeletons across 134 rigs. HMMWV 536 m →
+   4.9 m, M113 188 → 5.9, S-300 193 → 10.5. Group by `rootBone` *itself*, not by
+   its top-level ancestor — a pilot's `Hips` hangs under the airframe's `body`
+   bone, so walking to the top merges the rigs back together and drops nothing.
+   Installed **only where the result measured smaller**: on 11 rigs the drop
+   removed a bone the surviving meshes needed and made things worse.
+3. **An outlier guard in the loader**, because the export fixes could not reach
+   every case. A primitive more than 8× the median span of its own file, and
+   over 50 m, is skipped — a `US_Pilot_Plane` at 187 m inside an 18 m F-15E, a
+   `PKT_MAT` machine gun at 264 m on a 2S4. Judged against the file's own median
+   so a genuinely large object stays whole.
+
+**Result: rigs with plausible dimensions went 347 → 406 of 422**, nothing
+emptied. The 16 that remain are led by `Destroyed_LHA`, a single 26 km
+primitive — there the broken mesh *is* the main body, so no outlier rule helps.
+
+### Two bugs only visible in the GUI
+
+Both were found by opening the browser and looking, after the headless checks
+above all passed. Worth recording as the limit of what a scripted check sees.
+
+**Models faced down.** The preview showed the bind pose, and for these files the
+bind pose genuinely is face down — see the orientation note below. The browser
+now poses a standing clip by default for this library, chosen by name: *not*
+clip 0, which sorts to `Kneel_death` on most infantry and would open every
+soldier lying dead on the floor.
+
+**Nine US Marine rigs had no geometry at all** — 10 MB of animation curves and
+not one triangle, which in the browser is an invisible or untextured model
+rather than an error. Those prefabs put their Animator on a child called
+`SupportBones`: the skeleton is under it, the fourteen SkinnedMeshRenderers are
+siblings *outside* it, and `BaExport.cs` exported the Animator's subtree.
+Fixed by exporting the prefab root whenever the Animator is not on it —
+`US_MARINE_rifle` went from 0 to 21,089 verts.
+
+Seven of those nine come from a `US_Marines/old/` folder and still pose badly
+with their geometry restored: deprecated prefabs whose rig no longer deforms.
+They are browsable rather than invisible, and the current Marine roster
+(`US_Marine_rifle2`, `US_Marine_officer`, the Raiders) was never affected.
+
+**54 rigs need the FBX2glTF fallback.** Blender's FBX importer dies on them with
+`KeyError: root` at `mesh.armature_setup[self]`, and every import option fails
+identically including `use_anim=False`, so it is structural, not a setting.
+Measured cause: these prefabs contain **three separate skeleton roots** —
+`root`, `body` and `Hips` — an airframe rig plus a crew rig in one file. Every
+mesh belongs to exactly one of them (nothing skins across two, and no bones sit
+outside the exported subtree), so it is the plurality itself that io_scene_fbx
+cannot represent.
+
+Two wrong guesses preceded that measurement, both worth recording because they
+sounded right: a *nested Animator* (only 1 of the 54 has one — `BaExport.cs`
+gained `-baStripNested` for it, which fixed exactly that one rig), and *bones
+outside the exported subtree* (zero rigs). `BaExport.Diagnose` exists to answer
+this kind of question with numbers instead.
+
+**The fallback's output was fine all along; the browser was reading it wrong.**
+FBX2glTF writes **one skin per mesh** — 24 for `RU_Morskaya`, 17 for
+`RU_AN72P` — where Blender writes a single merged skin. `load_glb_rig` took
+`skins[0]`, so a 50-bone soldier was posed through a 4-joint skeleton and tore
+itself apart. Fixed by building a union skeleton across all skins and remapping
+each primitive's joint indices into it: `RU_Morskaya` now resolves 49 joints,
+`RU_AN72P` 137. This is a genuine multi-skin glTF gap and helps any such file,
+not only this game's.
+
+### Two browser-side rules this needed
+
+- **Drop primitives whose material is `LODs`.** Unity's LOD-crossfade proxy is
+  a 24-vertex box sized to enclose the whole object, so fitting a camera to the
+  bounding box frames the *box*: a BTR-82A renders as a plain grey cube with
+  85,000 verts of armour hidden inside it. Dropped by material name, not vertex
+  count — 24 verts is also a perfectly good detail part.
+- **Material names are mangled by the exporter.** Unity's FBX exporter has
+  `UseMayaCompatibleNames` on by default, so `RU_1BTR80/82` arrives as
+  `RU_1BTR80_82` and matches nothing. Both spellings are indexed, exact first.
+- **Take the first candidate row that has MAPS, not the first that matches.**
+  `US_Ranger_1` and `US_Ranger` both exist in the table; the mesh names the
+  first, whose three columns are empty, and matching exactly shadowed the row
+  carrying the whole texture set. The soldier rendered untextured, which looks
+  exactly like a material that legitimately has none — the same way glass does.
+- **Skip animation channels targeting `weights`.** glTF morph-target animation,
+  which this viewer does not do. Two transports carry one such channel, and
+  indexing the path table blindly raised `KeyError` — costing the entire file
+  rather than one wobbling flap.
+
+### Orientation, and how not to debug it
+
+`export_yup=True` is all that is needed, and the reason this is written down is
+that verifying it the obvious way is wrong.
+
+Rendering the mesh straight from the file shows a character lying down or
+upside down, which looks exactly like a broken export. It is not: for a
+**skinned** mesh the positions in the file are mesh-local and mean nothing
+alone — the world orientation only exists once the skin is applied, because the
+joint matrices carry the node hierarchy. Judging by that render produced a
+180-degree flip that made the rest pose look right and every clip play upside
+down; moving the flip onto a parent empty then fixed the symptom and preserved
+the error.
+
+**The test that works: pose the mesh with a clip, then measure.** A standing
+character's tallest axis must be Y. `US_Ranger_Rifle1` playing `Stand_run`
+measures x=0.96 **y=1.81** z=1.32, and renders as a soldier running.
+
+The same trap applies to the *pose* used for a check: clip 0 is alphabetically
+`Kneel_death` on most infantry, so a figure lying on the ground is correct and
+proves nothing either way. Check with a `Stand_` clip.
+
 **The output tree exceeds `MAX_PATH`.** Container paths like
 `Assets/Prefabs/GUI/GameMenu/Settings/Property Labels Description/...` plus the
 `@pathID` suffix push past 260 characters, and anything not opted into long

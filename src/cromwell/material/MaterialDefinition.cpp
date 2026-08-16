@@ -108,6 +108,21 @@ bool loadMaterialDefinition(const char* name, PbrMaterial& out)
          *
          * Split into a pure hue and a scalar dimming because that is how
          * PbrMaterial carries it; the device packs their product. */
+        /* ---- light the surface MAKES ------------------------------------
+         *
+         * Split into a hue and a scalar for the same reason the two
+         * transmission pairs are: an artist picks a colour once and then moves
+         * one number to make it brighter, and a packed `emissive 4 2 1` makes
+         * "twice as bright" a three-value edit with a colour shift available to
+         * get wrong. The device packs their product.
+         *
+         * THE STRENGTH IS UNBOUNDED ON PURPOSE. See PbrMaterial — this is
+         * linear radiance, the scene target is RGBA16F, and a value of 1.0 is
+         * merely as bright as a lit white wall rather than a light. */
+        else if (key == "emissiveColour")   ok = readVector3(line, out.emissiveColour);
+        else if (key == "emissiveStrength")
+            ok = static_cast<bool>(line >> out.emissiveStrength);
+
         else if (key == "transmissionTint")   ok = readVector3(line, out.transmissionTint);
         else if (key == "paneTransmittance")
             ok = static_cast<bool>(line >> out.paneTransmittance);

@@ -150,6 +150,7 @@ private:
     struct Pipeline {
         ShaderHandle shader;
         DepthState   depth;
+        StencilState stencil;
         BlendState   blend;
         RasterState  raster;
         VertexLayout layout;

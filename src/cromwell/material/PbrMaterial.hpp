@@ -162,6 +162,33 @@ struct PbrMaterial {
     float   transmissionAmount = 0.0f;
     Vector3 transmissionColour{ 1.0f, 1.0f, 1.0f };
 
+    /* ---- emission: radiance the surface PRODUCES -------------------------
+     *
+     * A DIFFERENT QUESTION FROM EVERY OTHER FIELD IN THIS STRUCT, and the
+     * distinction is worth stating because the three are easy to confuse. The
+     * BRDF above describes what a surface does to light arriving at it;
+     * `transmission` describes light passing THROUGH it from behind; this is
+     * light the surface emits on its own account, which no amount of shadowing,
+     * occlusion or ambient can reduce. A screen in a dark room is lit by
+     * nothing and is still bright.
+     *
+     * IN LINEAR RADIANCE, AND DELIBERATELY UNBOUNDED. The pipeline is linear
+     * and the scene target is RGBA16F precisely so a value can exceed one; a
+     * strip light authored at 1.0 is exactly as bright as a fully lit white
+     * wall and will not read as a light source. The numbers that look right are
+     * several to tens. This is the same reason SunLight's radiance is not a
+     * colour off a colour wheel.
+     *
+     * WHAT MAKES IT VISIBLE AS A GLOW rather than merely a bright patch is the
+     * bloom pass, which is the engine's and not a property of any material —
+     * see ScenePipeline. A material says how much light it makes; what a lens
+     * does with light that bright is a camera question.
+     *
+     * ZERO BY DEFAULT, so every material already authored is untouched and the
+     * shaders pay one add of a constant zero. */
+    Vector3 emissiveColour{ 1.0f, 1.0f, 1.0f };
+    float   emissiveStrength = 0.0f;
+
     AlphaMode alphaMode = AlphaMode::Opaque;
     float     alphaCutoff = 0.5f;
 

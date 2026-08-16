@@ -37,6 +37,24 @@ constexpr int kFirstUnitStencil = 1;
 
 std::string format(const char* text) { return text ? text : ""; }
 
+/* ---- one preview entry, from a raylib texture ----------------------------
+ *
+ * `DevTextures` used to take a `Texture2D` outright, and now takes an opaque id
+ * and a size — because the panel is shared with the device renderer, whose
+ * ImGui backend puts an RHI handle in `ImTextureID` rather than a GL name. The
+ * two are different id spaces and the header on DevTextureView says at length
+ * what handing one across looks like.
+ *
+ * THE CONVERSION IS ONE LINE AND IT LIVES HERE, not at fifteen call sites: the
+ * id rlImGui hands ImGui for a raylib texture IS `texture.id`, which is a fact
+ * about that backend and belongs beside the renderer that uses it. */
+void addPreview(DevTextures& textures, const char* name, Texture2D texture,
+                const char* note = "")
+{
+    textures.add(name, static_cast<std::uint64_t>(texture.id),
+                 texture.width, texture.height, note);
+}
+
 }  // namespace
 
 bool FrameRenderer::resizeSceneTarget(int windowWidth, int windowHeight)
@@ -1525,8 +1543,19 @@ void FrameRenderer::render(const FrameView& view)
      * The exposure round-trip is so ToneMapPass keeps its setter rather than
      * handing out a reference to its own field. */
     float exposure = tonemap_.exposure();
+    /* THE BLOOM KNOBS ARE THE DEVICE PATH'S AND THIS ONE HAS NO BLOOM, so it
+     * hands the panel a static default to point at rather than a live object.
+     * The sliders move and this renderer ignores them, which is the truthful
+     * arrangement for a pass that does not exist here — `GlowPass` composites
+     * in display colour after the tone map and is a stopgap to be deleted, not
+     * a thing to wire these to. See rhi/MIGRATION.md §4.6.
+     *
+     * Static rather than a member because it is write-only from this path's
+     * point of view; a member would suggest somebody reads it. */
+    static BloomTuning unusedBloom;
+
     DevTunables tunables{ sun_, view_.settings->ribbon, mainBuffers_.occlusion().tuning(),
-                          exposure, view_.settings->effects };
+                          unusedBloom, exposure, view_.settings->effects };
 
     /* Every intermediate the frame produced, so it can be LOOKED at rather
      * than reasoned about. Rebuilt per frame because several of these change
@@ -1557,39 +1586,39 @@ void FrameRenderer::render(const FrameView& view)
     int slot = 0;
 
     DevTextures textures;
-    textures.add("sun depth",
-                 previews_.render(slot++, shadows_.depthTexture(), Preview::Raw, kTarget),
-                 "the sun's shadow map, in its own orthographic depth");
-    textures.add("sun transmission",
-                 previews_.render(slot++, shadows_.transmissionTexture(), Preview::Raw, kTarget),
-                 "sunlight surviving. white is open air, darker is glass");
-    textures.add("ambient occlusion",
-                 previews_.render(slot++, mainBuffers_.occlusion().texture(), Preview::Raw, kTarget),
-                 "screen space. white is unoccluded; 1x1 white when off");
-    textures.add("g-buffer depth",
-                 previews_.render(slot++, mainBuffers_.depth().depthTexture(),
-                                  Preview::Depth, kTarget),
-                 "linearised and banded — each band is an equal slice of distance");
-    textures.add("g-buffer normal",
-                 previews_.render(slot++, mainBuffers_.depth().colourTexture(),
-                                  Preview::Raw, kTarget),
-                 "world normal, encoded n * 0.5 + 0.5");
-    textures.add("g-buffer roughness",
-                 previews_.render(slot++, mainBuffers_.depth().colourTexture(),
-                                  Preview::Alpha, kTarget),
-                 "the same buffer's alpha. black is a mirror, white is fully diffuse");
-    textures.add("lightmap atlas",
-                 previews_.render(slot++, lightmapTexture_, Preview::Raw, kUpload),
-                 "baked sun visibility, packed per (cell, face)");
-    textures.add("lightmap index",
-                 previews_.render(slot++, lightIndexTexture_, Preview::Raw, kUpload),
-                 "(cell, face) -> atlas slot, 16 bit across R and G");
-    textures.add("custom stencil",
-                 previews_.render(slot++, customDepth_.stencil(), Preview::Stencil, kTarget),
-                 "one hue per object id; dark grey is nothing drawn");
-    textures.add("custom depth",
-                 previews_.render(slot++, customDepth_.depth(), Preview::Depth, kTarget),
-                 "tagged objects only, to compare against the g-buffer's depth");
+    addPreview(textures, "sun depth",
+               previews_.render(slot++, shadows_.depthTexture(), Preview::Raw, kTarget),
+               "the sun's shadow map, in its own orthographic depth");
+    addPreview(textures, "sun transmission",
+               previews_.render(slot++, shadows_.transmissionTexture(), Preview::Raw, kTarget),
+               "sunlight surviving. white is open air, darker is glass");
+    addPreview(textures, "ambient occlusion",
+               previews_.render(slot++, mainBuffers_.occlusion().texture(), Preview::Raw, kTarget),
+               "screen space. white is unoccluded; 1x1 white when off");
+    addPreview(textures, "g-buffer depth",
+               previews_.render(slot++, mainBuffers_.depth().depthTexture(),
+                                Preview::Depth, kTarget),
+               "linearised and banded — each band is an equal slice of distance");
+    addPreview(textures, "g-buffer normal",
+               previews_.render(slot++, mainBuffers_.depth().colourTexture(),
+                                Preview::Raw, kTarget),
+               "world normal, encoded n * 0.5 + 0.5");
+    addPreview(textures, "g-buffer roughness",
+               previews_.render(slot++, mainBuffers_.depth().colourTexture(),
+                                Preview::Alpha, kTarget),
+               "the same buffer's alpha. black is a mirror, white is fully diffuse");
+    addPreview(textures, "lightmap atlas",
+               previews_.render(slot++, lightmapTexture_, Preview::Raw, kUpload),
+               "baked sun visibility, packed per (cell, face)");
+    addPreview(textures, "lightmap index",
+               previews_.render(slot++, lightIndexTexture_, Preview::Raw, kUpload),
+               "(cell, face) -> atlas slot, 16 bit across R and G");
+    addPreview(textures, "custom stencil",
+               previews_.render(slot++, customDepth_.stencil(), Preview::Stencil, kTarget),
+               "one hue per object id; dark grey is nothing drawn");
+    addPreview(textures, "custom depth",
+               previews_.render(slot++, customDepth_.depth(), Preview::Depth, kTarget),
+               "tagged objects only, to compare against the g-buffer's depth");
     /* NOT THE RENDERER'S INTERNAL BUFFERS, unlike everything above — each of
      * these is a whole second render of the world from another camera.
      *
@@ -1602,11 +1631,11 @@ void FrameRenderer::render(const FrameView& view)
      * The names outlive the frame because the set owns them — DevTextures
      * borrows its pointers and copies nothing; see the note below. */
     cameras_.forEach([&](CameraId, const std::string& name, const Camera& camera) {
-        textures.add(name.c_str(),
-                     previews_.render(slot++, camera.texture(), Preview::Raw, kTarget),
-                     camera.hasScreenSpaceEffects()
-                         ? "a second camera, with its own prepass: ssao and decals work"
-                         : "a second camera. no prepass of its own, so no ssao or decals");
+        addPreview(textures, name.c_str(),
+                   previews_.render(slot++, camera.texture(), Preview::Raw, kTarget),
+                   camera.hasScreenSpaceEffects()
+                       ? "a second camera, with its own prepass: ssao and decals work"
+                       : "a second camera. no prepass of its own, so no ssao or decals");
     });
     /* A MEMBER BUFFER, NOT TextFormat. DevTextures borrows its name and note
      * pointers and copies nothing, and TextFormat hands back one of four
@@ -1616,9 +1645,9 @@ void FrameRenderer::render(const FrameView& view)
                   "room %d of %d, +X -X +Y -Y +Z -Z. magenta is open sky. %d slices stale",
                   probes_.probeCount() > 0 ? probes_.previewProbe() + 1 : 0,
                   probes_.probeCount(), probes_.staleFaceCount());
-    textures.add("reflection probe",
-                 previews_.render(slot++, probes_.previewTexture(), Preview::Raw, kTarget),
-                 probePreviewNote_);
+    addPreview(textures, "reflection probe",
+               previews_.render(slot++, probes_.previewTexture(), Preview::Raw, kTarget),
+               probePreviewNote_);
 
     /* The DBuffer, alongside every other intermediate — and it earns its place
      * more than most. A decal that fails to appear in the lit image has four
@@ -1637,16 +1666,16 @@ void FrameRenderer::render(const FrameView& view)
     for (int i = 0; i < decalTool.materialCount; i++)
         decalTool.materialNames[i] = decals_.materialName(i);
 
-    textures.add("dbuffer albedo",
-                 previews_.render(slot++, mainBuffers_.decals().albedo(), Preview::Raw, kTarget),
-                 "decal base colour, premultiplied. black is untouched");
-    textures.add("dbuffer normal",
-                 previews_.render(slot++, mainBuffers_.decals().normal(), Preview::Raw, kTarget),
-                 "decal world normal, encoded and premultiplied");
-    textures.add("dbuffer coverage",
-                 previews_.render(slot++, mainBuffers_.decals().albedo(), Preview::Alpha, kTarget),
-                 "the SAME plane's alpha, which is 1 - coverage: "
-                 "white is no decal, dark is fully inked");
+    addPreview(textures, "dbuffer albedo",
+               previews_.render(slot++, mainBuffers_.decals().albedo(), Preview::Raw, kTarget),
+               "decal base colour, premultiplied. black is untouched");
+    addPreview(textures, "dbuffer normal",
+               previews_.render(slot++, mainBuffers_.decals().normal(), Preview::Raw, kTarget),
+               "decal world normal, encoded and premultiplied");
+    addPreview(textures, "dbuffer coverage",
+               previews_.render(slot++, mainBuffers_.decals().albedo(), Preview::Alpha, kTarget),
+               "the SAME plane's alpha, which is 1 - coverage: "
+               "white is no decal, dark is fully inked");
 
     DevSteam steamPanel;
     steamPanel.running     = view_.steam.running;
@@ -1655,7 +1684,9 @@ void FrameRenderer::render(const FrameView& view)
     steamPanel.steamId     = view_.steam.steamId;
     steamPanel.avatarState = view_.steam.avatarState;
     steamPanel.avatarUrl   = view_.steam.avatarUrl;
-    steamPanel.avatar      = steamAvatar_;
+    steamPanel.avatar       = static_cast<std::uint64_t>(steamAvatar_.id);
+    steamPanel.avatarWidth  = steamAvatar_.width;
+    steamPanel.avatarHeight = steamAvatar_.height;
 
     /* Under the dev panel, over everything else — it is a full-screen scrim and
      * the ImGui panel has to stay usable on top of it. Costs nothing when

@@ -129,25 +129,39 @@ def main():
                     continue
                 m = struct.unpack_from('<12f', kd['XFRM'], 0)
                 props, order = read_props(kd.get('PROP', b''), table)
-                model = props.get('GeometryFile', '')
-                rows.append({
-                    'index': len(rows), 'model': model,
-                    'name': props.get('name', ''),
+                row = {
+                    'index': len(rows), 'model': props.get('GeometryFile', ''),
                     'object_type': props.get('objectType', ''),
                     'x': round(m[9], 4), 'y': round(m[10], 4), 'z': round(m[11], 4),
                     'r00': round(m[0], 6), 'r01': round(m[1], 6), 'r02': round(m[2], 6),
                     'r10': round(m[3], 6), 'r11': round(m[4], 6), 'r12': round(m[5], 6),
                     'r20': round(m[6], 6), 'r21': round(m[7], 6), 'r22': round(m[8], 6),
-                })
+                }
+                # EVERY resolved property, not a chosen few. An earlier version
+                # emitted model / name / objectType and dropped the rest, which
+                # made this file look like a placement list and hid what it
+                # actually is - see the header.
+                for k, v in props.items():
+                    if k not in ('GeometryFile', 'objectType'):
+                        row[k] = v
+                rows.append(row)
                 if args.json:
                     full.append({'index': len(full), 'transform': list(m),
                                  'properties': props, 'property_order': order})
             if not rows:
                 continue
             safe = ''.join(c if c.isalnum() or c in '_-' else '_' for c in name)
+            # Instances do not all carry the same properties - a lamp post has
+            # a light block a crate does not - so the header is the union over
+            # the world, in first-seen order, with the transform columns first.
+            keys = []
+            for r in rows:
+                for k in r:
+                    if k not in keys:
+                        keys.append(k)
             with open(os.path.join(args.out, safe + '.csv'), 'w', encoding='utf-8',
                       newline='') as f:
-                w = csv.DictWriter(f, fieldnames=list(rows[0]))
+                w = csv.DictWriter(f, fieldnames=keys, extrasaction='ignore')
                 w.writeheader()
                 w.writerows(rows)
             if args.json:

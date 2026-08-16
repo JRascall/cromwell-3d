@@ -345,7 +345,16 @@ void Application::applyInput(const FrameInput& input)
         renderer_.clearFlashes();
         controller_.setStatus("");
         renderer_.rebuildStatics(state_);
-    renderer_.markProbesDirty();  /* the world the probes captured no longer exists */
+        renderer_.markProbesDirty();  /* the world the probes captured no longer exists */
+
+        /* AND THE SAME FOR THE DEVICE RENDERER, which builds its static world
+         * on the first frame and had no reason to build it again until this
+         * button started arriving. Without it a reset would generate a new
+         * building and leave the OLD one on screen with the new units walking
+         * through it — a request that half worked, which is worse than one that
+         * never arrived. It re-floods the probes too; see worldChanged. */
+        if (rhiRenderer_) rhiRenderer_->worldChanged();
+
         rebuildDerivedState();
     }
 }
@@ -362,7 +371,20 @@ void Application::applyInput(const FrameInput& input)
  * orbits the camera underneath it. */
 FrameInput Application::arbitrate(FrameInput input)
 {
-    const DevRequests requests = renderer_.takeDevRequests();
+    /* BOTH RENDERERS, DRAINED UNCONDITIONALLY, and this asks NOTHING about
+     * which one is drawing.
+     *
+     * That fact is stated once in this file, at the render call, and a second
+     * copy of it here is a copy that can disagree — which is precisely the bug
+     * being fixed: the device path had no accessor at all, so every BUTTON in
+     * the dev panel was inert while the CHECKBOX beside it worked, and the two
+     * sit a foot apart in the same window. It reads as a rendering bug and is
+     * not one. See rhi/MIGRATION.md §4.5 and DevRequests::mergeFrom, which
+     * explains why merging is safe: there is one dev panel in the process and
+     * only the live renderer is ever handed a buffer to fill, so the other's is
+     * default-constructed and folds in as a no-op by construction. */
+    DevRequests requests = renderer_.takeDevRequests();
+    if (rhiRenderer_) requests.mergeFrom(rhiRenderer_->takeDevRequests());
 
     /* GATHER, RESOLVE, ASK — see cromwell/input/PointerFocus.hpp.
      *
@@ -524,8 +546,27 @@ int Application::run()
          * panel's sliders and the sun-nudge keys, which both write to that
          * instance, move the device path's lighting too. See the constructor's
          * note on why this is a reference and not a second SunLight. */
+        /* THE ONE DECAL SET TOO, for the same reason as the sun and the UI: the
+         * controller places into it and the panel clears it, and neither should
+         * have to know which renderer is drawing. */
         rhiRenderer_ = std::make_unique<RhiFrameRenderer>(*platform_, renderer_.sun(),
-                                                         renderer_.ui());
+                                                         renderer_.ui(), renderer_.decals());
+
+        /* THE ONE DEV PANEL, POINTED AT THE DEVICE BACKEND. The ImGui context,
+         * its fonts and every open tab belong to the FrameRenderer's DevView
+         * whichever renderer is drawing - setupDevView below runs on both
+         * paths - so this hands the same panel over rather than building a
+         * second one that would forget itself on a renderer switch. The same
+         * bargain setPainter makes for the UI surface. */
+        rhiRenderer_->setDevView(&renderer_.devView());
+
+        /* ONLY WHEN ASKED. Zero is "no opinion", so the engine keeps whatever it
+         * defaults to rather than having argv quietly overrule it with a nought.
+         * See CliOptions.hpp — this flag is for comparing the settings, not for
+         * storing a choice. */
+        if (options_.outlineSupersample > 0)
+            rhiRenderer_->setOutlineSupersample(
+                static_cast<uint32_t>(options_.outlineSupersample));
         LOGGER.warn("renderer: rhi path selected - it is under construction and "
                     "draws only what has been converted so far");
     }
@@ -928,9 +969,18 @@ int Application::run()
         }
 
         /* The avatar arrives on a worker; this is the frame it lands on, and
-         * the only place it may touch the GPU. */
-        if (steamAvatar_.poll() && steamAvatar_.isReady())
+         * the only place it may touch the GPU.
+         *
+         * BOTH RENDERERS, like the gallery toggle above, because only one draws
+         * and which one is a startup argument. Each has to upload its OWN copy:
+         * the two ImGui backends put different things in ImTextureID — a GL
+         * name and an RHI handle — so a texture made by one samples something
+         * unrelated through the other. Decoding a 184-pixel jpeg twice, once in
+         * a session, is not worth restating which renderer is live. */
+        if (steamAvatar_.poll() && steamAvatar_.isReady()) {
             renderer_.uploadSteamAvatar(steamAvatar_.bytes());
+            if (rhiRenderer_) rhiRenderer_->uploadSteamAvatar(steamAvatar_.bytes());
+        }
 
         /* ONE RENDERER OR THE OTHER, chosen at startup. Both are built; the rhi
          * path is being converted a pass at a time and is nowhere near parity,

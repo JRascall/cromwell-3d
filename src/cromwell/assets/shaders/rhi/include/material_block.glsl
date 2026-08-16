@@ -37,6 +37,17 @@ layout(std140, binding = 2) uniform MaterialBlock {
     /* What the SUN becomes crossing this surface, per channel — read in the
      * shadow pass, not the lit one. See rhi/transmission.fs.glsl. */
     vec4 uSunTransmittance;
+
+    /* RADIANCE THE SURFACE MAKES, premultiplied colour × strength, in the same
+     * linear units as uSunRadiance. Unbounded on purpose: the scene target is
+     * RGBA16F and a value of one is merely as bright as a lit white wall.
+     *
+     * NOT SCALED BY ANYTHING — not the shadow, not the occlusion plane, not the
+     * ambient intensity. That is what emission MEANS: a screen in a dark room
+     * is lit by nothing and is still bright, and a surface whose glow dimmed
+     * when a wall was put in front of the sun would be a reflection with extra
+     * steps. w spare. */
+    vec4 uEmissive;
 };
 
 #endif

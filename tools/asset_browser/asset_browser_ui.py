@@ -357,6 +357,24 @@ class Browser:
             self.draw()
 
     # -- animation ------------------------------------------------------
+    def _default_clip(self, rig):
+        """Which clip to show a rig in when nothing is playing.
+
+        Not clip 0: these files list alphabetically, so clip 0 is `Kneel_death`
+        on most infantry and the browser would open every soldier lying dead on
+        the floor. Preference order is a standing idle, then any idle, then
+        anything not obviously a death or prone pose.
+        """
+        names = [str(c).lower() for c in rig.get('clips') or ()]
+        for want in ('stand_idle', 'stand_aim', 'idle', 'stand', 'default'):
+            for i, n in enumerate(names):
+                if want in n and 'death' not in n:
+                    return i
+        for i, n in enumerate(names):
+            if not any(bad in n for bad in ('death', 'prone', 'die', 'dead')):
+                return i
+        return 0
+
     def _sync_anim_panel(self, path):
         """Show the clip list for this mesh, or hide the column entirely.
 
@@ -525,13 +543,34 @@ class Browser:
         self._sync_anim_panel(path)
         mesh = self._mesh_cache[path]
         rig = self._rig_cache.get(path)
-        if rig is not None and (self._clip is not None or self._anim is not None):
+        # BROKEN ARROW'S BIND POSE IS FACE DOWN, and legitimately so. Its .glb
+        # come from Unity via Blender, and the upright orientation lives in the
+        # clips' root bone rather than in the rest pose - the inverse bind
+        # matrices cancel the joint hierarchy exactly, so the file's rest pose
+        # IS the raw mesh, lying on its face. Nothing is broken; there is simply
+        # no pose to show until a clip is applied. Showing the first frame of a
+        # real clip is the only way the default preview reads as a character.
+        #
+        # Scoped to this library on purpose: a Mercenaries or Helldivers rig has
+        # a proper T-pose bind, and replacing that with an arbitrary clip frame
+        # would be a regression there.
+        clip = self._clip
+        # The clock belongs to whatever the user picked, from EITHER source -
+        # a .glb clip in self._clip or a standalone .anim in self._anim. Only
+        # the fallback below is a still frame, so only it pins t to zero.
+        # Testing self._clip alone froze every .anim at frame 0: the tick kept
+        # counting and the info line kept reading, but the rig never moved.
+        clip_t = self._clip_t
+        if (clip is None and self._anim is None and rig is not None
+                and rig.get('clips') and ab._in_library(path, 'ba')):
+            clip = self._default_clip(rig)
+            clip_t = 0.0
+        if rig is not None and (clip is not None or self._anim is not None):
             # Substitute posed positions and normals into the same tuple the
             # renderers already take, so every material mode, camera mode and
             # texture path below works on an animated frame unchanged.
             try:
-                pv, pn = ab.pose_glb(rig, mesh, self._clip, self._clip_t,
-                                     anim=self._anim)
+                pv, pn = ab.pose_glb(rig, mesh, clip, clip_t, anim=self._anim)
                 mesh = (pv, mesh[1], pn, mesh[3], mesh[4])
             except Exception as e:
                 self._stop()

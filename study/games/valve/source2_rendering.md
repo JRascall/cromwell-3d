@@ -492,6 +492,12 @@ Read from `csgo_water_fancy` and `csgo_glass` as reimplemented by
 ValveResourceFormat. **[VRF]** Both are CS2 shaders, so this is the desktop
 answer throughout.
 
+> **Superseded in depth by [`source2_glass.md`](source2_glass.md).** That note
+> takes the four cases this section does not cover — frosted, breakable, vessels
+> with more than two interfaces, and liquid inside one — and is written against
+> s&box's plain-text copy of the Source 2 shader library rather than VRF's
+> reimplementation. What follows stays correct for the architectural pane.
+
 ### 12.1 Glass — much simpler than expected, and cheap for us
 
 **CS2 glass does not refract.** The whole model is `GetGlassMaterial()` in

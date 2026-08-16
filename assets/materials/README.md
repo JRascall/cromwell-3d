@@ -65,6 +65,36 @@ as coverage it turns solid geometry into a ghost.
 Transparency is something a material declares (`AlphaMode::Opaque` / `Mask` /
 `Blend`, with a cutoff), the same way glTF's `alphaMode` works.
 
+## Emission
+
+A material can produce light of its own, with two keys in its `.mat`:
+
+    emissiveColour     0.35 0.75 1.0
+    emissiveStrength   8.0
+
+**The strength is LINEAR RADIANCE and it is unbounded on purpose.** The
+pipeline is linear and the scene target is RGBA16F precisely so a value can
+exceed one — which means **1.0 is not "fully bright", it is "as bright as a
+lit white wall"**, and a strip light authored there will not read as a light
+at all. The numbers that look right are several to tens.
+
+Emission is added **after everything else and multiplied by nothing** — not the
+shadow, not ambient occlusion, not the ambient intensity, and **not the
+albedo**. A screen in a dark room is lit by nothing and is still bright. (The
+decal path deliberately does the opposite and multiplies by albedo, because a
+decal's emissive channel is a *mask* over a colour it does not own.)
+
+**What turns a bright surface into a GLOW is the bloom pass, not the material.**
+Emission says how much light the surface makes; what a lens does with light
+that bright is a camera question, and its four knobs live in the dev panel's
+post tab rather than in any `.mat`. A material authored emissive with bloom
+switched off is simply a bright patch — that is correct, not a bug.
+
+Zero by default, so every material already written is untouched.
+
+**Device renderer only.** The raylib path has no emissive material term and no
+bloom; see `src/cromwell/rhi/MIGRATION.md` §4.6.
+
 ## Colour space
 
 **Albedo is the only map decoded from sRGB.** Normal and mrao are data, not

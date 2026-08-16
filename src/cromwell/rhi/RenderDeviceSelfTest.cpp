@@ -767,7 +767,139 @@ SelfTestResult runRenderDeviceSelfTest(IRenderDevice& device)
         device.destroy(cube);
     }
 
-    /* ---- 12. compute, where there is any --------------------------------
+    /* ---- 12. the stencil, both halves -----------------------------------
+     *
+     * WRITE THEN MASK, which is every stencil technique in one stage: a first
+     * draw tags a region with a reference value, a second draws only where the
+     * buffer holds it. If both work the state is real; if either is ignored the
+     * result is a uniform colour and the two checks below say which.
+     *
+     * WHY THIS STAGE EXISTS AT ALL. The interface carried D24S8, stencil load
+     * and store actions and a setStencilReference for a long time WITHOUT any
+     * pipeline state to make them usable - setStencilReference passed ALWAYS, so
+     * it could write a reference and never test one, and it had no callers to
+     * notice. A capability nothing exercises is a capability that ships broken.
+     * The whole point of this suite is turning "is the console port finished"
+     * into a list of failures to work down, and a promise with no stage in the
+     * list is not on that list.
+     *
+     * THE SCISSOR IS WHAT MAKES IT A REGION. The tagging draw is a full-screen
+     * triangle clipped to the left half, so the tagged area has a known edge and
+     * a wrong result is a picture rather than a number. */
+    {
+        TextureDesc stencilTargetDesc;
+        stencilTargetDesc.name   = "selftest stencil depth";
+        stencilTargetDesc.width  = kSize;
+        stencilTargetDesc.height = kSize;
+        stencilTargetDesc.format = TextureFormat::D24S8;
+        stencilTargetDesc.usage  = TextureUsageRenderTarget;
+
+        const TextureHandle stencilTarget = device.createTexture(stencilTargetDesc);
+
+        if (report.check(stencilTarget.valid(), "createTexture: D24S8 depth/stencil")) {
+            const ShaderHandle shader =
+                device.createShader("selftest stencil", kVertexSource, kFragmentSource);
+
+            PipelineDesc writeDesc;
+            writeDesc.name   = "stencil write";
+            writeDesc.shader = shader;
+            writeDesc.colourFormats[0] = TextureFormat::RGBA8;
+            writeDesc.colourCount = 1;
+            writeDesc.depthFormat = TextureFormat::D24S8;
+            writeDesc.depth.test  = false;
+            writeDesc.depth.write = false;
+            writeDesc.raster.cull = CullMode::None;
+            writeDesc.stencil     = StencilState::write();
+
+            PipelineDesc maskDesc = writeDesc;
+            maskDesc.name    = "stencil mask";
+            maskDesc.stencil = StencilState::testEqual();
+
+            const PipelineHandle writePipeline = device.createPipeline(writeDesc);
+            const PipelineHandle maskPipeline  = device.createPipeline(maskDesc);
+
+            if (report.check(shader.valid() && writePipeline.valid() && maskPipeline.valid(),
+                             "createPipeline: stencil state baked")) {
+                PassDesc pass;
+                pass.name = "selftest stencil";
+                pass.colours[0].texture = colour;
+                pass.colours[0].load    = LoadAction::Clear;
+                pass.colours[0].clearTo = ClearColour{ 0.0f, 0.0f, 0.0f, 1.0f };
+                pass.colourCount = 1;
+
+                pass.hasDepth             = true;
+                pass.depth.texture        = stencilTarget;
+                pass.depth.load           = LoadAction::Clear;
+                pass.depth.clearTo        = 1.0f;
+                pass.depth.stencilLoad    = LoadAction::Clear;
+                pass.depth.stencilClearTo = 0;
+
+                ICommandEncoder& encoder = device.beginPass(pass);
+
+                /* 1. TAG THE LEFT HALF with reference 1. The colour it leaves is
+                 *    irrelevant - the second draw covers the whole target - and
+                 *    the stencil buffer cannot be read back, so that draw is the
+                 *    only instrument this stage has. */
+                encoder.bindPipeline(writePipeline);
+                encoder.setStencilReference(1);
+                encoder.setScissor(0.0f, 0.0f, static_cast<float>(kSize) * 0.5f,
+                                   static_cast<float>(kSize));
+                encoder.drawFullscreen();
+
+                /* 2. DRAW EVERYWHERE, MASKED TO WHERE THE REFERENCE IS. Only the
+                 *    left half should take the colour; the scissor is opened back
+                 *    up first so the mask is the only thing clipping it. */
+                encoder.setScissor(0.0f, 0.0f, static_cast<float>(kSize),
+                                   static_cast<float>(kSize));
+                encoder.bindPipeline(maskPipeline);
+                encoder.setStencilReference(1);
+                encoder.drawFullscreen();
+
+                device.endPass(encoder);
+
+                std::vector<uint8_t> pixels;
+                device.readTexture(colour, 0, 0, kSize, kSize, pixels);
+
+                /* BOTH HALVES ARE CHECKED, because each failure mode shows in
+                 * only one of them: a test that never rejects fills the right
+                 * half too, and a write that never happened leaves the left half
+                 * at the clear colour. */
+                bool leftPainted = true;
+                bool rightClean  = true;
+
+                if (pixels.size() >= static_cast<std::size_t>(kSize) * kSize * 4) {
+                    for (uint32_t y = 0; y < kSize; y++) {
+                        for (uint32_t x = 0; x < kSize; x++) {
+                            const std::size_t i =
+                                (static_cast<std::size_t>(y) * kSize + x) * 4;
+                            const bool painted = pixels[i] == 64 && pixels[i + 1] == 128
+                                              && pixels[i + 2] == 192;
+                            if (x < kSize / 2) leftPainted = leftPainted && painted;
+                            else               rightClean  = rightClean && !painted;
+                        }
+                    }
+                } else {
+                    leftPainted = false;
+                    rightClean  = false;
+                }
+
+                report.check(leftPainted, "stencil: the masked draw reached the tagged half",
+                             leftPainted ? "" : "the reference was never written, or the test "
+                                                "rejected where it should have passed");
+                report.check(rightClean, "stencil: and was rejected outside it",
+                             rightClean ? "" : "the test passed where the buffer was cleared - "
+                                               "the stencil test is off, or the compare was "
+                                               "overwritten with ALWAYS");
+            }
+
+            if (maskPipeline.valid())  device.destroy(maskPipeline);
+            if (writePipeline.valid()) device.destroy(writePipeline);
+            if (shader.valid())        device.destroy(shader);
+            device.destroy(stencilTarget);
+        }
+    }
+
+    /* ---- 13. compute, where there is any --------------------------------
      *
      * SKIPPED RATHER THAN FAILED when the device has none — macOS's GL is
      * exactly that case, and a backend is not broken for lacking a feature it

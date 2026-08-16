@@ -2,11 +2,15 @@
 
 #include "cromwell/geometry/MeshVertexBuffer.hpp"
 #include "cromwell/material/DeviceMaterials.hpp"
-#include "cromwell/render/IGeometrySource.hpp"
+#include "cromwell/render/RenderScene.hpp"
 #include "cromwell/rhi/IRenderDevice.hpp"
 #include "cromwell/style/SurfaceKind.hpp"
+#include "game/render/DrawLayers.hpp"
+#include "game/render/scene/RenderFilter.hpp"
 #include "game/render/scene/StoreyGeometryEmitter.hpp"
 #include "game/world/World.hpp"
+
+#include "cromwell/diag/Logger.hpp"
 
 namespace game {
 namespace {
@@ -33,38 +37,68 @@ RhiStatics::~RhiStatics() { release(); }
 
 void RhiStatics::release()
 {
-    /* THE MESH AND ITS BUFFER ARE SEPARATE OBJECTS and both are ours — the
-     * device deliberately does not destroy a mesh's buffers with it, because
-     * meshes routinely share them. Here they do not, so both go. */
-    for (auto& storey : storeys_) {
-        for (Bucket& bucket : storey) {
-            if (bucket.mesh.valid())     device_.destroy(bucket.mesh);
-            if (bucket.vertices.valid()) device_.destroy(bucket.vertices);
-            bucket = Bucket{};
-        }
+    /* THE RENDERABLES COME OUT BEFORE THE MESHES GO, and the order is the mesh
+     * lifetime rule made concrete: a scene holds a REFERENCE to a mesh, so
+     * destroying one while a renderable still names it leaves the scene able to
+     * ask a dead handle to be drawn. On this backend that is a silently
+     * ignored draw; on an explicit one it is a validation error or worse.
+     * See RenderScene.hpp. */
+    for (Chunk& chunk : chunks_) {
+        if (scene_ != nullptr && chunk.id.valid()) scene_->remove(chunk.id);
+
+        /* THE MESH AND ITS BUFFER ARE SEPARATE OBJECTS and both are ours — the
+         * device deliberately does not destroy a mesh's buffers with it,
+         * because meshes routinely share them. Here they do not, so both go. */
+        if (chunk.mesh.valid())     device_.destroy(chunk.mesh);
+        if (chunk.vertices.valid()) device_.destroy(chunk.vertices);
     }
-    storeys_.clear();
+
+    chunks_.clear();
+    scene_ = nullptr;
     triangleCount_ = 0;
-    drawCalls_ = 0;
+    renderableCount_ = 0;
 }
 
-void RhiStatics::rebuild(const World& world)
+void RhiStatics::rebuild(const World& world, cromwell::RenderScene& scene)
 {
     release();
-    storeys_.assign(static_cast<std::size_t>(world.lattice().storeys()),
-                    std::array<Bucket, kBucketCount>{});
+    scene_ = &scene;
+
+    const Lattice& lattice = world.lattice();
+
+    /* THE BUDGET CHECK THE static_assert CANNOT MAKE. A lattice's extents are
+     * runtime values, so the assert in RenderFilter.hpp bounds what this game
+     * has SPENT and this catches a map that exceeds it. Without it a fourth
+     * storey past the budget would get no storey bit, become unhideable by the
+     * cutaway, and read as "the iso level stopped working on tall maps". */
+    if (lattice.storeys() > kMaxStoreys) {
+        LOGGER.error("rhi: this map has {} storeys and the cutaway can address {} - "
+                     "the storeys above will not hide. See RenderFilter.hpp",
+                     lattice.storeys(), kMaxStoreys);
+    }
 
     const StoreyGeometryEmitter emitter(world);
     cromwell::SurfaceBuffers buffers;
 
     const cromwell::rhi::VertexLayout layout = cromwell::MeshVertexBuffer::deviceLayout();
 
-    for (int storey = 0; storey < world.lattice().storeys(); storey++) {
-        buffers.clear();
-        emitter.emit(storey, buffers);
+    /* HOW MANY CHUNKS ACROSS, rounded up so the last one overhangs a map that
+     * is not a whole number of chunks wide. The emitter clamps. */
+    const int chunksX = (lattice.width() + kChunkTiles - 1) / kChunkTiles;
+    const int chunksY = (lattice.height() + kChunkTiles - 1) / kChunkTiles;
 
-        for (int i = 0; i < kBucketCount; i++) {
-            const cromwell::MeshVertexBuffer& source = buffers(kindOfSlot(i), facingOfSlot(i));
+    for (int storey = 0; storey < lattice.storeys(); storey++)
+    for (int cy = 0; cy < chunksY; cy++)
+    for (int cx = 0; cx < chunksX; cx++) {
+        buffers.clear();
+        emitter.emit(storey, cx * kChunkTiles, cy * kChunkTiles,
+                     (cx + 1) * kChunkTiles, (cy + 1) * kChunkTiles, buffers);
+
+        for (int i = 0; i < cromwell::SurfaceBuffers::bucketCount; i++) {
+            const cromwell::SurfaceKind   kind = kindOfSlot(i);
+            const cromwell::SurfaceFacing facing = facingOfSlot(i);
+
+            const cromwell::MeshVertexBuffer& source = buffers(kind, facing);
             if (source.empty()) continue;
 
             const std::vector<std::uint8_t> packed = source.interleave();
@@ -78,90 +112,59 @@ void RhiStatics::rebuild(const World& world)
             /* WRITTEN ONCE AND READ EVERY FRAME. A rebuild destroys and remakes
              * rather than updating, so the buffer never changes after upload —
              * which is what lets the backend put it in memory the CPU cannot
-             * reach. Destruction rebuilds a storey; that is rare enough that
-             * the reallocation is cheaper than keeping every buffer host
-             * visible for the frames it does not happen. */
+             * reach. Chunking is what makes that affordable: a demolition
+             * rebuilds the chunks it touched rather than the whole map. */
             desc.access = cromwell::rhi::BufferAccess::CpuToGpuOnce;
 
-            Bucket& bucket = storeys_[static_cast<std::size_t>(storey)]
-                                     [static_cast<std::size_t>(i)];
+            Chunk chunk;
+            chunk.vertices = device_.createBuffer(desc);
+            if (!chunk.vertices.valid()) continue;
 
-            bucket.vertices = device_.createBuffer(desc);
-            if (!bucket.vertices.valid()) continue;
-
-            device_.updateBuffer(bucket.vertices, packed.data(), packed.size(), 0);
+            device_.updateBuffer(chunk.vertices, packed.data(), packed.size(), 0);
 
             /* NON-INDEXED: the emitter produces triangle soup. See
              * IRenderDevice::createMesh, whose index arguments are optional for
              * exactly this geometry. */
-            bucket.mesh = device_.createMesh(layout, bucket.vertices, vertices);
-            if (!bucket.mesh.valid()) continue;
+            chunk.mesh = device_.createMesh(layout, chunk.vertices, vertices);
+            if (!chunk.mesh.valid()) {
+                device_.destroy(chunk.vertices);
+                continue;
+            }
 
-            bucket.triangles = static_cast<int>(vertices / 3);
-            triangleCount_ += bucket.triangles;
-            drawCalls_++;
-        }
-    }
-}
-
-void RhiStatics::submit(cromwell::rhi::ICommandEncoder& encoder, const CutawayView& cutaway,
-                        bool castersOnly,
-                        const cromwell::DeviceMaterials* materials, bool translucent) const
-{
-    /* IDENTITY, ONCE, FOR THE WHOLE WORLD. The lattice is emitted in world
-     * space — the box emitter writes final positions — so there is nothing to
-     * transform, and the tint is white so the emitter's own per-surface vertex
-     * colours come through untouched.
-     *
-     * PUSHED ANYWAY rather than skipped, and it is not a formality: push
-     * constants persist on the bound program, so whatever the last body pushed
-     * would still be in place if this did nothing. The order passes submit in
-     * would then decide whether the world was drawn at the origin in soldier
-     * blue — which is the kind of bug that appears when an unrelated pass is
-     * reordered months later. See rhi/object.glsl on why one path and not two
-     * pipelines. */
-    const cromwell::ObjectPush world = cromwell::ObjectPush::identity();
-    encoder.pushConstants(&world, sizeof world);
-
-    /* THE CUTAWAY IS A SKIP, NOT A REBUILD — which is the whole reason the
-     * geometry is split per storey and facing. Changing floor or rotating the
-     * camera changes which buckets are submitted and touches no buffer. */
-    const int storeyCount = static_cast<int>(storeys_.size());
-    for (int storey = 0; storey < storeyCount; storey++) {
-        if (storey > cutaway.maxStorey) break;
-
-        for (int i = 0; i < kBucketCount; i++) {
-            if (!cutaway.shows(facingOfSlot(i))) continue;
-            if (castersOnly && !castsSunShadow(kindOfSlot(i))) continue;
-
-            /* WHICH PASS THIS BUCKET BELONGS IN, and the MATERIAL decides — not
-             * a hardcoded list of surface kinds. A surface becomes see-through
-             * by saying `blend translucent` in its .mat file, so water is a
-             * material rather than a feature.
+            /* ---- and this is the whole conversion -----------------------
              *
-             * DRAWN IN ONE PASS OR THE OTHER, NEVER BOTH. A blended surface
-             * reads whatever is already in the colour buffer, so it must follow
-             * the opaque scene — and appearing in the opaque pass as well would
-             * paint it solid before the transparent pass could blend it.
+             * IDENTITY TRANSFORM, because the emitter writes FINAL WORLD
+             * POSITIONS — the box emitter has already placed every vertex. So
+             * the local bounds it reports are already world bounds, and the
+             * matrix is identity rather than a placement. A mesh that carried
+             * its own origin would set both; nothing here does.
              *
-             * With no materials bound — the sun's depth pass — everything reads
-             * as opaque, which is correct: that pass already filtered by
-             * castsSunShadow, and a depth-only shader has no material to bind. */
-            const bool bucketTranslucent =
-                materials != nullptr && materials->isTranslucent(kindOfSlot(i));
-            if (bucketTranslucent != translucent) continue;
+             * WHITE TINT, so the emitter's own per-surface vertex colours come
+             * through untouched.
+             *
+             * castsShadow FROM THE SURFACE KIND, which is what the sun's pass
+             * used to filter on for itself. A window transmits light rather
+             * than blocking it and belongs in the transmission plane; the
+             * portal pad is a gameplay marker lying flush on the floor and does
+             * not physically intercept light. Both facts are properties of the
+             * surface, and now they are recorded on the surface. */
+            const cromwell::RenderableDesc desc2 =
+                cromwell::RenderableDesc()
+                    .withMesh(chunk.mesh, source.bounds())
+                    .withMaterial(cromwell::DeviceMaterials::idOf(kind))
+                    .withFilterFlags(surfaceFlags(storey, facing, drawLayer::kStatics))
+                    .withCastsShadow(cromwell::castsSunShadow(kind));
 
-            const Bucket& bucket = storeys_[static_cast<std::size_t>(storey)]
-                                           [static_cast<std::size_t>(i)];
-            if (!bucket.mesh.valid()) continue;
+            chunk.id = scene.add(desc2);
+            if (!chunk.id.valid()) {
+                device_.destroy(chunk.mesh);
+                device_.destroy(chunk.vertices);
+                continue;
+            }
 
-            /* THE BUCKET'S MATERIAL, which is the whole reason the geometry is
-             * split by surface kind in the first place: a bind and a draw
-             * rather than a re-upload, because each kind owns its own block.
-             * See DeviceMaterials on why that is a buffer each. */
-            if (materials != nullptr) materials->bind(encoder, kindOfSlot(i));
-
-            encoder.draw(bucket.mesh);
+            triangleCount_ += static_cast<int>(vertices / 3);
+            renderableCount_++;
+            chunks_.push_back(chunk);
         }
     }
 }

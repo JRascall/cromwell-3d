@@ -90,6 +90,40 @@ void main()
     /* ---- the receiver ---------------------------------------------------- */
     vec3 receiver = normalize(texture(uSceneNormals, screen).rgb * 2.0 - 1.0);
 
+    /* ============ THE SURFACE MUST FACE WHERE THE DECAL WAS THROWN =========
+     *
+     * ONE DOT PRODUCT, AND IT IS THE ONLY THING KEEPING A MARK OUT OF THE NEXT
+     * ROOM. The signed distance of the decal's centre from the plane the
+     * receiver lies in: positive when the centre is on the side the receiver
+     * faces, negative when the receiver has its back to it.
+     *
+     * WHY IT IS NEEDED, and why a flat wall never showed it. The box test above
+     * bounds `local` and nothing else, so the box contains every surface inside
+     * it — and inside a CORNER that includes the far side of the adjoining
+     * wall, 9 cm away, with a normal perpendicular to the projection axis. The
+     * angle fade is a test against the box's AXES, and that face is aligned
+     * with one of them exactly as squarely as the near face is, so it takes the
+     * same ink. On a flat wall there is no such face and nothing leaks, which is
+     * why this only ever appears in corners.
+     *
+     * WHY SOURCE DOES NOT HAVE THIS PROBLEM: it does not project into a volume.
+     * `UTIL_DecalTrace` hands the decal to the entity the trace hit, and
+     * `IStudioRender::AddDecal` does a planar projection ALONG THE RAY onto
+     * that one model's triangles — a face on the other side of a wall is never
+     * enumerated. Valve's own name for the artefact is in the API
+     * (`AddDecal(..., bool noPokethru, ...)`) and their cure where they do
+     * project is an extra clip plane, "used to prevent pokethru and
+     * back-casting" (public/engine/ishadowmgr.h). This is that clip plane,
+     * chosen per pixel from the receiver. The device path's copy of this shader
+     * carries the long version of the note.
+     *
+     * THE SLACK IS 2 cm, because the placement surface has the centre exactly
+     * in its plane and must survive, while the far face of a 9 cm wall is
+     * rejected by a wide margin. It costs the fold that turns AWAY from the
+     * decal — down over a kerb edge, round an outside corner — which is the
+     * same trade Source's per-face clipping makes. */
+    if (dot(receiver, matModel[3].xyz - world.xyz) < -0.02) discard;
+
     /* The projector's own frame, read straight back out of the model matrix's
      * columns: +Z out of the surface, X and Y the decal's U and V. Lengths are
      * the box's extents, which the unwrap below needs — local coordinates are
@@ -145,6 +179,21 @@ void main()
     vec3  tangentDir;   /* the world direction the decal's U runs along HERE */
     float facing;
 
+    /* HOW FAR A WRAP MAY REACH BEHIND THE SURFACE THE DECAL IS STUCK TO, in
+     * world units. It stops a decal on an upper floor wrapping down onto the
+     * walls of the storey below — which the plane test above cannot catch,
+     * because that wall really does face back toward the decal's centre; what
+     * disqualifies it is being on the far side of the floor.
+     *
+     * IT COSTS NOTHING THAT STILL WORKED: behind the placement plane, the plane
+     * test has already rejected every fold that turns away (kerb edge, stair
+     * riser, outside corner), so the only ink left back there is on the far side
+     * of something solid. Two centimetres is under the 6 cm a floor slab is
+     * thick and the 9 cm a wall is, and above the rounding at the fold itself.
+     * The primary branch is deliberately not capped — see the device path's copy
+     * of this shader for why. */
+    const float kSolidReach = 0.02;
+
     /* WHICH WAY THE UNWRAP RUNS PAST A FOLD, and it took three wrong answers to
      * get here, so the reasoning is written out.
      *
@@ -182,6 +231,9 @@ void main()
         float foldSign   = (local.z >= 0.0) ? 1.0 : -1.0;   /* + concave, - convex */
         float side  = -facingSign * foldSign;
 
+        /* Not through the floor or the wall this decal is stuck to. */
+        if (-local.z * lenW > kSolidReach) discard;
+
         float u = local.x + side * abs(local.z) * (lenW / lenU);
         uv = vec2(u + 0.5, 0.5 - local.y);
 
@@ -197,6 +249,8 @@ void main()
         float facingSign = (dot(receiver, dirV) >= 0.0) ? 1.0 : -1.0;
         float foldSign   = (local.z >= 0.0) ? 1.0 : -1.0;
         float side  = -facingSign * foldSign;
+
+        if (-local.z * lenW > kSolidReach) discard;   /* see the branch above */
 
         float v = local.y + side * abs(local.z) * (lenW / lenV);
         uv         = vec2(local.x + 0.5, 0.5 - v);

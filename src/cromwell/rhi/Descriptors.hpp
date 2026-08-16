@@ -146,6 +146,82 @@ struct DepthState {
     float       biasSlope    = 0.0f;
 };
 
+/* ---- the stencil ---------------------------------------------------------
+ *
+ * OFF BY DEFAULT, AND OFF MEANS THE TEST ALWAYS PASSES AND NOTHING IS WRITTEN.
+ * That is the identity, so a pipeline that says nothing about the stencil
+ * behaves exactly as every pipeline in this engine did before this state
+ * existed — which is what makes adding it a non-event for the fifteen passes
+ * that do not want one.
+ *
+ * ONE FACE, NOT TWO. Every backend can set front and back separately, and the
+ * one technique that genuinely needs it — two-sided stencil shadow volumes —
+ * is not something this engine does or is planned to. A second face doubles
+ * this struct and the translation table to serve a technique that would also
+ * need depth-fail volumes and a shadow-volume extruder. When one arrives, it
+ * arrives with its own entry here; guessing at it now is the speculative
+ * generality §4.11 warns about.
+ *
+ * THE MASKS ARE SEPARATE AND BOTH MATTER. `readMask` is ANDed into both sides
+ * of the comparison, which is how several effects share one 8-bit buffer by
+ * owning different bits. `writeMask` decides which bits an op may change — and
+ * it also masks the CLEAR, which is the trap this state is most likely to
+ * spring; see the GL backend, where the clear resets it deliberately.
+ */
+struct StencilState {
+    bool        enabled = false;
+
+    /* Always, with the default masks and ops, is a test that changes nothing. */
+    CompareFunc compare = CompareFunc::Always;
+
+    uint32_t    readMask  = 0xFFu;
+    uint32_t    writeMask = 0xFFu;
+
+    /* WHAT TO DO AT EACH OUTCOME. The names are the outcome, not the action, so
+     * a reader does not have to remember the argument order that every graphics
+     * API gets wrong: `depthFail` is "the stencil passed and the DEPTH test did
+     * not", which is the one that reads backwards in GL's `glStencilOp(sfail,
+     * dpfail, dppass)`. */
+    StencilOp   onStencilFail = StencilOp::Keep;
+    StencilOp   onDepthFail   = StencilOp::Keep;
+    StencilOp   onPass        = StencilOp::Keep;
+
+    /* THE REFERENCE LIVES ON THE ENCODER, NOT HERE — see
+     * ICommandEncoder::setStencilReference. It is the one part of this that
+     * genuinely varies per DRAW rather than per pass: a tagging pass writes a
+     * different id per object and nothing else about its state changes. Putting
+     * it in the pipeline would mean a pipeline object per id. */
+
+    /* THE TWO SHAPES ALMOST EVERY CALLER WANTS, named so they are not rebuilt
+     * by hand at each site. Anything else is spelled out in full, which is
+     * appropriate: a stencil configuration that is not one of these is doing
+     * something specific and should say so. */
+
+    /* WRITE the reference wherever a fragment survives depth. The tagging half
+     * of every stencil technique. */
+    static StencilState write(uint32_t writeMask = 0xFFu)
+    {
+        StencilState state;
+        state.enabled   = true;
+        state.compare   = CompareFunc::Always;
+        state.writeMask = writeMask;
+        state.onPass    = StencilOp::Replace;
+        return state;
+    }
+
+    /* DRAW ONLY WHERE the buffer already holds the reference, changing nothing.
+     * The masking half. */
+    static StencilState testEqual(uint32_t readMask = 0xFFu)
+    {
+        StencilState state;
+        state.enabled   = true;
+        state.compare   = CompareFunc::Equal;
+        state.readMask  = readMask;
+        state.writeMask = 0u;
+        return state;
+    }
+};
+
 struct BlendState {
     bool        enabled = false;
     BlendFactor sourceColour = BlendFactor::SrcAlpha;
@@ -193,6 +269,7 @@ struct PipelineDesc {
     VertexLayout vertexLayout;
 
     DepthState   depth;
+    StencilState stencil;
     BlendState   blend;
     RasterState  raster;
 

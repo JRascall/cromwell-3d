@@ -12,9 +12,11 @@
 
 #include "raylib.h"
 
+#include "cromwell/collision/Shape.hpp"
 #include "cromwell/geometry/SurfaceVertex.hpp"
 #include "cromwell/rhi/Descriptors.hpp"
 
+#include <algorithm>
 #include <cstdint>
 
 #include <vector>
@@ -59,6 +61,41 @@ public:
 
     bool empty() const { return positions_.empty(); }
     int  vertexCount() const { return static_cast<int>(positions_.size() / 3); }
+
+    /* THE EXTENT OF WHAT WAS EMITTED, which is what the renderer needs to cull
+     * a mesh built from it.
+     *
+     * HERE RATHER THAN ACCUMULATED BY THE CALLER, because the caller does not
+     * see the vertices — `positions_` is private and `interleave()` hands back
+     * bytes. The alternative was a second walk over the tiles to work out where
+     * a chunk's geometry ended up, which would be a second answer to a question
+     * this object already knows and is exactly how bounds and geometry drift
+     * apart. Bounds that do not enclose their mesh are not a slightly wrong
+     * number: they are a renderable that vanishes at certain camera angles.
+     *
+     * AN EMPTY BUFFER RETURNS AN EMPTY (inverted) BOX rather than a point at
+     * the origin. `Aabb::empty()` reports it, the frustum rejects it, and the
+     * scene refuses to register a renderable carrying one — so nothing built
+     * from an empty buffer can silently become a thing that is culled from
+     * everywhere or, worse, from nowhere. */
+    Aabb bounds() const
+    {
+        if (positions_.empty())
+            return Aabb{ Vec3{ 1.0f, 1.0f, 1.0f }, Vec3{ -1.0f, -1.0f, -1.0f } };
+
+        Vec3 minimum{ positions_[0], positions_[1], positions_[2] };
+        Vec3 maximum = minimum;
+
+        for (std::size_t i = 3; i + 2 < positions_.size(); i += 3) {
+            minimum.x = std::min(minimum.x, positions_[i]);
+            minimum.y = std::min(minimum.y, positions_[i + 1]);
+            minimum.z = std::min(minimum.z, positions_[i + 2]);
+            maximum.x = std::max(maximum.x, positions_[i]);
+            maximum.y = std::max(maximum.y, positions_[i + 1]);
+            maximum.z = std::max(maximum.z, positions_[i + 2]);
+        }
+        return Aabb{ minimum, maximum };
+    }
 
     /* Uploads and returns a Mesh owning copies of this buffer's data.
      * UnloadMesh frees them with RL_FREE, so they must come from MemAlloc. */

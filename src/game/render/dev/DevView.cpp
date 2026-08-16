@@ -28,6 +28,33 @@ namespace game {
 using namespace cromwell;  /* the engine's names, unqualified. The game sits on top of
                           * cromwell and never the other way round, so there is nothing
                           * here for the engine to collide with. */
+/* ---- one frame's requests, merged ---------------------------------------
+ *
+ * Flags OR, optionals take the incoming value only when it has one. The header
+ * carries the argument for why this exists at all; the code is deliberately a
+ * flat list rather than anything clever, because the one way it can be wrong is
+ * a field somebody forgot to add — and a flat list is where that is visible. */
+void DevRequests::mergeFrom(const DevRequests& other)
+{
+    toggleCutaway     |= other.toggleCutaway;
+    toggleCover       |= other.toggleCover;
+    toggleLos         |= other.toggleLos;
+    toggleGrenade     |= other.toggleGrenade;
+    toggleOcclusion   |= other.toggleOcclusion;
+    toggleBake        |= other.toggleBake;
+    toggleFlatView    |= other.toggleFlatView;
+    cycleRing         |= other.cycleRing;
+    resetWorld        |= other.resetWorld;
+    cyclePreviewProbe |= other.cyclePreviewProbe;
+    rebakeSun         |= other.rebakeSun;
+    clearDecals       |= other.clearDecals;
+
+    if (other.isoLevel)     isoLevel     = other.isoLevel;
+    if (other.sunAzimuth)   sunAzimuth   = other.sunAzimuth;
+    if (other.sunElevation) sunElevation = other.sunElevation;
+    if (other.decalBrush)   decalBrush   = other.decalBrush;
+}
+
 namespace {
 
 constexpr float kPanelWidth = 340.0f;
@@ -299,9 +326,21 @@ void DevView::drawToolbar()
         tab(ICON_FA_STEAM " steam", &open_.steam);
         tab(ICON_FA_GAUGE_HIGH " profiler", &open_.profiler);
 
+        /* THE ENGINE'S CLOCK, NOT ImGui's. io.Framerate is derived from
+         * io.DeltaTime, which rlImGui fills from raylib's GetFrameTime() — and
+         * raylib only computes that inside BeginDrawing/EndDrawing. The device
+         * path presents through RaylibSurface::present() instead, so on that
+         * renderer the delta is zero every frame and ImGui falls into its
+         * FLT_MAX branch: a nonsense frame rate beside 0.00 ms.
+         *
+         * Reading the profiler instead is not merely a backend-independent
+         * source, it is the SAME source the profiler panel's top line uses, so
+         * the two readouts cannot disagree — which they silently did, one of
+         * them wrong, for as long as the toolbar had its own answer. */
+        const double frameMs = Profiler::instance().smoothedFrameMs();
         ImGui::TextDisabled("|  %.0f fps  %.2f ms",
-                            static_cast<double>(ImGui::GetIO().Framerate),
-                            static_cast<double>(1000.0f / ImGui::GetIO().Framerate));
+                            frameMs > 0.0 ? 1000.0 / frameMs : 0.0,
+                            frameMs);
 
         toolbarHeight_ = ImGui::GetWindowHeight();
     }
@@ -384,6 +423,7 @@ void DevView::drawRenderingPanel(const DevModel& model, ViewLayers& layers,
         ImGui::Checkbox("sky diffuse", &effects.ambientDiffuse);
         ImGui::SameLine();
         ImGui::Checkbox("sky specular", &effects.ambientSpecular);
+        ImGui::Checkbox("emissive", &effects.emissive);
         ImGui::Checkbox("reflection probes", &layers.features.reflections);
         ImGui::TextDisabled("probes ride INSIDE sky specular:\n"
                             "specular off hides them too");
@@ -574,12 +614,30 @@ void DevView::drawPostPanel(const DevModel& model, ViewLayers& layers,
         ImGui::SliderFloat("bias", &tunables.occlusion.bias, 0.0f, 0.05f, "%.4f");
         ImGui::TextDisabled("bias above ~0.05 rejects every tap and\nturns the effect off silently");
 
+        /* ---- bloom -------------------------------------------------------
+         *
+         * THE THRESHOLD IS IN LINEAR RADIANCE AND THE PANEL HAS TO SAY SO, or
+         * the first thing anybody does is drag it to 0.5 expecting "half
+         * brightness" and get a frame-wide haze. A lit white wall sits near
+         * one; the useful range for a threshold is just above that, and the
+         * ceiling here is deliberately generous so an emissive authored at
+         * twenty can still be isolated. */
+        ImGui::SeparatorText("bloom");
+        ImGui::Checkbox("enabled", &layers.features.bloom);
+        ImGui::SliderFloat("threshold", &tunables.bloom.threshold, 0.0f, 8.0f, "%.2f");
+        ImGui::SliderFloat("knee", &tunables.bloom.knee, 0.0f, 2.0f, "%.2f");
+        ImGui::SliderFloat("intensity", &tunables.bloom.intensity, 0.0f, 1.0f, "%.3f");
+        ImGui::SliderFloat("spread", &tunables.bloom.radius, 0.5f, 4.0f, "%.2f texels");
+        ImGui::TextDisabled("threshold is LINEAR radiance, not 0..1 -\na lit white wall is about 1.0");
+
         ImGui::SeparatorText("shadows");
         ImGui::Checkbox("shadow map", &layers.features.shadows);
         ImGui::TextDisabled("%s", model.shadowsActive ? "loaded" : "unavailable");
 
         ImGui::Separator();
         if (ImGui::Button("reset occlusion")) tunables.occlusion = AmbientOcclusion::Tuning{};
+        ImGui::SameLine();
+        if (ImGui::Button("reset bloom")) tunables.bloom = BloomTuning{};
     }
     ImGui::End();
 }
@@ -763,15 +821,19 @@ void DevView::drawSteamPanel(const DevSteam& steam)
             ImGui::TextWrapped("%s", steam.avatarUrl.c_str());
         }
 
-        if (steam.avatar.id != 0) {
+        if (steam.avatar != 0) {
             /* Drawn at its native size - the whole point of going to the
              * community site rather than the SDK was the 184x184, so showing it
              * scaled down here would hide whether that actually arrived. */
-            /* rlImGuiImage rather than ImGui::Image: it is the raylib backend's
-             * own helper and already knows how to turn a Texture2D into
-             * whatever ImTextureID happens to be in this build. */
-            rlImGuiImage(&steam.avatar);
-            ImGui::Text("%d x %d", steam.avatar.width, steam.avatar.height);
+            /* ImGui::Image rather than rlImGuiImage, and that is the change
+             * that lets this panel run on both renderers. rlImGuiImage takes a
+             * raylib Texture2D and can only ever produce rlImGui's id space;
+             * the id here was issued by whichever backend is live. See
+             * DevSteam::avatar. */
+            ImGui::Image(static_cast<ImTextureID>(steam.avatar),
+                         ImVec2(static_cast<float>(steam.avatarWidth),
+                                static_cast<float>(steam.avatarHeight)));
+            ImGui::Text("%d x %d", steam.avatarWidth, steam.avatarHeight);
         }
     }
     ImGui::End();
@@ -789,7 +851,7 @@ void DevView::drawTexturePanel(const DevTextures& textures)
             const DevTextureView& entry = textures.entries[i];
 
             ImGui::PushID(i);
-            if (entry.texture.id == 0) {
+            if (entry.id == 0) {
                 ImGui::TextDisabled("%s  -  not allocated", entry.name);
                 ImGui::PopID();
                 continue;
@@ -797,29 +859,26 @@ void DevView::drawTexturePanel(const DevTextures& textures)
 
             ImGui::Text("%s", entry.name);
             ImGui::SameLine();
-            ImGui::TextDisabled("%dx%d", entry.texture.width, entry.texture.height);
+            ImGui::TextDisabled("%dx%d", entry.width, entry.height);
             if (entry.note[0] != '\0') ImGui::TextDisabled("%s", entry.note);
 
             /* Aspect preserved from the source, so a 6:1 cubemap strip and a
              * square shadow map are both readable at one height setting. */
-            const float aspect = (entry.texture.height > 0)
-                               ? static_cast<float>(entry.texture.width) /
-                                 static_cast<float>(entry.texture.height)
+            const float aspect = (entry.height > 0)
+                               ? static_cast<float>(entry.width) /
+                                 static_cast<float>(entry.height)
                                : 1.0f;
-            const int height = static_cast<int>(previewHeight_);
-            const int width  = static_cast<int>(previewHeight_ * aspect);
 
-            /* Drawn AS GIVEN, with a positive source rectangle. Everything in
-             * this list arrives from TexturePreviews::render, which promises an
-             * ordinary top-down texture — see the note on its declaration.
+            /* Drawn AS GIVEN, over the whole texture. Every entry in this list
+             * arrives from a preview blit — TexturePreviews on the raylib path,
+             * DeviceTexturePreviews on the device one — and both promise an
+             * ordinary top-down image.
              *
              * Do not add a flip here. This panel cannot tell which buffer an
              * entry came from and so cannot be right about it; the one place
              * that can is the copy, and it is where the correction lives. */
-            const Rectangle source{ 0.0f, 0.0f,
-                                    static_cast<float>(entry.texture.width),
-                                    static_cast<float>(entry.texture.height) };
-            rlImGuiImageRect(&entry.texture, width, height, source);
+            ImGui::Image(static_cast<ImTextureID>(entry.id),
+                         ImVec2(previewHeight_ * aspect, previewHeight_));
 
             ImGui::Separator();
             ImGui::PopID();
@@ -1052,7 +1111,7 @@ void DevView::draw(const DevModel& model, ViewLayers& layers,
     DevFonts::update();
 
     if (!visible_) {
-        rlImGuiEnd();
+        present();
         return;
     }
 
@@ -1073,6 +1132,19 @@ void DevView::draw(const DevModel& model, ViewLayers& layers,
 
     if (showDemo_) ImGui::ShowDemoWindow(&showDemo_);
 
+    present();
+}
+
+void DevView::present()
+{
+    /* THE SPLIT rlImGuiEnd DOES NOT OFFER. It is ImGui::Render() plus rlImGui's
+     * own draw; the device path needs the first and must not have the second,
+     * because rlImGui binds shaders by raylib's naming convention and issues
+     * its own GL. See setDeferredPresent. */
+    if (deferPresent_) {
+        ImGui::Render();
+        return;
+    }
     rlImGuiEnd();
 }
 

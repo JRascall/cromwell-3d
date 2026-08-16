@@ -16,8 +16,84 @@ THE tern LAYOUT
     LTEX   null-separated layer texture names
     DTEX   null-separated decal texture names
     SCAL   16 floats, per-layer scale        ROTN  16 floats, per-layer rotation
-    COLR   vertex colour, RLE'd              ALPH  layer blend weights, RLE'd
-    PTCH   per-patch flags, 64 x 64 u32      DCAL  decal placement
+    AXIS   16 bytes, one per layer slot      DCAL  decal records, 24 bytes each
+    PTCH   4 bytes per patch                 COLR / ALPH  see below
+
+THE PATCH TABLE IS THE KEY TO COLR AND ALPH
+
+    A map is divided into 8 x 8 sample patches - 64 x 64 of them on a 512 grid,
+    16 x 16 on the 128-grid shell map. PTCH carries four bytes for each:
+
+        u16 layerMask     which of the up to 16 LTEX layers blend in this patch
+        u8  decalCount    how many DCAL records belong to this patch
+        u8  reserved      zero on every patch of every map
+
+    Neither COLR nor ALPH is a flat grid, which is why no amount of dividing
+    their length by the map size ever produced a whole number. They are lists
+    of variable-length per-patch blocks in patch order, each framed
+
+        u16 packedLen; u16 unpackedLen;  then packedLen bytes
+
+    stored verbatim when the two are equal and otherwise compressed with the
+    SAME LZ as meshes and textures (mercs_lzss) - not the texture BODY RLE that
+    an earlier version of this file assumed. ALPH holds a block only for
+    patches whose layerMask has more than one bit set, because a patch drawing
+    one layer needs no blend weights at all.
+
+    unpackedLen is 162 for every COLR block in the game: 81 vertices - a patch
+    is 8 x 8 cells and therefore 9 x 9 vertices, sharing its edge with the next
+    patch - at two bytes each. For ALPH it is exactly 45 * popcount(layerMask),
+    so 45 bytes per active layer.
+
+WHY EACH OF THOSE IS BELIEVED, RATHER THAN MERELY FITTED
+
+    Every claim above is a test that could have failed across all 14 maps:
+
+      - walking COLR as (u16 len + 4) blocks consumes the chunk to the byte and
+        yields exactly one block per patch; ALPH likewise for exactly the
+        multi-layer patches, 53,504 and 20,989 blocks respectively
+      - sum(decalCount) * 24 == len(DCAL), exactly, on all 14
+      - no layerMask bit is ever set above the declared LTEX count
+      - the three maps with no ALPH at all - blank, email, template - are
+        precisely the three whose every patch has a single-bit mask
+      - the LZ decodes all 51,231 compressed COLR blocks and all 20,989 ALPH
+        blocks to their stated size, with no failures and nothing left over
+      - decoded patch colours are edge-continuous: patch (x,y)'s last column
+        equals patch (x+1,y)'s first on 100.00% of seams, read row-major, where
+        a column-major read scores 6% and random pairs 2%
+
+    That last one is the one worth keeping. It settles the 9 x 9 reading, the
+    patch ordering and the two-bytes-per-vertex stride together, and it is not
+    a metric that can be read backwards.
+
+THE INSIDE OF AN ALPH PLANE, FROM THE CODE RATHER THAN FROM FITTING
+
+    ps2RedTerrain.cpp walks it directly, and the loop settles every question
+    the byte counts could not:
+
+        for bit in 0..15:                 one plane per SET mask bit,
+          if not (mask >> bit) & 1: skip  in ascending bit order
+          for row in 0..8:                9 rows
+            for col in 0..8:              9 columns - the shared-edge vertices
+              if col is even: test *p & 0x04      low nibble
+              else:           test *p & 0x40 ; p++   high nibble, then advance
+            p++                           one extra byte at the END of each row
+
+    Four advances inside the row plus one at the end is FIVE bytes a row, and
+    nine rows is the 45 the header always states. One nibble per vertex, low
+    then high, with the tenth nibble of each row unused padding.
+
+    THE NIBBLE IS NOT A WEIGHT. The loop tests a single bit of it - 0x04 of the
+    low nibble, 0x40 of the high - and when set writes the LAYER INDEX into a
+    per-vertex byte grid. So this is a per-vertex layer selection, and whatever
+    the other three bits do they are not consumed here.
+
+    That also explains the thing that blocked this for a while: a patch-seam
+    test scores COLR at a flat 100% and these nibbles at only 88%, which looked
+    like a broken layout and is nothing of the kind. Selection flags have no
+    reason to agree across a seam the way an interpolated colour does. The seam
+    test was the right tool for COLR and the wrong one here, and reading the
+    loop cost less than any of the fitting that preceded it.
 
 HGT8 IS TILED 16 x 16. Read row-major it has a hard step every 16 columns and
 none at all vertically, which is a layout artefact rather than terrain. Measured
@@ -77,6 +153,195 @@ def detile(src, grid, tw=TILE, th=TILE):
                 out[row:row + tw] = src[p:p + tw]
                 p += tw
     return out
+
+
+PATCH = 8          # samples per patch side; 9 x 9 vertices with the shared edge
+VERTS = 81         # 9 * 9
+PLANE = 45         # bytes of ALPH per active layer
+DCAL_REC = 24      # bytes per decal record
+
+
+def popcount(v):
+    return bin(v).count('1')
+
+
+def unpack_patches(buf):
+    """PTCH -> [(layerMask, decalCount), ...] in row-major patch order."""
+    return [(struct.unpack_from('<H', buf, i * 4)[0], buf[i * 4 + 2])
+            for i in range(len(buf) // 4)]
+
+
+def patch_blocks(buf, count):
+    """Yield the `count` framed blocks of a COLR or ALPH chunk.
+
+    The frame is {u16 packedLen; u16 unpackedLen} and the walk is a running
+    cursor, exactly as the loader does it - there are no offsets anywhere in
+    the chunk, so a block can only be found by having consumed every block
+    before it. Raises rather than truncating: a short read means the framing is
+    wrong, and returning a partial list would hide that.
+    """
+    p = 0
+    for i in range(count):
+        packed, unpacked = struct.unpack_from('<HH', buf, p)
+        yield buf[p + 4:p + 4 + packed], unpacked
+        p += packed + 4
+    if p != len(buf):
+        raise ValueError('block walk ended at %d of %d bytes' % (p, len(buf)))
+
+
+def unpack_block(block):
+    """A framed block -> its bytes, stored verbatim or LZ'd."""
+    payload, unpacked = block
+    if len(payload) == unpacked:
+        return payload
+    out = decompress(payload, unpacked)
+    out = out[0] if isinstance(out, tuple) else out
+    if len(out) != unpacked:
+        raise ValueError('block unpacked to %d, header said %d'
+                         % (len(out), unpacked))
+    return out
+
+
+def write_vertex_colour(path, patches_verts, side):
+    """The per-vertex terrain colour, stitched into one image.
+
+    Patches share their edge vertices, so 64 patches of 9 vertices span
+    64 * 8 + 1 = 513 columns rather than 576. The seam test in the header is
+    what says the overlap is real and which way round the patches go.
+
+    FIVE-FIVE-FIVE-ONE IS PROVEN; THE CHANNEL ORDER IS NOT.
+
+    Bit 15 is set on 100% of 331,776 vertices, so it is a constant alpha rather
+    than the top of a channel - that rules out 565 and fixes the layout as
+    1555. The three 5-bit fields then have means of 17.4, 16.8 and 15.8, which
+    is what baked lighting on mostly-grey ground looks like and is exactly why
+    it cannot settle the ORDER: a red/blue swap moves those means by nothing.
+
+    Read as ABGR1555 on the strength of the palette entries elsewhere in this
+    game being A,B,G,R rather than A,R,G,B. Check it against a surface whose
+    colour is known independently before trusting it - the README records the
+    afternoon lost to confirming a channel order on asphalt and concrete.
+    """
+    n = side * PATCH + 1
+    rgba = bytearray(n * n * 4)
+    for pi, verts in enumerate(patches_verts):
+        px, py = pi % side, pi // side
+        for v in range(VERTS):
+            c = struct.unpack_from('<H', verts, v * 2)[0]
+            x = px * PATCH + v % 9
+            y = py * PATCH + v // 9
+            o = (y * n + x) * 4
+            rgba[o + 0] = (c & 0x1F) << 3
+            rgba[o + 1] = (c >> 5 & 0x1F) << 3
+            rgba[o + 2] = (c >> 10 & 0x1F) << 3
+            rgba[o + 3] = 255 if c & 0x8000 else 255
+    write_png(path, n, n, bytes(rgba))
+
+
+def plane_nibbles(buf):
+    """One 45-byte ALPH plane -> 81 nibbles in vertex order.
+
+    Mirrors the console loop exactly: nine rows of nine, low nibble on even
+    columns and high on odd, the cursor stepping once per pair and once more at
+    the end of every row. Written as the same walk rather than as an index
+    formula so it stays comparable with the code it came from.
+    """
+    out, p = [], 0
+    for _row in range(9):
+        for col in range(9):
+            out.append(buf[p] & 0x0F if col % 2 == 0 else buf[p] >> 4)
+            if col % 2:
+                p += 1
+        p += 1
+    return out
+
+
+def write_layer_map(path, patches, planes_by_patch, side):
+    """The per-vertex layer selection, stitched into one image.
+
+    This is the terrain splat map: the value at each vertex is the LTEX slot
+    the console would stamp there. Single-layer patches have no ALPH block at
+    all, so their one layer covers the whole patch - which is why they can be
+    filled straight from the mask.
+
+    Stored as an 8-bit index in all three channels so it opens as a greyscale
+    image, with the count of distinct layers returned for the caller to report.
+    Do not read it as a picture: 16 adjacent indices are 16 near-identical
+    greys, and it is a lookup table that happens to be rectangular.
+    """
+    n = side * PATCH + 1
+    rgba = bytearray(b'\x00\x00\x00\xff' * (n * n))
+    used = set()
+    for pi, (mask, _dec) in enumerate(patches):
+        px, py = pi % side, pi // side
+        bits = [b for b in range(16) if mask >> b & 1]
+        planes = planes_by_patch.get(pi)
+        for v in range(VERTS):
+            x, y = px * PATCH + v % 9, py * PATCH + v // 9
+            if planes is None:
+                layer = bits[0] if bits else 0
+            else:
+                layer = bits[0] if bits else 0
+                for bi, bit in enumerate(bits):
+                    if planes[bi][v] & 0x04:
+                        layer = bit
+            used.add(layer)
+            o = (y * n + x) * 4
+            rgba[o] = rgba[o + 1] = rgba[o + 2] = layer
+    write_png(path, n, n, bytes(rgba))
+    return len(used)
+
+
+def write_patch_csv(path, patches, side):
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('patch,px,py,layer_mask,layer_count,layers,decal_count\n')
+        for i, (mask, dec) in enumerate(patches):
+            layers = ' '.join(str(b) for b in range(16) if mask >> b & 1)
+            f.write('%d,%d,%d,0x%04X,%d,%s,%d\n'
+                    % (i, i % side, i // side, mask, popcount(mask), layers, dec))
+
+
+def write_decals(path, dcal, patches, side):
+    """DCAL records, tagged with the patch that owns them.
+
+    The records are 24 bytes and run in patch order, with PTCH's decalCount
+    giving the length of each run - exact on every map.
+
+    WHAT THE LOADER SAYS THE 24 BYTES ARE. RedTerrain.cpp reads eight single
+    bytes and then eight s16, and keeps almost none of the first eight: two
+    become the nibbles of a packed byte, one becomes a second byte, and five
+    are read and dropped. The eight s16 are four (x, y) pairs on alternating
+    axes - the mins over the odd and even positions are taken separately - and
+    are then rebased onto `min & ~0x7FF` and shifted right 4, so they are fixed
+    point with FOUR FRACTIONAL BITS.
+
+    Two of those survive contact with the data on all 14 maps: byte 3 is zero
+    and bytes 4..7 are 0xFFFFFFFF, one distinct value across every record in
+    the game. Byte 2 is a valid DTEX index on the ten real maps and out of
+    range on the four placeholders (blank, email, template, veh), which is
+    suggestive and not proof.
+
+    WHAT IS NOT SETTLED, AND WHY THE OBVIOUS READING IS WRONG. ps2RedTerrain.cpp
+    consumes the RUNTIME struct - eight bytes, stride 8 - indexing a per-vertex
+    grid as `(b0 >> 4) * (stride + 1) + (b0 & 0xF)` with stride + 1 = 9, which
+    independently confirms the 9-wide vertex row. But those are the nibbles of
+    the BUILT struct, not of the file, and testing file bytes against them
+    fails: the values run past 8. Reading the s16 as world position also fails
+    - the centroid lands in the owning patch 0.3% of the time.
+
+    So the records go out as hex against their patch. That is honest about what
+    is known, and it is still enough to place a road by patch and to check a
+    future field guess against a decal whose position is already known.
+    """
+    n = 0
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('patch,px,py,record,bytes\n')
+        for i, (_, count) in enumerate(patches):
+            for k in range(count):
+                rec = dcal[n * DCAL_REC:(n + 1) * DCAL_REC]
+                f.write('%d,%d,%d,%d,%s\n' % (i, i % side, i // side, k, rec.hex()))
+                n += 1
+    return n
 
 
 def write_obj(path, heights, grid, unit, lo, hi, step):
@@ -162,13 +427,40 @@ def main():
                 if tag in d:
                     meta[tag.lower()] = list(struct.unpack_from(
                         '<%df' % (len(d[tag]) // 4), d[tag], 0))
-            for tag in ('COLR', 'ALPH'):
-                if tag in d:
-                    out, used = rle_decode(d[tag], 1 << 24)
-                    with open(os.path.join(args.out, '%s_%s.bin' % (safe, tag.lower())),
-                              'wb') as f:
-                        f.write(out)
-                    meta[tag.lower() + '_bytes'] = len(out)
+            # --- the patch table, and the two chunks it addresses -----------
+            patches = unpack_patches(d.get('PTCH', b''))
+            side = grid // PATCH        # 64 on a 512 map, 16 on the 128 one
+            meta['patch_side'] = side
+            meta['patch_count'] = len(patches)
+            meta['layer_axis'] = list(d.get('AXIS', b''))
+
+            if patches and len(patches) == side * side:
+                if 'COLR' in d:
+                    verts = [unpack_block(b) for b in
+                             patch_blocks(d['COLR'], len(patches))]
+                    write_vertex_colour(
+                        os.path.join(args.out, safe + '_colour.png'), verts, side)
+                    meta['vertex_colour_grid'] = side * PATCH + 1
+                want = [i for i, p in enumerate(patches) if popcount(p[0]) > 1]
+                by_patch = {}
+                if 'ALPH' in d:
+                    raw = [unpack_block(b) for b in
+                           patch_blocks(d['ALPH'], len(want))]
+                    for pi, blob in zip(want, raw):
+                        k = popcount(patches[pi][0])
+                        by_patch[pi] = [plane_nibbles(blob[j * PLANE:(j + 1) * PLANE])
+                                        for j in range(k)]
+                    meta['alph_patches'] = len(want)
+                    meta['alph_plane_bytes'] = PLANE
+                meta['layers_used'] = write_layer_map(
+                    os.path.join(args.out, safe + '_layers.png'),
+                    patches, by_patch, side)
+                write_patch_csv(os.path.join(args.out, safe + '_patches.csv'),
+                                patches, side)
+                if 'DCAL' in d:
+                    n = write_decals(os.path.join(args.out, safe + '_decals.csv'),
+                                     d['DCAL'], patches, side)
+                    meta['decal_count'] = n
             with open(os.path.join(args.out, safe + '.json'), 'w', encoding='utf-8') as f:
                 json.dump(meta, f, indent=2)
 

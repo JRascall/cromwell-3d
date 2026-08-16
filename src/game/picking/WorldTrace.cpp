@@ -371,34 +371,75 @@ void WorldTrace::sweep(const Params& params, OnHit&& onHit) const
         }
 
         /* ---- the faces ---------------------------------------------------
-         * ONE FACE, ONE OWNER. A wall between two tiles is stored on both, so
-         * testing all four faces of every cell would report it twice — once as
-         * this cell's east face and once as the neighbour's west. Each cell owns
-         * the two faces at its MINIMUM boundaries, which covers every face in
-         * the grid exactly once; the far borders have no neighbour to own theirs,
-         * so those are tested here as well. */
-        const auto considerFace = [&](Dir direction4, bool alongX, float plane) {
-            const Edge edge = world_.effectiveEdge(x, y, z, direction4);
+         * A CELL TESTS ONLY GEOMETRY THAT IS INSIDE IT, and getting that wrong
+         * is the one way a walk like this can miss something it went through.
+         *
+         * A wall slab STRADDLES the boundary it sits on — kWallHalfThickness
+         * either side — so half of every wall lies in each of the two cells it
+         * separates. The first version of this gave each face a single owner,
+         * the cell at its MINIMUM boundary, and tested the whole 9 cm slab from
+         * there. That reports a shared wall exactly once, which was the problem
+         * it was solving, but it breaks the walk's only guarantee: the
+         * traversal promises to visit the cells the ray CROSSES, and a ray can
+         * cross the half of a slab that sits in the non-owning cell and then
+         * leave — sideways or into the next storey — without ever reaching the
+         * owner. The wall is then never tested and the ray sails through it.
+         *
+         * The window is only 4.5 cm wide, so it reads as a cursor that
+         * intermittently slides off a plain wall onto the ground behind it at
+         * particular camera angles. See testWallIsFoundByARayThatLeavesTheCell-
+         * InsideTheSlab, which is that ray.
+         *
+         * SO EACH CELL TESTS ITS OWN HALF OF ALL FOUR of its faces. The halves
+         * tile the slab exactly, every one of them is inside the cell that
+         * tests it, and the walk's guarantee is enough again.
+         *
+         * ONE FACE, ONE REPORT, STILL. The two halves meet at the boundary
+         * plane, and that seam is not a surface — it is the middle of a wall.
+         * A contact there is the ray arriving from the other half, which the
+         * other cell has already reported, so it is dropped: `inward` says
+         * which way the cell's interior lies, and a contact normal pointing the
+         * other way is the seam. End caps, whose normals are perpendicular to
+         * both, are kept — a wall that stops mid-run has a real face there.
+         *
+         * AND AT THE GRID'S EDGE THE OUTER HALF HAS NO CELL TO LIVE IN, so the
+         * border keeps the full slab: there is no neighbour to report it twice,
+         * and without this a wall on the boundary would lose its outward 4.5 cm
+         * and be picked 4.5 cm inside where it is drawn. */
+        const auto considerFace = [&](Dir face, bool alongX, float plane, float inward) {
+            const Edge edge = world_.effectiveEdge(x, y, z, face);
             if (edge.cover == Cover::None) return;
 
             const LayerId faceLayer = edge.window ? layer::kWindow : layer::kWall;
             if (filter.ignores(faceLayer)) return;
 
-            const Aabb slab =
-                alongX ? Aabb{ Vec3{ plane - kWallHalfThickness, base, static_cast<float>(y) },
-                               Vec3{ plane + kWallHalfThickness, top,
-                                     static_cast<float>(y) + 1.0f } }
-                       : Aabb{ Vec3{ static_cast<float>(x), base, plane - kWallHalfThickness },
-                               Vec3{ static_cast<float>(x) + 1.0f, top,
-                                     plane + kWallHalfThickness } };
+            const bool shared = lattice.isValid(x + dx(face), y + dy(face), z);
+            const float outer = shared ? 0.0f : kWallHalfThickness;
 
-            consider(sweepBoxAt(slab), faceLayer, x, y, z, -1);
+            const float nearSide = plane - inward * outer;
+            const float farSide  = plane + inward * kWallHalfThickness;
+            const float lo = std::min(nearSide, farSide);
+            const float hi = std::max(nearSide, farSide);
+
+            const Aabb slab =
+                alongX ? Aabb{ Vec3{ lo, base, static_cast<float>(y) },
+                               Vec3{ hi, top, static_cast<float>(y) + 1.0f } }
+                       : Aabb{ Vec3{ static_cast<float>(x), base, lo },
+                               Vec3{ static_cast<float>(x) + 1.0f, top, hi } };
+
+            const SweepContact contact = sweepBoxAt(slab);
+            if (!contact.hit) return;
+
+            const float alongNormal = alongX ? contact.normal.x : contact.normal.z;
+            if (shared && alongNormal * inward < -0.5f) return;
+
+            consider(contact, faceLayer, x, y, z, -1);
         };
 
-        considerFace(Dir::West, true, static_cast<float>(x));
-        considerFace(Dir::South, false, static_cast<float>(y));
-        if (x == lattice.width() - 1) considerFace(Dir::East, true, static_cast<float>(x) + 1.0f);
-        if (y == lattice.height() - 1) considerFace(Dir::North, false, static_cast<float>(y) + 1.0f);
+        considerFace(Dir::West,  true,  static_cast<float>(x),          1.0f);
+        considerFace(Dir::East,  true,  static_cast<float>(x) + 1.0f,  -1.0f);
+        considerFace(Dir::South, false, static_cast<float>(y),          1.0f);
+        considerFace(Dir::North, false, static_cast<float>(y) + 1.0f,  -1.0f);
 
         return false;
     });

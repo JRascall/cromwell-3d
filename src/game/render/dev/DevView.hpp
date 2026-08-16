@@ -24,11 +24,14 @@
 #include "cromwell/overlay/RenderEffects.hpp"
 #include "cromwell/overlay/ViewLayers.hpp"
 #include "cromwell/post/AmbientOcclusion.hpp"
+#include "cromwell/post/BloomTuning.hpp"
 #include "game/render/DrawLayers.hpp"
 #include "game/render/ribbon/RibbonTuning.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 
 /* Forward-declared in the namespace they actually live in. These are
  * cromwell's types; declaring them inside game invents a second,
@@ -99,6 +102,36 @@ struct DevRequests {
     std::optional<DecalPlacement> decalBrush;
 
     bool clearDecals = false;
+
+    /* ---- FOLD ANOTHER RENDERER'S REQUESTS INTO THESE -----------------------
+     *
+     * So that Application can drain every renderer it holds WITHOUT ASKING
+     * WHICH ONE IS DRAWING, which is the whole reason this exists.
+     *
+     * There are two renderers during the rhi migration and exactly one of them
+     * draws; which one is a startup argument, and Application states that fact
+     * in one place — the `if (rhiRenderer_)` around render(). Restating it here
+     * would be a second copy of the same fact in a file that has no reason to
+     * know it, and the failure mode of the two copies disagreeing is PRECISELY
+     * the bug this seam exists to fix: buttons that do nothing while the
+     * checkbox beside them works, which reads as a rendering bug and is not one
+     * (rhi/MIGRATION.md §4.5, "TWO MECHANISMS").
+     *
+     * Draining both cannot disagree. There is ONE dev panel in the process,
+     * borrowed by whichever renderer is live, so only that renderer is ever
+     * handed a request buffer to fill — the other hands back a
+     * default-constructed struct, and merging it in is a no-op by construction
+     * rather than by a check somebody has to keep true.
+     *
+     * IT ALSO SURVIVES §4.13. When FrameRenderer is deleted the merge collapses
+     * to a single take with nothing to remove; a branch on which renderer is
+     * live would have to be found and unpicked.
+     *
+     * OR FOR THE FLAGS, PRESENCE FOR THE OPTIONALS. A flag means "somebody
+     * asked this frame" and two asks are one ask. An optional carries a VALUE,
+     * so the incoming one wins only when it actually has one — otherwise an
+     * empty struct would erase a slider position that had just been set. */
+    void mergeFrom(const DevRequests& other);
 };
 
 /* ---- what the decal tool needs to SHOW ------------------------------------
@@ -136,10 +169,32 @@ struct DevDecalTool {
  * Names and notes are borrowed pointers to string literals; nothing is copied
  * and nothing is owned. Rebuilt each frame by Application, which is the only
  * place that knows what exists. */
+/* ---- AND WHY THE IMAGE IS AN ID AND A SIZE RATHER THAN A Texture2D --------
+ *
+ * THIS FIELD USED TO BE A raylib `Texture2D` AND THAT MADE THE PANEL
+ * UNSHAREABLE. There are two renderers during the rhi migration, and their
+ * ImGui backends put different things in `ImTextureID`: rlImGui puts a raylib
+ * texture's GL id, `DeviceImGuiRenderer` puts an RHI texture handle. THEY ARE
+ * DIFFERENT ID SPACES. Handing a raylib texture to the device backend samples
+ * whatever RHI resource happens to share that number — which is a WRONG
+ * PICTURE rather than an error, and a wrong picture in the one panel used to
+ * decide whether a buffer is right is the worst possible place for one.
+ *
+ * So the panel carries what ImGui carries: an opaque id issued by whichever
+ * backend is live, plus the size, which is the only other thing a panel needs
+ * (it preserves aspect so a 6:1 cubemap strip and a square shadow map are both
+ * readable at one height setting). Each renderer fills its own; neither can
+ * hand over the other's.
+ *
+ * `std::uint64_t` because that is what `ImTextureID` is in imgui 1.92. Spelt as
+ * a plain integer rather than the typedef so this header keeps its promise that
+ * nothing outside DevView.cpp needs to know the UI library exists. */
 struct DevTextureView {
-    const char* name    = "";
-    const char* note    = "";
-    Texture2D   texture = {};
+    const char*   name   = "";
+    const char*   note   = "";
+    std::uint64_t id     = 0;   /* the live backend's ImTextureID; 0 is none */
+    int           width  = 0;
+    int           height = 0;
 };
 
 struct DevTextures {
@@ -148,9 +203,11 @@ struct DevTextures {
     DevTextureView entries[kMaximum];
     int            count = 0;
 
-    void add(const char* name, Texture2D texture, const char* note = "")
+    void add(const char* name, std::uint64_t id, int width, int height,
+             const char* note = "")
     {
-        if (count < kMaximum) entries[count++] = DevTextureView{ name, note, texture };
+        if (count < kMaximum)
+            entries[count++] = DevTextureView{ name, note, id, width, height };
     }
 };
 
@@ -171,14 +228,19 @@ struct DevSteam {
     std::string avatarState = "idle";
     std::string avatarUrl;
 
-    /* Zero id until the image has been decoded and uploaded. */
-    Texture2D   avatar{};
+    /* Zero until the image has been decoded and uploaded — by whichever
+     * renderer is drawing, into whichever id space its ImGui backend uses. Same
+     * arrangement and the same reason as DevTextureView above. */
+    std::uint64_t avatar = 0;
+    int           avatarWidth = 0;
+    int           avatarHeight = 0;
 };
 
 struct DevTunables {
     SunLight&                 sun;
     RibbonTuning&             ribbon;
     AmbientOcclusion::Tuning& occlusion;
+    BloomTuning&              bloom;
     float&                    exposure;
 
     /* One switch per LIGHTING TERM, edited in place by the rendering panel.
@@ -211,6 +273,23 @@ public:
               const DevDecalTool& decalTool, const DevSteam& steam,
               DevRequests& requests, WebSurface* browser = nullptr);
 
+    /* WHO PUTS THE FINISHED PANEL ON THE SCREEN.
+     *
+     * `rlImGuiEnd()` is exactly `ImGui::Render()` followed by rlImGui drawing
+     * the result through rlgl, with no seam in the middle - the same shape
+     * DevFonts describes for rlImGuiSetup. The device renderer needs the first
+     * half and must not have the second, so this splits them: deferred, draw()
+     * calls ImGui::Render() and stops, leaving the caller to fetch
+     * ImGui::GetDrawData() and present it however it can.
+     *
+     * WHY A FLAG RATHER THAN TWO DevViews. There is ONE ImGui context in the
+     * process and it owns the input state, the open/closed flags and every
+     * slider's position. A second panel would be a second answer to "is the
+     * layers tab open", and the symptom would be a panel that forgets itself
+     * when the renderer is switched. Same argument GameUi makes for the one UI
+     * surface, and RhiFrameRenderer borrows this the same way. */
+    void setDeferredPresent(bool deferred) { deferPresent_ = deferred; }
+
     void setVisible(bool visible) { visible_ = visible; }
     void toggleVisible() { visible_ = !visible_; }
     bool visible() const { return visible_; }
@@ -223,6 +302,9 @@ public:
 
 private:
     /* The strip along the top. Returns nothing; it edits open_. */
+    /* ImGui::Render(), then rlImGui's draw unless the present is deferred. */
+    void present();
+
     void drawToolbar();
 
     /* One per category button. Each begins and ends its own window. */
@@ -298,6 +380,7 @@ private:
 
     /* Closed until asked for. A dev panel that opens itself is in the way of
      * every run that was not about the panel — including every screenshot. */
+    bool deferPresent_ = false;
     bool visible_  = false;
     bool showDemo_ = false;
     int  storeys_  = 1;

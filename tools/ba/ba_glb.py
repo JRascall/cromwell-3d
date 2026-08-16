@@ -114,36 +114,35 @@ def drop_lower_lods():
     return len(doomed)
 
 
-def stand_upright():
-    """Flip the imported hierarchy so the model's up-axis is +Y.
-
-    Worked out by measurement, not from the specs, because the specs would give
-    the wrong answer here. Blender is Z-up and glTF is Y-up, so the expected
-    move is export_yup=True - but these FBX come from Unity and Blender's
-    importer leaves them Y-tall in Blender's own coordinates (measured
-    x=1.80 y=2.14 z=1.13, identical with a forced -Z/Y orientation). Exporting
-    with the conversion on therefore lays the character down; exporting with it
-    off stands it up and upside down, head at -Y.
-
-    So the model arrives glTF-oriented but inverted, and one 180-degree turn
-    about X - (x,y,z) -> (x,-y,-z) - puts up at +Y. Then the export must NOT
-    convert again, which is why export_yup is false below.
-
-    The acceptance test is the library that was already right: a Mercenaries
-    character measures y=2.04 as its tallest axis and renders standing. A Broken
-    Arrow rifleman now measures the same way instead of z=1.88.
-    """
-    flip = mathutils.Matrix.Rotation(math.pi, 4, 'X')
-    for obj in bpy.data.objects:
-        if obj.parent is None:
-            obj.matrix_world = flip @ obj.matrix_world
+# ---- ORIENTATION, AND HOW NOT TO DEBUG IT ------------------------------
+# There is no orientation fix in this script, and that is the correct answer.
+# export_yup=True below - the plain Blender-Z-up-to-glTF-Y-up conversion - is
+# all that is needed.
+#
+# It is written up because the obvious way to check orientation is wrong and
+# cost two false fixes. Rendering the mesh straight out of the file shows a
+# character lying down or upside down, which looks exactly like a broken export.
+# It is not: for a SKINNED mesh the vertex positions in the file are mesh-local
+# and mean nothing on their own. The real world-space orientation only exists
+# once the skin is applied, because the joint matrices carry the node hierarchy.
+# So the bind-pose render is not evidence, and judging by it led to adding a
+# 180-degree flip that made the rest pose look right and every clip play
+# upside down.
+#
+# Moving that flip onto a parent empty - so the animation channels could not
+# overwrite it - fixed the symptom and kept the underlying error, because the
+# error was that no flip was needed at all.
+#
+# THE TEST THAT WORKS: pose the mesh with a clip, then measure. A standing
+# character's tallest axis must be Y. Measured on US_Ranger_Rifle1 playing
+# Stand_run: x=0.96 y=1.81 z=1.32. That is a soldier upright, and it renders as
+# one.
 
 
 def convert(src, dst):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.ops.import_scene.fbx(filepath=src)
     dropped = drop_lower_lods()
-    stand_upright()
 
     # Every action in the file, not just whatever happens to be assigned. The
     # FBX carries one action per (object, take), so a 22-take rig arrives as
@@ -162,17 +161,7 @@ def convert(src, dst):
         export_apply=False,
         export_materials='EXPORT',
         export_image_format='NONE',   # names the material, ships no pixels
-        # export_yup=False, WHICH LOOKS WRONG AND IS NOT. Blender is Z-up and
-        # glTF is Y-up, so the conversion is normally wanted. But these FBX come
-        # out of Unity, and Blender's importer leaves them Y-tall in Blender's
-        # own coordinates - measured, both with the default import and with a
-        # forced -Z/Y orientation: x=1.80 y=2.14 z=1.13, so the character is
-        # already lying down in the Blender scene and already glTF-oriented.
-        # Converting again stands it on its face. Checked against the library
-        # that was already right: a Mercenaries character measures y=2.04 as its
-        # tallest axis, and with this false a Broken Arrow rifleman measures the
-        # same way instead of z=1.88.
-        export_yup=False,
+        export_yup=True,              # see the orientation note above
     )
     return actions, bones, len(arms), dropped
 

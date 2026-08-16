@@ -51,6 +51,50 @@ layout(std140, binding = 1) uniform PassBlock {
      *
      * yzw spare. */
     vec4 uProbeParams;
+
+    /* x = WHICH LIGHTING TERMS ARE SUPPRESSED — RenderEffects' bits, carried as
+     * a float because every other member here is one and a mixed block is one
+     * more way for the two halves of this contract to disagree quietly. Five
+     * bits, so the conversion is exact.
+     *
+     * A SUPPRESSION MASK: a set bit REMOVES a term, and zero is the ordinary
+     * image. Written that way round because a uniform that never arrives reads
+     * as zero, and the alternative polarity would make any such failure black
+     * the scene out — see SceneFrame::effectSuppress. yzw spare. */
+    vec4 uEffectMask;
+
+    /* x = 1 WHEN THE DECALS ARE ON, 0 when the dev panel's layer switch is off.
+     * Read by the surface shaders as well as gating the pass, because a pipeline
+     * binds the same slots every frame — skipping the pass alone would leave the
+     * last frame's planes bound and still sampled, so "off" would FREEZE the
+     * decals rather than remove them. rhi/dbuffer.glsl carries the argument.
+     *
+     * y = WHAT A FULL-STRENGTH EMISSIVE MASK IS WORTH in linear radiance. The
+     * mask is one 8-bit channel and the surface shaders output HDR, so the
+     * scale cannot live in the buffer — the same reason the sun is brighter
+     * than a wall. zw spare. */
+    vec4 uDecalParams;
 };
+
+/* WHETHER A TERM SURVIVES. `effectBit` is one of RenderEffects::Bit's values;
+ * the shader tests, it does not know what the bit is called.
+ *
+ * A FUNCTION RATHER THAN THE TEST WRITTEN OUT, because it appears in both
+ * surface shaders and the two must agree — a lit wall and the pane of glass in
+ * front of it disagreeing about whether the sun is switched off is exactly the
+ * kind of half-applied debug switch that gets read as a transparency bug. */
+bool effectOn(int effectBit)
+{
+    return (int(uEffectMask.x + 0.5) & effectBit) == 0;
+}
+
+/* THE BIT VALUES, mirroring RenderEffects::Bit. One list in two languages, like
+ * the block above it — add to both, together. */
+const int kEffectDirectSun       = 1;
+const int kEffectAmbientDiffuse  = 2;
+const int kEffectAmbientSpecular = 4;
+const int kEffectBakedOcclusion  = 8;
+const int kEffectTransmission    = 16;
+const int kEffectEmissive        = 32;
 
 #endif

@@ -18,6 +18,9 @@
  *   --bake-benchmark        time the static sun bake and exit; no window
  *   --budget <tiles>        movement budget
  *   --iso <storey>          floor isolation ceiling
+ *   --outline-ss <n>        selection-outline stencil supersample: 2, 4 or 8.
+ *                           The quality/memory dial for the silhouette's edge —
+ *                           omit it to keep the engine's default
  *   --select <index>        which unit starts selected
  *   --sprint                force the sprint-hover STATE (both rings, amber solid)
  *   --los                   start with the visibility overlay on
@@ -131,6 +134,17 @@ struct CliOptions {
 
     bool  bakeBenchmark = false;   /* headless; never opens a window */
     bool  forceDevView  = false;   /* open the dev panel at startup   */
+
+    /* --outline-ss: how finely the selection outline's stencil is rasterised, as
+     * a multiple of the window. 2, 4 or 8; the engine snaps anything else and
+     * refuses to go below the scene's own supersample, because a stencil coarser
+     * than the depth it is compared against cannot be aligned at all.
+     *
+     * ZERO MEANS "DO NOT ASK", which is not the same as a low setting: the engine
+     * keeps its own default, so this flag is for A/B-ing the dial rather than
+     * for expressing a preference. The place a preference will eventually live is
+     * the user settings bag, not argv. */
+    int   outlineSupersample = 0;
 
     /* --minimap-realtime: run the plan-view capture every frame instead of on
      * its 0.2 s interval. The interval is the shipped answer — see

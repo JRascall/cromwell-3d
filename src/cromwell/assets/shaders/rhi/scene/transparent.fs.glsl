@@ -130,6 +130,21 @@ void main()
     float plain    = uOpacity.x;
     float coverage = mix(plain, max(plain, fresnel), uOpacity.w);
 
+    /* AND THE SURFACE'S OWN ALPHA ON TOP OF THE MATERIAL'S.
+     *
+     * vColour is the mesh's vertex colour times the object tint, alpha
+     * included, and until now only its rgb was read. Glass is unaffected: the
+     * world's vertices and every object tint carry alpha 1, so this multiplies
+     * by one on every surface that existed before overlays did.
+     *
+     * WHAT IT IS FOR is geometry whose opacity varies WITHIN one mesh, which
+     * no material parameter can express - a visibility field draws a
+     * directly-seen cell more strongly than a peek-only one, and both are the
+     * same material in the same draw. The alternative was one renderable per
+     * grade, which is three meshes and three draws to say what one byte per
+     * vertex already says. */
+    coverage *= vColour.a;
+
     /* The tint the surface picks up at grazing angles, by the same curve. */
     vec3 edgeTint = mix(vec3(1.0), uTint.rgb, fresnel);
 
@@ -168,8 +183,35 @@ void main()
      * the surface itself sends toward the eye, not a modulation of what is
      * behind it, so scaling it by coverage would stop a nearly clear pane
      * glowing no matter how strongly it is lit from behind. */
-    vec3 diffuseLight  = (sun.diffuse + ambientDiffuseLight) * edgeTint;
-    vec3 specularLight = sun.specular + ambientSpecularLight + transmissive;
+    /* ---- THE DEV PANEL'S PER-TERM SWITCHES, THE SAME FOUR THE LIT PASS HAS
+     *
+     * AND THEY HAVE TO BE THE SAME, which is why `effectOn` is a function in
+     * the shared block rather than a test written out in each file. Glass and
+     * the wall behind it disagreeing about whether the sun is switched off is
+     * not read as a debug switch being half-applied — it is read as a
+     * transparency bug, and it is looked for in the blend state.
+     *
+     * `transmission` IS THIS SHADER'S ALONE, because it is the only surface
+     * that has any: light arriving through a pane from behind it. Removing it
+     * is what tells a bright window apart from a bright reflection IN a window,
+     * which are the two explanations for the same pixel. */
+    vec3 diffuse  = effectOn(kEffectDirectSun) ? sun.diffuse : vec3(0.0);
+    vec3 specular = effectOn(kEffectDirectSun) ? sun.specular : vec3(0.0);
+
+    if (effectOn(kEffectAmbientDiffuse))  diffuse  += ambientDiffuseLight;
+    if (effectOn(kEffectAmbientSpecular)) specular += ambientSpecularLight;
+    if (effectOn(kEffectTransmission))    specular += transmissive;
+
+    /* EMISSION JOINS THE SPECULAR SIDE, which is to say the side that is NOT
+     * scaled by coverage — the same place transmission goes and for the same
+     * reason. Both are light the surface itself sends toward the eye rather
+     * than a modulation of what is behind it, so scaling them by an 8% opacity
+     * would stop a nearly clear pane glowing however brightly it was authored.
+     * A backlit sign in a shop window is the case. */
+    if (effectOn(kEffectEmissive)) specular += uEmissive.rgb;
+
+    vec3 diffuseLight  = diffuse * edgeTint;
+    vec3 specularLight = specular;
 
     outRadiance = vec4(diffuseLight * coverage + specularLight, coverage);
 }

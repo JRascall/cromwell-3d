@@ -114,6 +114,27 @@ enum class CompareFunc : uint8_t {
     Never, Less, Equal, LessEqual, Greater, NotEqual, GreaterEqual, Always,
 };
 
+/* WHAT HAPPENS TO A STENCIL TEXEL, at each of the three outcomes a fragment can
+ * reach. The set is every backend's, unchanged — GL, Vulkan, D3D and Metal all
+ * offer exactly these eight and no more, which is why it can be a closed enum
+ * rather than a negotiation.
+ *
+ * CLAMP VERSUS WRAP IS NOT A DETAIL. An increment that saturates at 255 counts
+ * "how many, up to 255"; one that wraps counts modulo 256, so the 256th
+ * overlapping fragment reads as none at all. Portal rendering and constructive
+ * stencil shadows want the wrapping pair and everything else wants the clamping
+ * one, and a caller that picks by name rather than by habit gets it right. */
+enum class StencilOp : uint8_t {
+    Keep,
+    Zero,
+    Replace,          /* with the reference value — the tagging case */
+    IncrementClamp,
+    DecrementClamp,
+    Invert,
+    IncrementWrap,
+    DecrementWrap,
+};
+
 enum class BlendFactor : uint8_t {
     Zero, One,
     SrcColour, OneMinusSrcColour,

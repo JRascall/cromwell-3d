@@ -72,6 +72,8 @@ CliOptions CliOptions::parse(int argc, char** argv)
             options.debugView = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--iso") && hasValues(i, 1)) {
             options.isoLevel = std::atoi(argv[++i]);
+        } else if (!std::strcmp(arg, "--outline-ss") && hasValues(i, 1)) {
+            options.outlineSupersample = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--select") && hasValues(i, 1)) {
             options.selectedUnit = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--decals")) {

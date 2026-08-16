@@ -34,6 +34,15 @@ struct RenderEffects {
     bool ambientDiffuse  = true;   /* sky irradiance on the albedo         */
     bool ambientSpecular = true;   /* sky + probe along the reflection ray */
 
+    /* ---- light the surface makes itself -------------------------------
+     * Not ambient and not direct: radiance from the material's own emission,
+     * scaled by nothing. It gets a switch because it is the term most likely
+     * to be MISTAKEN for one of the others — a bright patch on a wall is a
+     * highlight, a reflection or a glow, and the three are indistinguishable
+     * in a still frame. It is also what feeds bloom, so removing it is how a
+     * halo is traced back to the surface that caused it. */
+    bool emissive = true;
+
     /* ---- modulators ---------------------------------------------------
      * Not light of their own; they scale what is above. Split out because a
      * modulator misbehaving looks exactly like the term it modulates being
@@ -50,6 +59,7 @@ struct RenderEffects {
         kAmbientSpecular = 1 << 2,
         kBakedOcclusion  = 1 << 3,
         kTransmission    = 1 << 4,
+        kEmissive        = 1 << 5,
     };
 
     /* A SUPPRESSION mask: a bit set means that term is switched OFF. Inverted
@@ -64,7 +74,8 @@ struct RenderEffects {
              | (ambientDiffuse  ? 0 : kAmbientDiffuse)
              | (ambientSpecular ? 0 : kAmbientSpecular)
              | (bakedOcclusion  ? 0 : kBakedOcclusion)
-             | (transmission    ? 0 : kTransmission);
+             | (transmission    ? 0 : kTransmission)
+             | (emissive        ? 0 : kEmissive);
     }
 
     bool allOn() const { return suppressMask() == 0; }

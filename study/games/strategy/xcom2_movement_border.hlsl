@@ -12,9 +12,14 @@
 //
 // UE3 materials are node graphs, not source. Everything below - every constant,
 // every connection, the two Custom-node bodies verbatim - is transcribed from
-// the serialised MaterialExpression objects in that package. The only thing
-// that is a reconstruction rather than a transcription is MovementBorder_Line,
-// the 64x64 BC5 profile texture; see LINE PROFILE at the bottom.
+// the serialised MaterialExpression objects in that package. MovementBorder_Line,
+// the 64x64 BC5 profile texture, was originally the one exception; it has since
+// been read out exactly, and LINE PROFILE at the bottom carries the numbers plus
+// the three places the shipped port's analytic version differs from them.
+//
+// The sibling material is ./xcom2_path_ribbon.hlsl - CursorRibbon, the path line
+// from the unit to the puck. Same package, same week, same house profile curve,
+// and a deliberately different answer to occlusion; read them together.
 //
 // See ../src/render/ribbon.c + ../assets/shaders/ribbon.*.glsl for the port
 // this project actually runs, and study/README.md for provenance.
@@ -37,9 +42,12 @@
 //   ForceNoHaveSeenFOW           EHVF_FullVisible
 //
 // Being MLM_Unlit means no lighting term is ever evaluated: the pixel shader
-// returns EmissiveColor and the translucent blend does the rest. The ribbon's
-// glow is that emissive value carried into the scene's bloom - the material
-// itself contains no glow, falloff or halo of any kind.
+// returns EmissiveColor and the translucent blend does the rest.
+//
+// THE GLOW IS NOT A GLOW. This file used to say the ribbon's halo was its
+// emissive carried into the scene's bloom. That is wrong three times over, and
+// the correction matters because the port was built on it - see WHY IT READS AS
+// FLUORESCENT at the bottom.
 //-----------------------------------------------------------------------------
 
 //-----------------------------------------------------------------------------
@@ -201,15 +209,180 @@ void MovementBorder_PS(float2 UV, float3 WorldPos, float PixelDepth, float DestD
 // second move. Also unreachable there.
 
 //-----------------------------------------------------------------------------
-// LINE PROFILE
+// LINE PROFILE - recovered, and it corrects what this file used to say
 //-----------------------------------------------------------------------------
-// MovementBorder_Line is the one asset not transcribed here. It is a 64x64 BC5
-// two-channel texture holding two 1-D cross-sections of the line, addressed
-// clamped across U (the ribbon's width) and tiling along V (its length, once per
-// 96uu tile). R scrolls, G does not.
+// MovementBorder_Line was written up here as the one asset that could not be
+// transcribed, on the grounds that it is BC5. That was wrong, or at least
+// needlessly pessimistic: the SDK's exporter decompresses it on the way out.
 //
-// The port reconstructs both analytically instead of shipping the game's texture:
-// a soft-shouldered profile across the width, and for the scrolling channel that
-// same profile gated by a dash pattern along the length. See
-// ../assets/shaders/ribbon.fs.glsl, `lineProfile`. This is the single place the
-// port deviates from the material, and it is a deviation of asset, not of maths.
+//   XComGame.com batchexport UI_3D Texture2D TGA <out>    -> the pixels
+//   XComGame.com batchexport UI_3D Texture2D T3D <out>    -> the properties
+//
+// Properties, as serialised:
+//   64x64, PF_BC5, TC_TwoChannels, TMGS_NoMipmaps, AddressX=TA_Clamp
+//   SourceFilePath  3DUI/MovementBorder_Line.psd   (2015-09-15)
+//
+// The axis convention this file already assumed is confirmed by the pixels: U is
+// the ribbon's WIDTH (hence TA_Clamp on X), V is its length. Blue is zero
+// throughout - it really is a two-channel mask.
+//
+// -- G, the standing profile -------------------------------------------------
+// Flat along V, so it is one 1-D cross-section. A shoulder over the outer
+// quarter each side, plateau across the middle half. Measured, U = 0 .. 15:
+//
+//   0.035 0.082 0.141 0.204 0.275 0.345 0.424 0.498
+//   0.580 0.655 0.729 0.796 0.859 0.918 0.965 1.000
+//
+// then 1.000 through U = 47, then the mirror image down to 0.000 at U = 63. The
+// two ends are half a texel out of step with each other (0.035 at one rim,
+// 0.000 at the other) - authored, not symmetric by construction.
+//
+// This is the SAME curve as CursorTrail_MSK's cross-section, to within a
+// thousandth, just laid on the other axis. See ./xcom2_path_ribbon.hlsl, which
+// tabulates it and records that it is an S-curve but NOT a smoothstep - the
+// closest simple fit found is still 6.5% out at the shoulder. Two materials, two
+// textures, one house profile. Use the table.
+//
+// -- R, the scrolling profile ------------------------------------------------
+// The same cross-section gated along V by an exact 50% square wave: 16 texels at
+// 1.0, 16 at 0.102, twice across the texture. So TWO dashes per V unit, and V
+// tiles once per 96uu tile, therefore two dashes per tile.
+//
+// Note the gaps are 0.102, not zero - a dark dash train on a continuous line,
+// not a row of separate pips. CursorTrail_MSK does the same thing with a floor
+// of 0.5; same idea, four times shallower here.
+//
+// -- what the port actually draws --------------------------------------------
+// ../assets/shaders/ribbon.fs.glsl `lineProfile` reconstructs this analytically
+// and predates the recovery above, so it is worth stating the differences rather
+// than assuming they are settled:
+//
+//   section width   port  plateau to |e| = 0.24, ink gone by |e| = 0.86
+//                   game  plateau to |e| = 0.50, ink to the rim
+//                   -> the ported line is roughly half the width of XCOM's, and
+//                      the shader comment says so ("widening these two numbers
+//                      fattens the ribbon without touching its geometry"), so
+//                      this is a look decision that was tuned by eye, not a bug.
+//   dash period     port  one dash per tile          game  two
+//   dash floor      port  gaps to 0                  game  gaps to 0.102
+//
+// The dash channel is reached only when BorderRelevance < 1, and the shipped
+// value is 1.0, so in the default configuration none of the last two rows is
+// visible in either the game or the port.
+//
+// The port's third output, `core`, has no counterpart in the texture at all - it
+// is a port-side invention feeding the glow pass, which is already recorded
+// above as not being XCOM's.
+
+//-----------------------------------------------------------------------------
+// WHY IT READS AS FLUORESCENT
+//-----------------------------------------------------------------------------
+// The ribbon looks lit from within. It is not, and there is no bloom involved
+// anywhere. Three independent facts, all from the SDK:
+//
+//  1. BLOOM IS OFF, GLOBALLY.
+//       XComGame/Config/XComEngine.ini, [SystemSettings]:  Bloom=False
+//     Not a quality tier - [SystemSettings] is the base section, and the only
+//     other Bloom line in the file is under [SystemSettingsMobile]. The same
+//     block turns off DepthOfField, AmbientOcclusion, SSAO and
+//     ScreenSpaceReflections. XCOM 2 is not a bloomy game.
+//
+//  2. THE MATERIAL NEVER EXCEEDS WHITE. Color is (0.177, 0.666, 0.666). There
+//     is no multiply, no HDR scale, nothing above 1.0 anywhere in the emissive
+//     chain - it is one parameter straight to the output. Even with a bloom
+//     pass switched on, a 0.666 emissive is under any sane threshold.
+//
+//  3. IT IS DRAWN AFTER THE POST CHAIN ENTIRELY. bIs3DUI, and Firaxis' own
+//     comment on it in Engine/Classes/Material.uc is unambiguous:
+//       "If true, this material is used with the 3D UI and should be rendered
+//        after gamma correction."
+//     So it is not tone mapped, not graded, and not available to bloom even in
+//     principle.
+//
+// So where does the halo come from? THE PROFILE TEXTURE. See LINE PROFILE: the
+// cross-section is a plateau across the middle half and a soft shoulder over the
+// outer QUARTER on each side. Half the ribbon's width is falloff. The soft edge
+// is painted into the asset, at authoring time, by an artist - it is not
+// computed by anything at runtime.
+//
+// And the reason a flat 0.666 cyan reads as EMITTING rather than as a painted
+// stripe is that every cue which would tie it to the scene's lighting has been
+// switched off, one flag at a time:
+//
+//   MLM_Unlit                     no shading, no gradient - perfectly flat
+//   bIs3DUI                       skips tone mapping and colour grading
+//   bAllowFog = false             no aerial perspective; it never recedes
+//   ForceNoHaveSeenFOW = FullVis  fog of war cannot tint it
+//   bDisableDepthTest             nothing in front of it, ever
+//
+// That is the perceptual mechanism of fluorescence, and it is worth stating
+// plainly because it is cheap to reproduce and easy to reach for a bloom pass
+// instead: a surface reads as fluorescent when it is MORE SATURATED THAN THE
+// ILLUMINATION CAN EXPLAIN. The eye estimates the light from the scene, infers
+// the gamut a real surface could occupy under it, and anything outside that
+// gamut is read as self-luminous. Everything real in an XCOM frame has been
+// through the same tone map and the same grade, which is exactly what
+// establishes that gamut - and the ribbon is exempt from all of it. It sits
+// outside the frame's gamut by construction while being DIMMER than white.
+//
+// Not brightness. Purity. It glows the way a hi-vis vest glows, and a hi-vis
+// vest does not emit either.
+//
+// -- the consequence for this project ----------------------------------------
+// ../assets/shaders/ribbon_glow.fs.glsl exists because this file used to claim
+// the halo was scene bloom: with no bloom chain here, the port re-draws the
+// ribbon overbright and blurs it back over the frame to stand in for one. There
+// is nothing to stand in for. XCOM's halo is fifteen texels of authored shoulder
+// on a 64-wide profile, and the port already reconstructs a shoulder in
+// `lineProfile` - narrower than XCOM's, per the table above.
+//
+// This does not automatically make the glow pass wrong; it makes it OURS, an
+// addition rather than a reproduction, and it should be judged by eye on that
+// basis. plans/bloom_emissive.md treats the GlowPass as a stopgap awaiting a
+// real bloom stage, and that framing needs revisiting too - the thing it is a
+// stopgap for does not exist in the game being copied.
+
+//-----------------------------------------------------------------------------
+// REPLICATION RECIPE
+//-----------------------------------------------------------------------------
+// Everything above is analysis. This is the short version: what to actually do
+// to get the look, in any renderer, ranked by how much of the effect each step
+// carries. Checked against this tree as of writing.
+//
+//  1. DRAW IT AFTER THE TONE MAPPER, IN DISPLAY COLOUR.  [we already do this]
+//     This is the single most important step and the easiest to undo by
+//     accident. The authored colour must reach the framebuffer unmodified - not
+//     tone mapped, not exposed, not graded. That is what puts it outside the
+//     frame's gamut and makes it read as emitting.
+//
+//     In this tree that is Camera::ScenePhase::Display, and FrameRenderer draws
+//     the rings there, after ToneMapPass. It matches XCOM's bIs3DUI exactly.
+//
+//     CONSEQUENCE FOR plans/bloom_emissive.md: that note's open question - the
+//     one it says "needs eyes rather than a header argument", whether the rings
+//     should trade their crisp display-colour ink for tone-mapped emissive - now
+//     has an evidence-based answer. Tone-mapping them would move AWAY from XCOM
+//     and would cost exactly the property this section is about. Keep the ink.
+//
+//  2. AUTHOR THE SOFT EDGE INTO THE CROSS-SECTION. Plateau across the middle
+//     half, shoulder over the outer quarter each side, per the 17 values in
+//     LINE PROFILE. The halo is geometry-space, at the ribbon's own scale, and
+//     it therefore stays put when the camera moves. A screen-space blur does
+//     not, which is the tell that separates this from a bloom.
+//
+//  3. TURN OFF EVERY SCENE CUE. Unlit, no fog, no fog-of-war tint, no depth
+//     test - and do the occlusion in the shader instead, so it stays a soft
+//     artistic fade rather than a hardware yes/no. All five are listed above
+//     with the flag each one corresponds to.
+//
+//  4. KEEP THE COLOUR BELOW WHITE. 0.666, not 1.0 and certainly not 4.0. The
+//     instinct when something should glow is to overdrive it; XCOM does the
+//     opposite and it is why the ribbon never blows out over a bright floor.
+//
+//  5. DO NOT ADD A BLOOM OR GLOW PASS FOR THIS. Steps 1-4 are the whole effect.
+//     If a glow pass is wanted anyway it is a separate, deliberate look of our
+//     own - which is exactly what ribbon_glow.fs.glsl currently is.
+//
+// Known deltas between this tree and XCOM, both recorded in LINE PROFILE above:
+// our section is about half XCOM's width, and we have the extra glow pass. Both
+// are look decisions, neither is a bug, and both want eyes rather than a table.

@@ -48,6 +48,7 @@ under the preview.
 """
 import argparse
 import csv
+import re
 import os
 import struct
 import sys
@@ -452,6 +453,11 @@ def _in_library(path, lib):
         return False
 
 
+def _maya_name(s):
+    """A material name the way Unity's FBX exporter would have written it."""
+    return re.sub(r'[^0-9A-Za-z_]', '_', s or '')
+
+
 _BA_MATS = None      # material name -> {albedo, mask, normal} png filenames
 _BA_TEX = None       # texture stem -> full path, over the whole sweep
 
@@ -479,7 +485,13 @@ def _ba_texture_index():
             for fn in filenames:
                 if not fn.lower().endswith('.png'):
                     continue
-                stem = fn[:-4].split(' @')[0]
+                # .strip() is not tidiness. Some of this game's texture assets
+                # have a trailing space in their NAME - `RangerBalt ` - which
+                # the sweep preserves in the filename and Unity's own export
+                # trims. Without it the two spellings never meet and the rig
+                # silently shows no diffuse map, which is indistinguishable
+                # from a material that genuinely has none.
+                stem = fn[:-4].split(' @')[0].strip()
                 # First writer wins. The same texture appears under both trees;
                 # they are the same pixels, so which one is found is immaterial.
                 _BA_TEX.setdefault(stem, os.path.join(dirpath, fn))
@@ -511,6 +523,12 @@ def ba_materials(mesh_path):
         with csv_path.open(encoding='utf-8') as f:
             for r in csv.DictReader(f):
                 _BA_MATS[r['material']] = r
+                # UNITY'S FBX EXPORTER RENAMES MATERIALS. UseMayaCompatibleNames
+                # is on by default and rewrites anything Maya would reject to
+                # '_', so a material the game calls `RU_1BTR80/82` reaches the
+                # glTF as `RU_1BTR80_82` and matches nothing. Both spellings are
+                # indexed, exact first, so the mangled name still finds its row.
+                _BA_MATS.setdefault(_maya_name(r['material']), r)
 
     names = glb_material_names(mesh_path)
     if not names:
@@ -520,7 +538,18 @@ def ba_materials(mesh_path):
     for n in names:
         # Blender's FBX round-trip can suffix a material that collided on
         # import; the base name is what the csv knows.
-        row = _BA_MATS.get(n) or _BA_MATS.get(n.rsplit('.', 1)[0])
+        # PREFER A ROW THAT ACTUALLY HAS MAPS, not merely the first row that
+        # matches. Both `US_Ranger_1` and `US_Ranger` exist in the table and the
+        # exact match is the one with three empty columns, so taking it first
+        # shadowed the row carrying the whole texture set and the soldier
+        # rendered untextured - indistinguishable from a material that has no
+        # maps at all, which is why glass and skin looked the same here.
+        cands = [n,
+                 n.rsplit('.', 1)[0],            # Blender's .001
+                 _maya_name(n),
+                 re.sub(r'_\d+$', '', n)]        # the exporter's _1
+        rows = [_BA_MATS[c] for c in cands if c in _BA_MATS]
+        row = next((r for r in rows if r.get('albedo')), rows[0] if rows else None)
         slots = {}
         if row:
             for col, slot in (('albedo', 'diffuse'), ('mask', 'mask'),
@@ -528,7 +557,14 @@ def ba_materials(mesh_path):
                 fn = row.get(col)
                 if not fn:
                     continue
-                path = index.get(fn[:-4] if fn.lower().endswith('.png') else fn)
+                key = (fn[:-4] if fn.lower().endswith('.png') else fn).strip()
+                # Unity's exporter appends an index to a texture that shares its
+                # name with another - `RU_Track_Track72_BaseMap_0` - while the
+                # sweep writes the asset's own name. Try the exact spelling
+                # first and fall back to the de-suffixed one, never the reverse:
+                # `..._BaseMap_0` and `..._BaseMap_1` are two different files
+                # and collapsing them by default would pair the wrong one.
+                path = index.get(key) or index.get(re.sub(r'_\d+$', '', key))
                 if path:
                     try:
                         slots[slot] = load_texture(path)
@@ -800,12 +836,58 @@ def _glb_primitives(js):
 
     One generator, so the geometry loader and the skinning loader cannot
     disagree about which primitives exist or what order their vertices are in.
+
+    A primitive whose material is called `LODs` is dropped. That is Unity's
+    LOD-crossfade proxy - a 24-vertex box - and it is not decoration: it is
+    sized to enclose the whole object, so a viewer that fits the camera to the
+    bounding box frames the BOX and shrinks the vehicle inside it to a few
+    pixels. A Broken Arrow BTR-82A renders as a plain grey cube with 85,000
+    verts of armour hidden inside. Dropped by material name rather than by
+    vertex count, because 24 verts is also a perfectly good detail part.
     """
+    lod_proxy = {i for i, m in enumerate(js.get('materials', []))
+                 if (m.get('name') or '') == 'LODs'}
+
+    # DROP PRIMITIVES WHOSE BIND POSE IS WILDLY OUT OF SCALE WITH THE REST.
+    # Unity's FBX exporter mangles the bind space of any mesh skinned to a
+    # SECOND skeleton inside the same prefab - crew rigs and weapon
+    # attachments. The geometry is intact but its bind places it hundreds of
+    # metres away and scaled to match: a US_Pilot_Plane spanning 187 m inside an
+    # 18 m F-15E, a PKT machine gun at 264 m on a 2S4 mortar. Nothing downstream
+    # can recover it, and one such primitive dominates the camera fit so
+    # completely that the actual vehicle renders as a few pixels.
+    #
+    # Judged against the MEDIAN primitive of the same file rather than an
+    # absolute size, so a genuinely large object stays whole - a ship is allowed
+    # to be a ship. Only an outlier many times the typical part is dropped, and
+    # only when it is also absolutely large, so a small model with one long thin
+    # piece is untouched.
+    spans = []
+    for m in js.get('meshes', []):
+        for prim in m.get('primitives', []):
+            acc = js['accessors'][prim.get('attributes', {}).get('POSITION', 0)]
+            lo, hi = acc.get('min'), acc.get('max')
+            if lo and hi and len(lo) == 3:
+                spans.append(max(hi[k] - lo[k] for k in range(3)))
+    limit = None
+    if len(spans) >= 4:
+        med = sorted(spans)[len(spans) // 2]
+        if med > 0:
+            limit = max(med * 8.0, 50.0)
+
     for m in js.get('meshes', []):
         for prim in m.get('primitives', []):
             attrs = prim.get('attributes', {})
             if 'POSITION' not in attrs or 'indices' not in prim:
                 continue
+            if prim.get('material') in lod_proxy:
+                continue
+            if limit is not None:
+                acc = js['accessors'][attrs['POSITION']]
+                lo, hi = acc.get('min'), acc.get('max')
+                if lo and hi and len(lo) == 3:
+                    if max(hi[k] - lo[k] for k in range(3)) > limit:
+                        continue
             yield prim, attrs
 
 
@@ -889,23 +971,73 @@ def load_glb_rig(path):
                      np.array(n.get('rotation', (0, 0, 0, 1)), np.float64),
                      np.array(n.get('scale', (1, 1, 1)), np.float64)))
 
+    # ONE FILE CAN CARRY MANY SKINS, AND THE JOINT INDICES ARE PER SKIN.
+    # Blender writes a single merged skin, so reading skins[0] was right for
+    # every library here until Broken Arrow: FBX2glTF writes ONE SKIN PER MESH -
+    # 24 of them for a soldier, 17 for an airframe - and each primitive's
+    # JOINTS_0 indexes into its own skin's joint list. Taking skins[0] alone
+    # gave a 50-bone character a 4-joint skeleton, so most vertices resolved to
+    # the wrong bone and the mesh tore itself apart the moment it was posed.
+    #
+    # The fix is a union skeleton: every joint from every skin, deduplicated,
+    # with each primitive's indices remapped into that shared space. pose_glb
+    # then needs no knowledge of any of this.
     joints, ibm = [], None
     if skins:
-        joints = list(skins[0].get('joints', ()))
-        if 'inverseBindMatrices' in skins[0]:
-            # glTF stores a matrix column-major; transposing once here means the
-            # rest of this file can think in rows.
-            ibm = read(skins[0]['inverseBindMatrices']).astype(np.float64)
-            ibm = ibm.reshape(-1, 4, 4).transpose(0, 2, 1)
-        else:
-            ibm = np.tile(np.eye(4), (len(joints), 1, 1))
+        # mesh index -> skin index, via the nodes that instantiate the meshes.
+        mesh_skin = {}
+        for n in nodes:
+            if 'mesh' in n and 'skin' in n:
+                mesh_skin.setdefault(n['mesh'], n['skin'])
+
+        # KEYED BY (skin, joint), NOT BY NODE. An inverse bind matrix belongs to
+        # a skin-joint PAIR: the same bone node can appear in two skins with two
+        # different bind poses, and a vehicle carrying a crew rig does exactly
+        # that. Deduplicating by node and keeping the first skin's matrix gave
+        # the pilot the airframe's bind pose - which renders as a crew member
+        # stretched to the size of the aircraft and laid on his side, and looks
+        # like broken animation rather than a broken bind.
+        #
+        # Duplicating a node across entries costs a few extra joint matrices and
+        # nothing else: pose_glb resolves each entry's world transform from its
+        # own node, so repeats simply resolve to the same place.
+        order, ibms, skin_lut = [], [], {}
+        for si, sk in enumerate(skins):
+            sj = list(sk.get('joints', ()))
+            mats = None
+            if 'inverseBindMatrices' in sk:
+                # glTF stores a matrix column-major; transposing once here means
+                # the rest of this file can think in rows.
+                mats = read(sk['inverseBindMatrices']).astype(np.float64)
+                mats = mats.reshape(-1, 4, 4).transpose(0, 2, 1)
+            lut = np.empty(len(sj), np.int32)
+            for k, node in enumerate(sj):
+                lut[k] = len(order)
+                order.append(node)
+                ibms.append(mats[k] if mats is not None else np.eye(4))
+            skin_lut[si] = lut
+        joints = order
+        ibm = np.stack(ibms) if ibms else None
 
     # Per-vertex influences, in load_glb's vertex order - see _glb_primitives.
+    # Remapped per primitive, because a joint index only means anything
+    # relative to the skin the primitive was written against.
+    prim_skin = {}
+    if skins:
+        for mi, m in enumerate(js.get('meshes', [])):
+            for pi, pr in enumerate(m.get('primitives', [])):
+                prim_skin[id(pr)] = mesh_skin.get(mi)
+
     JI, JW, base = [], [], 0
     for prim, attrs in _glb_primitives(js):
         n = js['accessors'][attrs['POSITION']]['count']
         if 'JOINTS_0' in attrs and 'WEIGHTS_0' in attrs:
-            JI.append(read(attrs['JOINTS_0']).astype(np.int32))
+            idx = read(attrs['JOINTS_0']).astype(np.int32)
+            si = prim_skin.get(id(prim))
+            lut = skin_lut.get(si) if skins else None
+            if lut is not None and len(lut):
+                idx = lut[np.clip(idx, 0, len(lut) - 1)]
+            JI.append(idx)
             w = read(attrs['WEIGHTS_0']).astype(np.float64)
             if w.dtype != np.float64:
                 w = w.astype(np.float64)
@@ -1178,7 +1310,15 @@ def pose_glb(rig, mesh, clip, t, anim=None):
             v = _sample(times, values, t, path, interp)
             if v is None:
                 continue
-            pose[node][{'translation': 0, 'rotation': 1, 'scale': 2}[path]] = v
+            # A glTF channel may also target 'weights' - morph-target
+            # animation, which this viewer does not do. Skipping it costs a
+            # wobbling flap on two Broken Arrow transports; indexing it blindly
+            # cost the whole file, because one unhandled channel type raised
+            # KeyError and the model would not open at all.
+            slot = {'translation': 0, 'rotation': 1, 'scale': 2}.get(path)
+            if slot is None:
+                continue
+            pose[node][slot] = v
         for i, r in pose.items():
             local[i] = _trs_matrix(*r)
 

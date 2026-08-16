@@ -215,6 +215,18 @@ add_library(cromwell_base STATIC
     # inlined into a caller. See collision/GridTrace.hpp.
     src/cromwell/collision/Intersect.cpp
     src/cromwell/collision/LayerMatrix.cpp
+    # ---- the render scene ------------------------------------------------
+    # WHAT THE ENGINE DRAWS, and HERE rather than with the renderer because
+    # none of it touches a graphics API. Storage, frustum culling, the two
+    # sorts and the per-view filters are arithmetic over boxes and integers -
+    # which is precisely the code most worth asserting about without opening a
+    # window. See xcom_scene_tests, and IMaterialQuery.hpp on why the one
+    # material question the scene asks is an interface rather than the table.
+    #
+    # The reflection probe set comes with it: it describes a WORLD rather than
+    # a viewpoint, it names no graphics API either, and a scene owns one.
+    src/cromwell/render/RenderScene.cpp
+    src/cromwell/lighting/DeviceProbeSet.cpp
     # Debug geometry, the QUEUE half. Here rather than with the renderer for
     # the reason that makes the whole facility worth having: the code that
     # most needs to draw - a pathfinder, a trace, a steering behaviour - is
@@ -406,6 +418,16 @@ if(XC_BUILD_TESTS)
     add_executable(xcom_debug_tests tests/DebugDrawTests.cpp)
     target_link_libraries(xcom_debug_tests PRIVATE cromwell_base)
 
+    # The render scene, minus the rendering. Every failure this covers is an
+    # ABSENCE - a wrongly culled renderable produces no error and no wrong
+    # pixel, just a hole in the world at one camera angle - which is exactly
+    # what a screenshot is worst at catching and an assertion is best at.
+    # It can be headless at all because storage, culling, the per-view filters
+    # and the two sorts touch no graphics API; see the note beside
+    # RenderScene.cpp above. tests/SceneTests.cpp.
+    add_executable(xcom_scene_tests tests/SceneTests.cpp)
+    target_link_libraries(xcom_scene_tests PRIVATE cromwell_base)
+
     # The direction and rotation vocabulary. Header-only, so this links the
     # engine base only to get the include path. What it pins down is the
     # degenerate cases - a zero-length forward, an exactly-opposed pair, acos
@@ -493,6 +515,7 @@ if(XC_BUILD_TESTS)
     enable_testing()
     add_test(NAME tile  COMMAND xcom_tests)
     add_test(NAME crier COMMAND xcom_crier_tests)
+    add_test(NAME scene COMMAND xcom_scene_tests)
     add_test(NAME ui     COMMAND xcom_ui_tests)
     add_test(NAME widget COMMAND xcom_widget_tests)
     add_test(NAME easing COMMAND xcom_easing_tests)
@@ -729,9 +752,15 @@ if(XC_BUILD_APP)
         src/cromwell/rhi/RenderDeviceSelfTest.cpp
         # The frame sequence and its targets. ENGINE, not game: a shadow map is
         # a depth-only pass from the sun over the world whether that world has
-        # soldiers or tanks in it. The game supplies meshes through
-        # IGeometrySource and decides nothing about the order.
+        # soldiers or tanks in it. The game REGISTERS what exists in a
+        # RenderScene and decides nothing about the order, the culling or the
+        # sort - see cromwell/render/RenderScene.hpp. IGeometrySource, which
+        # was the migration seam the game implemented, is gone.
         src/cromwell/render/ScenePipeline.cpp
+        # What the DEVICE owns, as opposed to what a world or a view owns.
+        # Here rather than in cromwell_base only because DeviceMaterials packs
+        # from PbrMaterial, which still names raylib types.
+        src/cromwell/render/RenderAssets.cpp
         src/cromwell/camera/OrbitCamera.cpp
         # Screen space to world space and back. With the renderer rather than
         # in cromwell_base because it has to agree with the matrices the
@@ -743,6 +772,11 @@ if(XC_BUILD_APP)
         # shapes were tessellated when they were added.
         src/cromwell/debug/DebugRenderer.cpp
         src/cromwell/decal/Decal.cpp
+        # The rhi half of the decals: this world's projectors and the material
+        # table they name, in terms no graphics API owns. On the RenderScene
+        # because a scorch mark is on a floor rather than in a viewpoint - the
+        # same argument DeviceProbeSet makes. Deleted into DecalSet at parity.
+        src/cromwell/decal/DeviceDecalSet.cpp
         src/cromwell/decal/DecalBuffer.cpp
         src/cromwell/decal/DecalRenderer.cpp
         src/cromwell/decal/DecalSet.cpp
@@ -750,6 +784,14 @@ if(XC_BUILD_APP)
         # TEMPORARY: dumps a depth texture to a BMP, for comparing the two
         # renderers' shadow maps directly. Remove with the comparison.
         src/cromwell/diag/DepthDump.cpp
+        # Every intermediate the DEVICE renderer produces, blitted into
+        # something a panel can show. Engine rather than game: a D32F shadow
+        # map, an RGBA16F scene colour and a cubemap array are all hard to look
+        # at for reasons that are properties of rendering, and a second project
+        # would write this again unchanged. The panel that displays the result
+        # is the game's, because cromwell may not link a UI toolkit - the same
+        # split DeviceImGuiRenderer.hpp describes.
+        src/cromwell/diag/DeviceTexturePreviews.cpp
         src/cromwell/diag/RaylibLogBridge.cpp
         src/cromwell/geometry/BoxMesh.cpp
         src/cromwell/geometry/MeshVertexBuffer.cpp
@@ -784,7 +826,6 @@ if(XC_BUILD_APP)
         # array creation and the per-layer attach that force ReflectionProbeSet
         # below to call GL directly are both on IRenderDevice, so this file
         # does not need the exemption that one has. Deleted together at parity.
-        src/cromwell/lighting/DeviceProbeSet.cpp
         src/cromwell/lighting/ReflectionProbeSet.cpp
         src/cromwell/lighting/ShadowMap.cpp
         src/cromwell/lighting/SunLight.cpp
@@ -914,7 +955,13 @@ if(XC_BUILD_APP)
         # the port and --renderer chooses; see RhiFrameRenderer.hpp for why the
         # conversion cannot be done in place.
         src/game/render/rhi/RhiBodies.cpp
+        # The game decals, converted into the scene set once a frame. A mirror
+        # rather than a second authoritative list - PlayerController places into
+        # the one DecalSet and neither it nor the panel should know which
+        # renderer is drawing. Goes with DecalSet at parity.
+        src/game/render/rhi/RhiDecals.cpp
         src/game/render/rhi/RhiFrameRenderer.cpp
+        src/game/render/rhi/RhiOverlays.cpp
         src/game/render/rhi/RhiStatics.cpp
         src/game/cli/CliOptions.cpp
         src/game/path/MoveAnimator.cpp
@@ -923,6 +970,11 @@ if(XC_BUILD_APP)
         src/game/picking/TilePicker.cpp
         src/game/picking/UnitPicker.cpp
         src/game/render/overlay/BlastFlashes.cpp
+        # Dear ImGui's draw data through rhi::IRenderDevice. HERE rather than
+        # in cromwell for the reason stated where the imgui target is declared
+        # above: the dev panel is the game's, and the engine does not link a UI
+        # toolkit on every project's behalf. See DeviceImGuiRenderer.hpp.
+        src/game/render/dev/DeviceImGuiRenderer.cpp
         src/game/render/dev/DecalDemo.cpp
         src/game/render/dev/DevFonts.cpp
         src/game/render/dev/DevView.cpp

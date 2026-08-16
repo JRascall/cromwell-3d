@@ -100,6 +100,16 @@ struct RenderFeatures {
      * unless some code explicitly asked for it. */
     bool debugDraw = true;
 
+    /* LIGHT SPREADING OFF WHAT IS BRIGHTER THAN THE SCENE, composited into the
+     * HDR target before the resolve. What makes an emissive surface read as a
+     * light rather than as a bright patch of paint.
+     *
+     * A FEATURE AND NOT A DRAW LAYER, by this file's own test: cromwell owns
+     * the pass, and a project embedding it gets bloom whether or not it has
+     * ever heard of a movement ring. Its four knobs are BloomTuning, which is
+     * authoring rather than a switch and therefore not here. */
+    bool bloom = true;
+
     /* The filmic curve in the resolve. OFF MEANS RAW: the camera's linear
      * radiance is blitted to its output unchanged (clamped by the format),
      * with the supersample collapse still applied — for a capture feeding a
@@ -148,6 +158,7 @@ struct ViewLayers {
         layers.features.decals = false;
         layers.features.customDepth = false;
         layers.features.debugDraw = false;
+        layers.features.bloom = false;
         layers.features.toneMap = false;
         return layers;
     }

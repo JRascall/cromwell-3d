@@ -37,6 +37,7 @@
  */
 #pragma once
 
+#include "cromwell/material/IMaterialQuery.hpp"
 #include "cromwell/rhi/Handles.hpp"
 #include "cromwell/style/SurfaceKind.hpp"
 
@@ -64,10 +65,10 @@ struct PbrMaterial;
  * include for the reason above. */
 enum class AlphaMode : int;
 
-class DeviceMaterials {
+class DeviceMaterials final : public IMaterialQuery {
 public:
     explicit DeviceMaterials(rhi::IRenderDevice& device);
-    ~DeviceMaterials();
+    ~DeviceMaterials() override;
 
     DeviceMaterials(const DeviceMaterials&) = delete;
     DeviceMaterials& operator=(const DeviceMaterials&) = delete;
@@ -109,7 +110,39 @@ public:
      * lets the prepass and the lit pass share it. */
     void bind(rhi::ICommandEncoder& encoder, SurfaceKind kind) const;
 
+    /* ============ THE SAME TWO QUESTIONS, ASKED BY OPAQUE ID ==============
+     *
+     * WHY BOTH FORMS EXIST. `SurfaceKind` is a closed enum of eleven things
+     * THIS GAME HAS, and §4.7 replaces it with authored materials. The render
+     * scene is a published API that must survive that, so a renderable names
+     * its material by a MaterialId and the engine's passes bind by one. The
+     * enum-shaped calls above remain for the game's own authoring, which is
+     * where a surface kind is still the honest vocabulary.
+     *
+     * TODAY THE ID IS THE KIND'S INDEX PLUS ONE. That is an implementation
+     * detail of this class and the whole point of the indirection: when
+     * materials become a loaded table, `idOf` starts answering out of it and
+     * nothing in the scene, the culler, the sort or the passes notices. The
+     * plus one is rhi/Handles.hpp's convention — zero is always null — so that
+     * a default-constructed id is invalid rather than silently meaning `Road`. */
+    static MaterialId idOf(SurfaceKind kind);
+
+    bool isTranslucent(MaterialId material) const override;
+
+    /* AN INVALID ID BINDS NOTHING, leaving whatever the pass already bound —
+     * which is the pipeline's own default block, uploaded before any geometry
+     * is submitted. A renderable with no material therefore draws with a
+     * plausible surface rather than with the last bucket's, which is the bug
+     * RhiBodies documents at length: bodies that bound no material inherited
+     * whichever surface kind was drawn last, so changing the iso level changed
+     * what every unit was made of. */
+    void bind(rhi::ICommandEncoder& encoder, MaterialId material) const;
+
 private:
+    /* Which slot an id names, or a negative number for an id this table cannot
+     * answer for. One place converts, so the convention above is stated once. */
+    static int slotOf(MaterialId material);
+
     void release();
 
     rhi::IRenderDevice& device_;

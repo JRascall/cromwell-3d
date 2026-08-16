@@ -357,14 +357,30 @@ void StoreyGeometryEmitter::emitEdges(const Tile& tile, int x, int y, int z, flo
 void StoreyGeometryEmitter::emit(int storey, SurfaceBuffers& out) const
 {
     const Lattice& lattice = world_.lattice();
+    emit(storey, 0, 0, lattice.width(), lattice.height(), out);
+}
+
+void StoreyGeometryEmitter::emit(int storey, int minX, int minY, int maxX, int maxY,
+                                 SurfaceBuffers& out) const
+{
+    const Lattice& lattice = world_.lattice();
+
+    /* CLAMPED RATHER THAN ASSERTED, because the caller is a chunk grid whose
+     * last chunk on each axis legitimately overhangs a map that is not a whole
+     * number of chunks wide. Making that the caller's problem would put the
+     * same min() in every caller. */
+    const int x0 = std::max(minX, 0);
+    const int y0 = std::max(minY, 0);
+    const int x1 = std::min(maxX, lattice.width());
+    const int y1 = std::min(maxY, lattice.height());
 
     for (int i = 0; i < kCellsPerStorey; i++) {
         const int   z = Lattice::storeyBaseZ(storey) + i;
         const bool  storeyBase = (i == 0);
         const float cellBase = Lattice::cellBaseHeight(z);
 
-        for (int y = 0; y < lattice.height(); y++)
-        for (int x = 0; x < lattice.width(); x++) {
+        for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
             const Tile& tile = world_.at(lattice.index(x, y, z));
             const float fx = static_cast<float>(x) + 0.5f;
             const float fy = static_cast<float>(y) + 0.5f;

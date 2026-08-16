@@ -27,6 +27,11 @@ single file. That belongs in one place.
     mercs_world.py    → worlds/
     mercs_script.py   → scripts/
     mercs_anim.py     → animations/       independent of the others
+    mercs_fx.py       → audio_events/     independent; needs no other step
+    mercs_gameplay.py → gameplay/         paths, encounters, anim tables,
+                                          regions, landmarks
+    mercs_ini.py      → config/           the 40 shipped text configs; takes
+                                          the DATAPS2 directory, not a .DSK
 5.  mercs_gltf.py     → gltf/             needs 2; rig + skin + clips in one
     mercs_rigcheck.py                     after a Blender round trip; gates it
     mercs_scene.py    → scenes/           needs 2 and 3
@@ -51,9 +56,12 @@ Audio needs `vgmstream-cli`; `mercs_extract.ps1 -FetchTools` downloads it.
 | `gltf/` | 2,293 rigged `.glb` — skeleton, skin and materials |
 | `gltf/animated/` | the three playable mercs (`*_anim.glb`), each carrying 1,639 clips |
 | `terrain/` | 14 heightmaps: PNG, RAW, OBJ, JSON metadata |
-| `worlds/` | 413 CSV, 51,731 placements |
+| `worlds/` | 413 CSV, 51,731 placements, **652 property columns** — see below |
+| `gameplay/` | 350 paths (3,133 oriented nodes), 236 encounters, 95 animation tables, 96 landmarks, 12 region sets |
+| `config/` | 20,260 directives from 40 text configs — atmosphere/lighting, 1,713 radio lines, 299 traffic zones, 229 emails |
 | `scripts/` | 198 Lua files, 2.03 MB — **genuine source, not bytecode** |
 | `executable/` | VU microcode, section table, 104 source filenames |
+| `audio_events/` | 396 audio events, 10,479 sound cues, the whole music transition graph |
 | `asset_names.tsv` | 9,494 named assets |
 | `materials.csv` | 2,950 mesh → texture links |
 
@@ -73,14 +81,40 @@ Audio needs `vgmstream-cli`; `mercs_extract.ps1 -FetchTools` downloads it.
 | `jont` curves | `0x003999b8` | QROT = four channel byte-counts; DXLT = per-joint f32 scale + `frames*6`; SXLT = 3×s16. **No offsets — a running cursor in chunk order** |
 | rotation channel | `0x00399c88` | `0x80 n` hold, `0x81 vv` absolute s16, else s8 delta; component = value / **2047** |
 | `tern` heightmap | — | 512×512 @ 8 m. HGT8 tiled **16×16**; HEXP is **signed** i16 |
+| `tern` PTCH | `RedTerrain.cpp` | 4 bytes per 8×8 patch: `{u16 layerMask; u8 decalCount; u8 reserved}` |
+| `tern` COLR/ALPH | `RedTerrain.cpp` | per-patch blocks in patch order, `{u16 packed; u16 unpacked}` + **mesh LZ**, not the texture RLE. COLR is 162 B = 81 vertices (9×9, shared edges) × u16. ALPH is 45 B × popcount, and only for patches with more than one layer |
+| `tern` DCAL | — | 24-byte records grouped by patch, run length from PTCH |
 | `wrld` placement | — | `inst` = XFRM (3×3 + position) + PROP; TABL is `{hash,len,text,0}` |
 | `.MSH`/`.MSB` audio | — | `{u32 size; u32 id; u32 offset; u32 rate}` per sample |
+| `fx3_`/`xcl_`/`xch_`/`xsh_`/`xsl_` | — | **not a binary format.** A `ucfb` tree whose leaves are null-separated ASCII `key\0value\0…`; a float is the text `"0.400000"`. `SSET`→`SNDS` are weighted alternatives, `TTBL`→`TRNS` the music transition rules |
 
 `.MIB`/`.MIH` are stock Sony MultiStream — vgmstream reads them unaided.
 
 ---
 
 ## Things that cost hours. Read this part.
+
+**A tool that reads a field and does not emit it hides the whole chunk.**
+`mercs_world.py` resolved every instance property through the world's string
+table and then wrote four of them — model, name, objectType, transform. So the
+world CSVs looked like a placement list, and the conclusion drawn from them was
+that the game shipped no lighting data, no destruction tuning and no cover
+data. All three were in the file the whole time, one function call away:
+
+    light_a_rgba  light_a_omniradius  light_a_conelength  light_a_conewidth
+    light_a_flaresize  light_a_flareamount  light_a_flickertype/period
+    destructible  hitPoints  damageTexture  physicsMass  ArmorType
+    coverRating  ObstacleMaterialType  targetPriority  winchable  faction
+
+1,703 instances carry a light block; 2,919 carry hit points; 1,419 carry a
+cover rating. Emitting the union of resolved keys turns 15 columns into **652**.
+
+The general lesson, and it is not about lighting: an extractor's output is the
+only thing anyone reads, so **a field that is parsed but not written is
+indistinguishable from a field that is not there**. Absence in the output was
+taken as absence in the data, and that is a conclusion no amount of staring at
+the CSV could have corrected. When a chunk has open-ended properties, emit all
+of them and let the reader narrow.
 
 **Check for an existing reader before reverse-engineering.** Four rounds of
 parameter sweeping failed on the `segm` vertex format. `swbf-unmunge` — a mature
@@ -147,11 +181,54 @@ scan is invisible until `--list --refresh`.
 ## Not decoded
 
 `path` (346 — road network: PNTS/ORNT/JNCT junctions), `rgns` (10), `enc_`
-(232 encounters), `atbl`, `fx3_`, `lrg_`, `xcl_`/`xsh_`/`xsl_` (sound config).
-All extracted as raw chunks by `mercs_dsk.py --extract`.
+(232 encounters), `atbl` (95), `lrg_` (91). All extracted as raw chunks by
+`mercs_dsk.py --extract`. Every one of them is the same self-describing `ucfb`
+tree the audio tables turned out to be — `enc_` opens `NAME "Encounter0"` then
+`SQDS "SQD_…"`, `atbl` opens `NAME "allies_boss"` then `ANAM` — so these are
+walking exercises rather than reverse engineering. Do them before anything that
+needs a real codec.
 
-`COLR`/`ALPH` terrain layers are RLE-decoded to `.bin` but their layout is not
-worked out.
+**Visual particle effects do not exist as data anywhere on the disc.** This is
+a proven negative rather than a gap, and it was worth proving because the
+alternative is looking for them forever:
+
+- `RedEffect.cpp`, `RedEffectGenerator.cpp`, `RedEffectSystem.cpp` and
+  `RsEffect.cpp` contain **no chunk-tag constants** — nothing is loaded
+- the ELF string table contains **zero** occurrences of `particle` or
+  `emitter`, so there are no parameter names even in the binary
+- no shipped config file defines one: `RS.INI`, `PS2.INI`, `MSH2TEMP.INI` and
+  `RSM.CFG` are language/debug flags, mesh→template mappings and the audio
+  stream manifest respectively
+- the Lua exposes three high-level toggles and no definitions —
+  `Effect_SetCloudFlightEffect`, `Effect_SetRushingAirEffect`,
+  `Effect_CeilingDust`
+
+What does exist: sprite textures (`explosion`, `flame`, `flame_anim`, `flames`,
+`csmoke`, `fx_b_dust_puff`), ~300-byte billboard models (`global_flame01`,
+`global_flamesmall01`, `global_flametiny`), and `RsEffect.cpp` at 98 KB to read
+the behaviour out of. Emitters are hard-coded C++. Re-authoring is the only
+route, and no tool in this directory will ever produce them.
+
+Note the name collision that cost an afternoon: `fx3_` reads like the particle
+chunk and is the **audio** event table.
+
+Two useful things found while proving this. `MSH2TEMP.INI` maps meshes to actor
+templates (`allies_veh_apache` → `template_allies_apache`), which is the other
+half of the `template_*` names the mission Lua spawns. `RSM.CFG` is the stream
+manifest — name, path and sample rate for every streamed sound.
+
+The **other three bits of an ALPH nibble**. The plane layout is solved from the
+console loop — 9×9 vertices, one nibble each, five bytes a row — and the loop
+consumes exactly one bit of it (`0x04` low, `0x40` high) to select the layer.
+What the remaining three bits do is not visible in that path.
+
+The **DCAL record fields**. 24 bytes, grouped by patch, and the loader's own
+shape is known: eight header bytes of which five are discarded, then eight s16
+as four alternating-axis pairs in 1/16 units. Byte 3 is zero and bytes 4–7 are
+`0xFFFFFFFF` on every record in the game. But the file→runtime byte mapping
+does not reproduce the runtime nibbles, and reading the s16 as world position
+puts a decal in its own patch 0.3% of the time. Emitted as hex against the
+owning patch.
 
 Skinning is **rigid — one bone per vertex, no weights**, which is a PS2-era
 constraint and not something lost in extraction. The `.glb` writes weight 1.0

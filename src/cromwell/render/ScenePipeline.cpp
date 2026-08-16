@@ -1,11 +1,19 @@
 #include "cromwell/render/ScenePipeline.hpp"
 
 #include "cromwell/diag/Logger.hpp"
+#include "cromwell/decal/DeviceDecalSet.hpp"
 #include "cromwell/diag/Profile.hpp"
+#include "cromwell/gpu/GpuProfiler.hpp"
+
+#include <cstring>
 #include "cromwell/geometry/MeshVertexBuffer.hpp"
 #include "cromwell/gpu/ShaderLibrary.hpp"
 #include "cromwell/debug/DebugDraw.hpp"
-#include "cromwell/render/IGeometrySource.hpp"
+#include "cromwell/lighting/DeviceProbeSet.hpp"
+#include "cromwell/material/DeviceMaterials.hpp"
+#include "cromwell/render/ObjectPush.hpp"
+#include "cromwell/render/RenderAssets.hpp"
+#include "cromwell/render/RenderScene.hpp"
 #include "cromwell/rhi/IRenderDevice.hpp"
 
 #include <algorithm>
@@ -215,8 +223,121 @@ struct LitBlockData {
      * probe capture sets it to zero because the array it renders into cannot
      * also be sampled. See rhi/probes.glsl. yzw spare. */
     float probeParams[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+    /* x = WHICH LIGHTING TERMS ARE SUPPRESSED, as RenderEffects' bits in a
+     * float. yzw spare.
+     *
+     * A FLOAT CARRYING A BIT MASK, which deserves a word rather than a wince.
+     * std140 would take an `int` here perfectly well, but every other member of
+     * this block is a float vector and a mixed block is one more thing for the
+     * C++ and GLSL halves to disagree about silently. The mask uses five bits;
+     * a float represents every integer to 2^24 exactly, so there is no rounding
+     * to reason about and the shader's `int(x + 0.5)` is exact.
+     *
+     * ZERO IS THE ORDINARY IMAGE. See SceneFrame::effectSuppress on why the
+     * polarity is suppression rather than enablement — a pass that forgets to
+     * fill this gets the real frame, not a black one. */
+    float effectMask[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+    /* x = decals on, y = what a full emissive mask is worth in linear radiance.
+     * See rhi/scene_block.glsl, which is the other half of this contract. */
+    float decalParams[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 };
-static_assert(sizeof(LitBlockData) == 272, "std140: 2 mat4 + 9 vec4");
+static_assert(sizeof(LitBlockData) == 304, "std140: 2 mat4 + 11 vec4");
+
+/* The outline's block. The C++ half of rhi/post/outline.fs.glsl.
+ *
+ * TWO SIZES, NOT ONE, and that is the whole reason this block grew a vec4. The
+ * pass draws into the resolved frame at surface resolution but READS the custom
+ * stencil at the supersampled one, so it needs the source's dimensions to fetch
+ * texels and the ratio between them to know how many belong to each output
+ * pixel. Carrying only the output size — which is what this held before — is
+ * what made the shader assume the two were the same. */
+struct OutlineBlockData {
+    /* x = id, y = thickness in OUTPUT pixels, zw = the STENCIL's size in texels */
+    float outline[4]  = { 0.0f, 2.0f, 1.0f, 1.0f };
+
+    /* x = stencil texels per output pixel on each axis — the outline's own
+     *     supersample, which chooses the shader's sample pattern.
+     * y = stencil texels per SCENE-DEPTH texel on each axis. One when the two
+     *     factors match, two at 4x, four at 8x. This is what keeps the occlusion
+     *     test honest: the shader reduces a y-by-y block of custom depth down to
+     *     the scene's grid before comparing, so the two sides of the comparison
+     *     always describe the same footprint. Getting a sub-texel offset in here
+     *     is the whole bug this pass was rebuilt to remove.
+     * zw = the SCENE DEPTH's size in texels, for clamping those fetches. */
+    float sampling[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+
+    float visible[4]  = { 1.0f, 0.85f, 0.30f, 1.0f };
+    float occluded[4] = { 0.35f, 0.55f, 0.90f, 0.75f };
+};
+static_assert(sizeof(OutlineBlockData) == 64, "std140: four vec4");
+
+/* ---- the decal pass's two blocks -----------------------------------------
+ *
+ * The C++ half of rhi/decal_blocks.glsl, and one contract written twice — there
+ * is no reflection on the explicit backends to check the two agree, so the
+ * static_asserts below and that file are what keep them honest.
+ *
+ * PASS FREQUENCY AND OBJECT FREQUENCY, bindings 1 and 3 from CONVENTIONS.md's
+ * table. The pass block is uploaded once for the whole decal pass; the object
+ * block is one slice of a buffer holding every decal. */
+struct DecalPassBlockData {
+    Mat4  viewProjection;
+    Mat4  inverseViewProjection;
+    float resolution[4] = { 1.0f, 1.0f, 0.0f, 0.0f };
+};
+static_assert(sizeof(DecalPassBlockData) == 144, "std140: 2 mat4 + 1 vec4");
+
+struct DecalObjectBlockData {
+    Mat4  model;
+    Mat4  inverseModel;
+    float tint[4]    = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float factors[4] = { 0.9f, 0.0f, 1.0f, 1.0f };   /* rough, metal, nrm, opacity */
+    float fade[4]    = { 0.40f, 0.70f, 0.15f, 0.0f };
+    float wrap[4]    = { 1.0f, 0.0f, 0.0f, 0.0f };
+};
+static_assert(sizeof(DecalObjectBlockData) == 192, "std140: 2 mat4 + 4 vec4");
+
+/* HOW FAR APART TWO DECALS' BLOCKS SIT IN THE BUFFER, and it is not
+ * sizeof(DecalObjectBlockData).
+ *
+ * A uniform buffer BINDING OFFSET must be a multiple of the device's alignment
+ * — GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, which is 256 on most desktop drivers
+ * and is allowed to be larger. Packing the blocks tightly at 192 and binding at
+ * that stride is rejected outright on a strict driver and, on a lax one,
+ * silently rounded — which hands every decal after the first its neighbour's
+ * transform, so the decals land in the wrong places and nothing errors.
+ *
+ * 256 IS A CONSTANT RATHER THAN A QUERY because the RHI does not expose the
+ * alignment and 256 satisfies every desktop and console target; a backend that
+ * needed more would be the one to say so. The waste is 64 bytes per decal on a
+ * board that has tens of them. */
+constexpr uint32_t kDecalBlockStride = 256;
+static_assert(kDecalBlockStride >= sizeof(DecalObjectBlockData),
+              "a decal's block must fit inside its stride");
+
+/* ---- bloom's budgets, in one place ---------------------------------------
+ *
+ * HALF THE SCENE TARGET at level 0. The scene is already supersampled 2x, so
+ * this is the window's own resolution — bloom is a low-frequency signal and
+ * spending four times the bandwidth on it buys nothing visible.
+ *
+ * SIX LEVELS, so the widest contribution is spread over 1/64th of the image.
+ * Past that the level is a handful of texels and each further step adds a
+ * flat wash rather than a tail. Both numbers are §4.11 budgets: named here,
+ * never assumed by a shader, so a quality preset can move them. */
+constexpr uint32_t kBloomDownscale = 2;
+constexpr uint32_t kBloomLevels = 6;
+
+/* std140: three vec4, and the same block for all three bloom shaders so none
+ * of them can disagree about what a lane means. */
+struct BloomBlockData {
+    float params[4]      = { 1.1f, 0.55f, 1.0f, 1.0f };  /* threshold, knee, intensity, radius */
+    float sourceTexel[4] = { 1.0f, 1.0f, 1.0f, 1.0f };   /* 1/size, then size    */
+    float targetSize[4]  = { 1.0f, 1.0f, 0.0f, 0.0f };
+};
+static_assert(sizeof(BloomBlockData) == 48, "std140: three vec4");
 
 struct ResolveBlockData {
     float exposureAndFlags[4] = { 1.0f, 1.0f, 0.0f, 0.0f };   /* z = debug view */
@@ -334,14 +455,120 @@ LitBlockData buildLitBlock(const SceneFrame& frame, const Mat4& sunViewProjectio
     block.exposureAndAmbient[0] = frame.exposure;
     block.exposureAndAmbient[1] = frame.ambientIntensity;
 
+    /* WHICH LIGHTING TERMS ARE SWITCHED OFF. Filled HERE rather than at each of
+     * the two call sites, so the camera's lit pass and a probe capture cannot
+     * disagree about it — a probe capturing a scene lit differently from the
+     * one on screen would bake that difference in and keep it for a sweep after
+     * the switch was put back, which reads as the probes being broken. */
+    block.effectMask[0] = static_cast<float>(frame.effectSuppress);
+
+    /* THE DECALS' SWITCH AND THEIR EMISSIVE SCALE. Here rather than at the call
+     * sites for the same reason the effect mask is: a probe capture lighting
+     * the world differently from the frame on screen would bake that difference
+     * into a cubemap and keep it for a sweep after the switch was put back. */
+    block.decalParams[0] = frame.decals ? 1.0f : 0.0f;
+    block.decalParams[1] = frame.decalEmissiveScale;
+
     return block;
 }
 
 }  // namespace
 
-ScenePipeline::ScenePipeline(rhi::IRenderDevice& device)
-    : device_(device), materials_(device), probes_(device)
+ScenePipeline::ScenePipeline(rhi::IRenderDevice& device, RenderAssets& assets)
+    : device_(device), assets_(assets)
 {
+}
+
+/* ---- where the probes live now, and how a pass reaches them --------------*/
+
+DeviceProbeSet* ScenePipeline::probesOf(const View& view)
+{
+    RenderScene* scene = view.scene();
+    return scene != nullptr ? &scene->probes() : nullptr;
+}
+
+Aabb ScenePipeline::worldBoundsOf(const View& view)
+{
+    const RenderScene* scene = view.scene();
+    if (scene == nullptr) return Aabb{ Vec3{ 1.0f, 1.0f, 1.0f }, Vec3{ -1.0f, -1.0f, -1.0f } };
+
+    return scene->worldBounds();
+}
+
+void ScenePipeline::drawItems(rhi::ICommandEncoder& encoder,
+                              const std::vector<DrawItem>& items, bool bindMaterials) const
+{
+    /* WHAT LAST WAS BOUND, so a run of items sharing a material binds it once.
+     * The sort already grouped them — see RenderScene.cpp's opaqueSortKey — so
+     * this turns that grouping into the state changes it was for. An invalid id
+     * never matches a real one, so a run of unmaterialed items does not
+     * accidentally suppress the next real bind. */
+    MaterialId bound;
+
+    for (const DrawItem& item : items) {
+        if (bindMaterials && item.material != bound) {
+            assets_.materials().bind(encoder, item.material);
+            bound = item.material;
+        }
+
+        /* THE TRANSFORM AND THE TINT, AS THE OBJECT PUSH. Every submitter used
+         * to do this for itself, and RhiStatics' header explains at length why
+         * skipping it is not safe even for identity: push constants persist on
+         * the bound program, so an item that pushed nothing would inherit the
+         * previous one's matrix and colour. Here there is no path that can
+         * forget, because there is one loop. */
+        ObjectPush push;
+        push.model = item.transform;
+        push.tint[0] = item.tint.x;
+        push.tint[1] = item.tint.y;
+        push.tint[2] = item.tint.z;
+        push.tint[3] = item.tint.w;
+
+        /* AND WHAT THE OBJECT IS, for the custom depth pass. Pushed by the same
+         * loop for the same reason: a pass that set it per draw for itself
+         * would be a second place to forget, and an item that pushed nothing
+         * would inherit the previous object's id — which in a buffer whose
+         * whole purpose is telling objects apart is the worst possible
+         * failure. */
+        push.object[0] = static_cast<float>(item.customStencil);
+
+        encoder.pushConstants(&push, sizeof push);
+        encoder.draw(item.mesh);
+    }
+}
+
+void ScenePipeline::addPass(ScenePassPoint point, IScenePass& pass)
+{
+    hatchPasses_.push_back(HatchPass{ point, &pass });
+}
+
+void ScenePipeline::runHatch(ScenePassPoint point, const View& view)
+{
+    if (hatchPasses_.empty()) return;
+
+    ScenePassContext context;
+    context.device = &device_;
+    context.view = &view;
+    context.resources.sceneColour = sceneColour_;
+    context.resources.sceneDepth = sceneDepth_;
+    context.resources.sceneNormals = sceneNormals_;
+    context.resources.occlusion = occlusionBlurred_;
+    context.resources.shadowMap = shadowDepth_;
+    context.resources.shadowTransmission = shadowTransmission_;
+    context.resources.sceneWidth = sceneWidth();
+    context.resources.sceneHeight = sceneHeight();
+    context.resources.surfaceWidth = targetWidth_;
+    context.resources.surfaceHeight = targetHeight_;
+
+    for (const HatchPass& entry : hatchPasses_) {
+        if (entry.point != point || entry.pass == nullptr) continue;
+
+        /* NAMED IN A CAPTURE TOOL, so a custom pass is attributable in
+         * RenderDoc and Nsight without the game having to remember to do it.
+         * The engine knows the name; it should spend it. */
+        CW_PROFILE_ZONE_N("hatch pass");
+        entry.pass->execute(context);
+    }
 }
 
 ScenePipeline::~ScenePipeline()
@@ -368,6 +595,38 @@ ScenePipeline::~ScenePipeline()
     if (kernelBlock_.valid())       device_.destroy(kernelBlock_);
     if (occlusionBlock_.valid())    device_.destroy(occlusionBlock_);
     if (occlusion_.valid())         device_.destroy(occlusion_);
+
+    if (outlinePipeline_.valid())       device_.destroy(outlinePipeline_);
+    if (outlineShader_.valid())         device_.destroy(outlineShader_);
+    if (outlineBlock_.valid())          device_.destroy(outlineBlock_);
+    if (customStencilPipeline_.valid()) device_.destroy(customStencilPipeline_);
+    if (customStencilShader_.valid())   device_.destroy(customStencilShader_);
+    if (customStencilBlock_.valid())    device_.destroy(customStencilBlock_);
+    if (customDepth_.valid())           device_.destroy(customDepth_);
+    if (customStencil_.valid())         device_.destroy(customStencil_);
+
+    if (decalPipeline_.valid())      device_.destroy(decalPipeline_);
+    if (decalShader_.valid())        device_.destroy(decalShader_);
+    if (decalCube_.valid())          device_.destroy(decalCube_);
+    if (decalCubeVertices_.valid())  device_.destroy(decalCubeVertices_);
+    if (decalObjectBlocks_.valid())  device_.destroy(decalObjectBlocks_);
+    if (decalPassBlock_.valid())     device_.destroy(decalPassBlock_);
+    if (decalSurface_.valid())       device_.destroy(decalSurface_);
+    if (decalNormal_.valid())        device_.destroy(decalNormal_);
+    if (decalAlbedo_.valid())        device_.destroy(decalAlbedo_);
+
+    if (bloomCompositePipeline_.valid()) device_.destroy(bloomCompositePipeline_);
+    if (bloomUpPipeline_.valid())        device_.destroy(bloomUpPipeline_);
+    if (bloomUpShader_.valid())          device_.destroy(bloomUpShader_);
+    if (bloomDownPipeline_.valid())      device_.destroy(bloomDownPipeline_);
+    if (bloomDownShader_.valid())        device_.destroy(bloomDownShader_);
+    if (bloomPrefilterPipeline_.valid()) device_.destroy(bloomPrefilterPipeline_);
+    if (bloomPrefilterShader_.valid())   device_.destroy(bloomPrefilterShader_);
+    if (bloomBlock_.valid())             device_.destroy(bloomBlock_);
+    if (bloomChain_.valid())             device_.destroy(bloomChain_);
+    for (SamplerHandle sampler : bloomLevelSamplers_)
+        if (sampler.valid()) device_.destroy(sampler);
+    bloomLevelSamplers_.clear();
 
     if (skyPipeline_.valid())       device_.destroy(skyPipeline_);
     if (skyShader_.valid())         device_.destroy(skyShader_);
@@ -447,6 +706,28 @@ bool ScenePipeline::createSceneTargets(uint32_t surfaceWidth, uint32_t surfaceHe
     if (sceneColour_.valid()) device_.destroy(sceneColour_);
     sceneColour_ = device_.createTexture(colour);
 
+    /* ---- and the bloom chain, at half the scene and six levels deep -------
+     *
+     * SIZED FROM THE SCENE TARGET AND REBUILT WITH IT, which is what keeps a
+     * resize from leaving the chain describing the previous window. The
+     * dimensions are clamped to one rather than allowed to reach zero: six
+     * halvings of a small window would otherwise ask the device for a
+     * zero-width level, which is a creation failure that reads as bloom simply
+     * not appearing.
+     *
+     * RGBA16F, matching what it reads and what it writes back into. An 8-bit
+     * chain would clip exactly the values this pass exists to spread. */
+    TextureDesc bloomChain;
+    bloomChain.name      = "bloom chain";
+    bloomChain.width     = std::max(width / kBloomDownscale, 1u);
+    bloomChain.height    = std::max(height / kBloomDownscale, 1u);
+    bloomChain.mipLevels = kBloomLevels;
+    bloomChain.format    = TextureFormat::RGBA16F;
+    bloomChain.usage     = TextureUsageSampled | TextureUsageRenderTarget;
+
+    if (bloomChain_.valid()) device_.destroy(bloomChain_);
+    bloomChain_ = device_.createTexture(bloomChain);
+
     /* THE OCCLUSION PLANE. RGBA8 rather than R8 because readTexture and the
      * texture previews both read RGBA, and one channel of a screen-sized target
      * is not the memory this frame is short of. */
@@ -467,6 +748,94 @@ bool ScenePipeline::createSceneTargets(uint32_t surfaceWidth, uint32_t surfaceHe
     if (occlusionBlurred_.valid()) device_.destroy(occlusionBlurred_);
     occlusionBlurred_ = device_.createTexture(ao);
 
+    /* ---- the DBuffer, at HALF the scene target ---------------------------
+     *
+     * Which is the surface's own resolution, given the 2x supersample. The lit
+     * pass samples these bilinearly and lands decal detail at display
+     * resolution, where it is seen; the supersample exists for the hard
+     * geometric edges of untextured boxes, not for texture detail. At the full
+     * scene size these three would be 48 MB carrying a signal nothing can
+     * resolve.
+     *
+     * THE ALBEDO IS RGBA16F AND THE OTHER TWO ARE RGBA8. Colour needs the
+     * range — see rhi/dbuffer.glsl on why this path keeps the plane linear
+     * where the raylib one stores it sRGB-encoded in eight bits — and a normal
+     * plus three 0..1 scalars have none to lose. */
+    const uint32_t decalWidth  = std::max(surfaceWidth, 1u);
+    const uint32_t decalHeight = std::max(surfaceHeight, 1u);
+
+    TextureDesc dbuffer;
+    dbuffer.name   = "dbuffer albedo";
+    dbuffer.width  = decalWidth;
+    dbuffer.height = decalHeight;
+    dbuffer.format = TextureFormat::RGBA16F;
+    dbuffer.usage  = TextureUsageSampled | TextureUsageRenderTarget;
+    if (decalAlbedo_.valid()) device_.destroy(decalAlbedo_);
+    decalAlbedo_ = device_.createTexture(dbuffer);
+
+    dbuffer.format = TextureFormat::RGBA8;
+
+    dbuffer.name = "dbuffer normal";
+    if (decalNormal_.valid()) device_.destroy(decalNormal_);
+    decalNormal_ = device_.createTexture(dbuffer);
+
+    dbuffer.name = "dbuffer surface";
+    if (decalSurface_.valid()) device_.destroy(decalSurface_);
+    decalSurface_ = device_.createTexture(dbuffer);
+
+    /* ---- custom depth / stencil, SUPERSAMPLED like every other scene target
+     *
+     * THESE WERE AT THE SURFACE'S RESOLUTION AND IT WAS WRONG TWICE OVER. The
+     * reasoning for the smaller size was that the consumer is a post-resolve
+     * pass working in output pixels, so anything finer would only be
+     * downsampled before it was read. Both halves of that turn out to be the
+     * bug rather than the saving:
+     *
+     * ONE — THE OUTLINE HAD NO COVERAGE TO AVERAGE. One texel per output pixel
+     * means the edge test answers yes or no and the silhouette is a 1-bit mask,
+     * which stair-steps at any resolution. Four texels per output pixel is what
+     * lets the shader count them and emit a fraction, and a fraction is the
+     * only thing that antialiases an edge. Unreal reaches the same five levels
+     * with 4x MSAA on a private editor target and averages the samples the same
+     * way; we already pay for the supersample, so ours is free.
+     *
+     * TWO — THE DEPTH COMPARISON WAS MEASURING THE WRONG PLACE. sceneDepth_ is
+     * supersampled. Sampling a 2x buffer and a 1x buffer at one UV does not
+     * read the same point: GL_NEAREST takes floor(u * size), so the scene tap
+     * landed on the same corner of the 2x2 block every time — a quarter of a
+     * pixel down and right of where the custom depth was taken. A consistent
+     * offset, not a wobble, and on a sloped surface a real depth difference.
+     * That is what the old kBias in the shader was hiding. Matching the sizes
+     * makes both fetches the same texel and the comparison exact.
+     *
+     * AND THE FACTOR IS ITS OWN DIAL, not the scene's — see
+     * withOutlineSupersample. Matching the scene at 2x removes the bug above but
+     * still leaves only two distinct sample positions per axis, which is three
+     * coverage levels on a near-vertical edge and a staircase the eye finds on
+     * high-contrast ink. Four positions is what a rotated sample pattern needs,
+     * so the default is 4x and the dial goes to 8x. It is floored at the scene's
+     * factor precisely so reason TWO above can never come back.
+     *
+     * The cost is one RGBA8 and one D32F at the square of the factor. See
+     * study/topics/rendering/outline_antialiasing.md for the two engines this
+     * was read from and why neither solves it with an AA pass. */
+    const uint32_t tagWidth  = std::max(surfaceWidth  * outlineSupersample_, 1u);
+    const uint32_t tagHeight = std::max(surfaceHeight * outlineSupersample_, 1u);
+
+    TextureDesc tag;
+    tag.name   = "custom stencil";
+    tag.width  = tagWidth;
+    tag.height = tagHeight;
+    tag.format = TextureFormat::RGBA8;
+    tag.usage  = TextureUsageSampled | TextureUsageRenderTarget;
+    if (customStencil_.valid()) device_.destroy(customStencil_);
+    customStencil_ = device_.createTexture(tag);
+
+    tag.name   = "custom depth";
+    tag.format = TextureFormat::D32F;
+    if (customDepth_.valid()) device_.destroy(customDepth_);
+    customDepth_ = device_.createTexture(tag);
+
     /* THE SURFACE'S SIZE, NOT THE TARGETS'. This is what resize() compares
      * against and what the resolve divides by, and both want the number of real
      * pixels on screen. Storing the supersampled size here instead would make
@@ -477,6 +846,35 @@ bool ScenePipeline::createSceneTargets(uint32_t surfaceWidth, uint32_t surfaceHe
 
     return sceneDepth_.valid() && sceneNormals_.valid() && occlusion_.valid()
         && occlusionBlurred_.valid() && sceneColour_.valid();
+}
+
+ScenePipeline& ScenePipeline::withOutlineSupersample(uint32_t factor)
+{
+    /* SNAPPED TO 2, 4 OR 8, AND NEVER BELOW THE SCENE'S OWN FACTOR.
+     *
+     * The floor is the part that is not a matter of taste. A stencil COARSER
+     * than sceneDepth_ cannot have its occlusion test aligned by any means: the
+     * outline would be comparing an object depth on one grid against a scene
+     * depth on a finer one, which is exactly the quarter-pixel defect that made
+     * the old kBias necessary. A quality dial must not have that at its low end,
+     * so the cheapest setting is PARITY — already correct, not merely cheap.
+     *
+     * The snapping is because the shader picks its sample pattern per factor and
+     * a factor of three has no rotated pattern to pick. */
+    uint32_t snapped = kSupersample;
+    if      (factor >= 8) snapped = 8;
+    else if (factor >= 4) snapped = 4;
+
+    if (snapped == outlineSupersample_) return *this;
+    outlineSupersample_ = snapped;
+
+    /* Only rebuild once there is something to rebuild — set before initialise()
+     * this is just a stored preference, and createSceneTargets would be sizing
+     * targets against a surface nobody has reported yet. */
+    if (ready_ && targetWidth_ != 0 && targetHeight_ != 0)
+        createSceneTargets(targetWidth_, targetHeight_);
+
+    return *this;
 }
 
 void ScenePipeline::resize(uint32_t width, uint32_t height)
@@ -1047,6 +1445,323 @@ void main()
      * see shadowTap in rhi/lit.fs.glsl for the full account. Anything reviving
      * this needs to answer the format question first, per backend. */
 
+    /* ---- the decals ------------------------------------------------------ */
+
+    const std::string decalVertexSource =
+        ShaderLibrary::preprocess("rhi/scene/decal.vs.glsl");
+    const std::string decalSource = ShaderLibrary::preprocess("rhi/scene/decal.fs.glsl");
+
+    if (decalVertexSource.empty() || decalSource.empty()) {
+        LOGGER.error("ScenePipeline: rhi/scene/decal shaders not found");
+        return false;
+    }
+
+    decalShader_ = device_.createShader("decal", decalVertexSource.c_str(),
+                                        decalSource.c_str());
+    if (!decalShader_.valid()) return false;
+
+    PipelineDesc decal;
+    decal.name   = "decals";
+    decal.shader = decalShader_;
+
+    /* POSITION ONLY. Nothing reads a normal, a UV or a colour from the box —
+     * its own faces are never shaded, and every fragment recovers the real
+     * surface underneath from the depth buffer instead. */
+    decal.vertexLayout.stride = sizeof(float) * 3;
+    decal.vertexLayout.attributeCount = 1;
+    decal.vertexLayout.attributes[0] = { 0, 0, VertexFormat::Float3 };
+
+    /* THREE PLANES, and the formats must match createSceneTargets exactly — a
+     * pipeline bakes them, so a mismatch is an incomplete framebuffer rather
+     * than a wrong picture. */
+    decal.colourFormats[0] = TextureFormat::RGBA16F;
+    decal.colourFormats[1] = TextureFormat::RGBA8;
+    decal.colourFormats[2] = TextureFormat::RGBA8;
+    decal.colourCount = 3;
+
+    /* BACK FACES ONLY, and it is the front faces that are wrong rather than a
+     * preference: they are clipped away the moment the camera enters the box,
+     * which for a decal the size of a road tile is most of the time. */
+    decal.raster.cull = CullMode::Front;
+
+    /* NO DEPTH AT ALL. The box is a bounding volume and the shader decides
+     * which fragments survive against its own bounds; leaving the test on would
+     * reject exactly those whose receiver is in front of the box's far side. */
+    decal.depth.test  = false;
+    decal.depth.write = false;
+
+    /* SEPARATE FACTORS, AND THIS IS THE WHOLE DBUFFER.
+     *
+     *   rgb   = src.rgb + dst.rgb * src.a    (over, premultiplied)
+     *   alpha =           dst.a   * src.a    (transmittance multiplies)
+     *
+     * so N overlapping decals leave dst.a holding exactly the fraction of the
+     * base material still showing through, and dst.rgb their own contribution
+     * already summed. The lit shader's whole decode is then one fused
+     * multiply-add. Getting the alpha factors wrong here does not fail — it
+     * makes the second decal over a spot replace the first instead of
+     * compositing with it. */
+    decal.blend.enabled      = true;
+    decal.blend.sourceColour = BlendFactor::One;
+    decal.blend.destColour   = BlendFactor::SrcAlpha;
+    decal.blend.sourceAlpha  = BlendFactor::Zero;
+    decal.blend.destAlpha    = BlendFactor::SrcAlpha;
+
+    decalPipeline_ = device_.createPipeline(decal);
+    if (!decalPipeline_.valid()) return false;
+
+    BufferDesc decalPass;
+    decalPass.name   = "decal pass block";
+    decalPass.bytes  = sizeof(DecalPassBlockData);
+    decalPass.usage  = BufferUsageUniform;
+    decalPass.access = BufferAccess::CpuToGpuPerFrame;
+    decalPassBlock_ = device_.createBuffer(decalPass);
+    if (!decalPassBlock_.valid()) return false;
+
+    /* ---- THE PROJECTOR BOX ------------------------------------------------
+     *
+     * A unit cube spanning -0.5 to +0.5, thirty-six positions, built here
+     * rather than through BoxEmitter — that one produces normals, UVs and
+     * colours nothing reads, and it takes a raylib Color, which this file must
+     * not name. Twelve triangles written out is smaller than the conversion
+     * would be.
+     *
+     * ============ EVERY FACE IS WOUND CCW SEEN FROM OUTSIDE ================
+     *
+     * Which is what `raster.winding` (CounterClockwise, the default) and
+     * `raster.cull = Front` above together mean: GL throws away the face whose
+     * OUTSIDE is toward the camera and keeps its far side, so the box is always
+     * rasterised by its BACK faces and the camera may sit inside it.
+     *
+     * THE FIRST VERSION OF THIS TABLE HAD FOUR OF THE SIX WOUND THE OTHER WAY,
+     * AND THE SYMPTOM WAS NOT AN INSIDE-OUT BOX. That is the trap worth writing
+     * down. Inconsistent winding on a bounding volume does not read as a
+     * modelling error, because nothing ever SHADES these faces — they exist
+     * only to make the rasteriser visit the pixels the box covers. What it does
+     * instead is punch HOLES in that coverage:
+     *
+     *   the correctly wound faces contributed their FAR side, as intended
+     *   the reversed ones contributed their NEAR side, culling the far one
+     *
+     * and for a convex solid the near set and the far set each cover the whole
+     * silhouette on their own, but a MIXTURE covers neither. Any pixel whose
+     * nearest face was reversed and whose farthest face was not is visited by
+     * nothing at all, so the decal is simply absent there — in wedges bounded
+     * by projected cube edges and by the diagonal each face is split along,
+     * moving as the camera moves, since which face is nearest is a property of
+     * the view. It reads as the decal clipping or tearing rather than as
+     * anything to do with the box, and no amount of staring at the fragment
+     * shader finds it.
+     *
+     * SO CHECK THE CROSS PRODUCT, NOT THE PICTURE: for each triangle
+     * (v1-v0) x (v2-v0) must point OUT of the cube, away from the origin. */
+    const float kUnitCube[] = {
+        /* -X */ -0.5f,-0.5f,-0.5f, -0.5f,-0.5f, 0.5f, -0.5f, 0.5f, 0.5f,
+                 -0.5f,-0.5f,-0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f,-0.5f,
+        /* +X */  0.5f,-0.5f,-0.5f,  0.5f, 0.5f,-0.5f,  0.5f, 0.5f, 0.5f,
+                  0.5f,-0.5f,-0.5f,  0.5f, 0.5f, 0.5f,  0.5f,-0.5f, 0.5f,
+        /* -Y */ -0.5f,-0.5f,-0.5f,  0.5f,-0.5f, 0.5f, -0.5f,-0.5f, 0.5f,
+                 -0.5f,-0.5f,-0.5f,  0.5f,-0.5f,-0.5f,  0.5f,-0.5f, 0.5f,
+        /* +Y */ -0.5f, 0.5f,-0.5f, -0.5f, 0.5f, 0.5f,  0.5f, 0.5f, 0.5f,
+                 -0.5f, 0.5f,-0.5f,  0.5f, 0.5f, 0.5f,  0.5f, 0.5f,-0.5f,
+        /* -Z */ -0.5f,-0.5f,-0.5f, -0.5f, 0.5f,-0.5f,  0.5f, 0.5f,-0.5f,
+                 -0.5f,-0.5f,-0.5f,  0.5f, 0.5f,-0.5f,  0.5f,-0.5f,-0.5f,
+        /* +Z */ -0.5f,-0.5f, 0.5f,  0.5f,-0.5f, 0.5f,  0.5f, 0.5f, 0.5f,
+                 -0.5f,-0.5f, 0.5f,  0.5f, 0.5f, 0.5f, -0.5f, 0.5f, 0.5f,
+    };
+
+    BufferDesc cube;
+    cube.name   = "decal cube";
+    cube.bytes  = sizeof kUnitCube;
+    cube.usage  = BufferUsageVertex;
+    cube.access = BufferAccess::CpuToGpuOnce;
+    decalCubeVertices_ = device_.createBuffer(cube);
+    if (!decalCubeVertices_.valid()) return false;
+
+    device_.updateBuffer(decalCubeVertices_, kUnitCube, sizeof kUnitCube, 0);
+
+    decalCube_ = device_.createMesh(decal.vertexLayout, decalCubeVertices_,
+                                    sizeof kUnitCube / (sizeof(float) * 3));
+    if (!decalCube_.valid()) return false;
+
+    /* ---- custom depth / stencil, and the outline that reads it ----------
+     *
+     * THE VERTEX STAGE IS depth_only's, unchanged. It takes a pass-level matrix
+     * and an object transform and writes depth, which is exactly this pass —
+     * the only difference from the shadow map is whose eye the matrix is and
+     * what the fragment stage writes. Two passes sharing a vertex shader is the
+     * point of it taking a PASS matrix rather than a frame one. */
+    const std::string tagSource =
+        ShaderLibrary::preprocess("rhi/scene/custom_stencil.fs.glsl");
+    const std::string outlineSource =
+        ShaderLibrary::preprocess("rhi/post/outline.fs.glsl");
+
+    if (tagSource.empty() || outlineSource.empty()) {
+        LOGGER.error("ScenePipeline: rhi custom_stencil / outline shaders not found");
+        return false;
+    }
+
+    customStencilShader_ = device_.createShader("custom stencil", vertexSource.c_str(),
+                                                tagSource.c_str());
+    if (!customStencilShader_.valid()) return false;
+
+    PipelineDesc tagPipeline;
+    tagPipeline.name             = "custom depth";
+    tagPipeline.shader           = customStencilShader_;
+    tagPipeline.vertexLayout     = MeshVertexBuffer::deviceLayout();
+    tagPipeline.colourFormats[0] = TextureFormat::RGBA8;
+    tagPipeline.colourCount      = 1;
+    tagPipeline.depthFormat      = TextureFormat::D32F;
+
+    /* ORDINARY DEPTH, WRITTEN. Unlike the lit pass there is no prepass to test
+     * Equal against — this IS a prepass, of a different subset. */
+    tagPipeline.depth.test    = true;
+    tagPipeline.depth.write   = true;
+    tagPipeline.depth.compare = CompareFunc::Less;
+
+    customStencilPipeline_ = device_.createPipeline(tagPipeline);
+    if (!customStencilPipeline_.valid()) return false;
+
+    BufferDesc tagBlock;
+    tagBlock.name   = "custom depth block";
+    tagBlock.bytes  = sizeof(PassBlockData);
+    tagBlock.usage  = BufferUsageUniform;
+    tagBlock.access = BufferAccess::CpuToGpuPerFrame;
+    customStencilBlock_ = device_.createBuffer(tagBlock);
+    if (!customStencilBlock_.valid()) return false;
+
+    outlineShader_ = device_.createShader("outline", kFullscreenVertex,
+                                          outlineSource.c_str());
+    if (!outlineShader_.valid()) return false;
+
+    PipelineDesc outline;
+    outline.name             = "outline";
+    outline.shader           = outlineShader_;
+    outline.colourFormats[0] = TextureFormat::RGBA8;
+    outline.colourCount      = 1;
+    outline.depth.test       = false;
+    outline.depth.write      = false;
+    outline.raster.cull      = CullMode::None;
+
+    /* STRAIGHT ALPHA over the resolved frame. The shader emits a designer's
+     * colour and an alpha, not premultiplied radiance — it is ink, and this is
+     * the blend ink wants. */
+    outline.blend.enabled      = true;
+    outline.blend.sourceColour = BlendFactor::SrcAlpha;
+    outline.blend.destColour   = BlendFactor::OneMinusSrcAlpha;
+    outline.blend.sourceAlpha  = BlendFactor::One;
+    outline.blend.destAlpha    = BlendFactor::OneMinusSrcAlpha;
+
+    outlinePipeline_ = device_.createPipeline(outline);
+    if (!outlinePipeline_.valid()) return false;
+
+    BufferDesc outlineDesc;
+    outlineDesc.name   = "outline block";
+    outlineDesc.bytes  = sizeof(OutlineBlockData);
+    outlineDesc.usage  = BufferUsageUniform;
+    outlineDesc.access = BufferAccess::CpuToGpuPerFrame;
+    outlineBlock_ = device_.createBuffer(outlineDesc);
+    if (!outlineBlock_.valid()) return false;
+
+    /* ---- bloom ----------------------------------------------------------
+     *
+     * THREE SHADERS AND FOUR PIPELINES, and the count is worth explaining
+     * because it looks like one too many. The prefilter and the downsample are
+     * genuinely different filters; the upsample is one shader used twice, once
+     * writing RGBA16F into the chain and once writing RGBA16F into the scene
+     * target — two pipelines because a pipeline bakes its target format and its
+     * blend state, and neither can be changed from an encoder. */
+    const std::string bloomPrefilterSource =
+        ShaderLibrary::preprocess("rhi/post/bloom_prefilter.fs.glsl");
+    const std::string bloomDownSource =
+        ShaderLibrary::preprocess("rhi/post/bloom_down.fs.glsl");
+    const std::string bloomUpSource =
+        ShaderLibrary::preprocess("rhi/post/bloom_up.fs.glsl");
+
+    if (bloomPrefilterSource.empty() || bloomDownSource.empty() || bloomUpSource.empty()) {
+        LOGGER.error("ScenePipeline: rhi/post/bloom_*.fs.glsl not found");
+        return false;
+    }
+
+    bloomPrefilterShader_ =
+        device_.createShader("bloom prefilter", kFullscreenVertex, bloomPrefilterSource.c_str());
+    bloomDownShader_ =
+        device_.createShader("bloom down", kFullscreenVertex, bloomDownSource.c_str());
+    bloomUpShader_ =
+        device_.createShader("bloom up", kFullscreenVertex, bloomUpSource.c_str());
+
+    if (!bloomPrefilterShader_.valid() || !bloomDownShader_.valid() || !bloomUpShader_.valid())
+        return false;
+
+    PipelineDesc bloom;
+    bloom.name             = "bloom prefilter";
+    bloom.shader           = bloomPrefilterShader_;
+    bloom.colourFormats[0] = TextureFormat::RGBA16F;
+    bloom.colourCount      = 1;
+    bloom.depth.test       = false;
+    bloom.depth.write      = false;
+    bloom.raster.cull      = CullMode::None;
+
+    bloomPrefilterPipeline_ = device_.createPipeline(bloom);
+    if (!bloomPrefilterPipeline_.valid()) return false;
+
+    bloom.name   = "bloom down";
+    bloom.shader = bloomDownShader_;
+    bloomDownPipeline_ = device_.createPipeline(bloom);
+    if (!bloomDownPipeline_.valid()) return false;
+
+    /* ADDITIVE FROM HERE ON. The upsample outputs only its own contribution and
+     * the blender sums it onto what the level already holds — see
+     * bloom_up.fs.glsl on why the shader cannot do that itself. ONE / ONE on
+     * both colour and alpha; the alpha of a bloom chain is unread, and leaving
+     * it at the default would have it fighting the colour blend for no reason. */
+    bloom.name              = "bloom up";
+    bloom.shader            = bloomUpShader_;
+    bloom.blend.enabled     = true;
+    bloom.blend.sourceColour = BlendFactor::One;
+    bloom.blend.destColour   = BlendFactor::One;
+    bloom.blend.sourceAlpha  = BlendFactor::One;
+    bloom.blend.destAlpha    = BlendFactor::One;
+
+    bloomUpPipeline_ = device_.createPipeline(bloom);
+    if (!bloomUpPipeline_.valid()) return false;
+
+    /* The same shader and the same blend, into the scene target. A separate
+     * pipeline because the format is baked in, and because naming it makes the
+     * composite show up as its own line in a capture. */
+    bloom.name = "bloom composite";
+    bloomCompositePipeline_ = device_.createPipeline(bloom);
+    if (!bloomCompositePipeline_.valid()) return false;
+
+    BufferDesc bloomDesc;
+    bloomDesc.name   = "bloom block";
+    bloomDesc.bytes  = sizeof(BloomBlockData);
+    bloomDesc.usage  = BufferUsageUniform;
+    bloomDesc.access = BufferAccess::CpuToGpuPerFrame;
+    bloomBlock_ = device_.createBuffer(bloomDesc);
+    if (!bloomBlock_.valid()) return false;
+
+    /* ONE SAMPLER PER SOURCE LEVEL, pinned to that level. See the member's note
+     * — this is what makes reading level N while writing N±1 of the same
+     * texture defined rather than merely working today. Linear, because every
+     * bloom stage is a filter and a point tap would defeat the whole chain. */
+    bloomLevelSamplers_.reserve(kBloomLevels);
+    for (uint32_t level = 0; level < kBloomLevels; level++) {
+        SamplerDesc levelSampler;
+        levelSampler.minify  = FilterMode::Linear;
+        levelSampler.magnify = FilterMode::Linear;
+        levelSampler.mip     = FilterMode::Nearest;
+        levelSampler.wrapU   = WrapMode::ClampToEdge;
+        levelSampler.wrapV   = WrapMode::ClampToEdge;
+        levelSampler.wrapW   = WrapMode::ClampToEdge;
+        levelSampler.minLod  = static_cast<float>(level);
+        levelSampler.maxLod  = static_cast<float>(level);
+
+        const SamplerHandle handle = device_.createSampler(levelSampler);
+        if (!handle.valid()) return false;
+        bloomLevelSamplers_.push_back(handle);
+    }
+
     /* ---- the resolve ----------------------------------------------------- */
 
     const std::string resolveSource = ShaderLibrary::preprocess("rhi/post/tonemap.fs.glsl");
@@ -1081,9 +1796,11 @@ void main()
     resolveBlock_ = device_.createBuffer(resolveDesc);
     if (!resolveBlock_.valid()) return false;
 
-    /* One block per surface kind, at PbrMaterial's defaults. The game overrides
-     * whichever it wants a different response from — see DeviceMaterials. */
-    if (!materials_.initialise()) return false;
+    /* THE MATERIALS ARE NOT BROUGHT UP HERE ANY MORE. They belong to the device
+     * rather than to a viewpoint, so RenderAssets::initialise builds them once
+     * for every pipeline and every scene that will ever share them. Doing it
+     * here would rebuild the whole table per quality preset — see
+     * RenderAssets.hpp on the three lifetimes. */
 
     /* ---- what a capture binds where SSAO would be ------------------------
      *
@@ -1149,13 +1866,12 @@ void main()
 
     /* ---- and the probes themselves ---------------------------------------
      *
-     * NOT FATAL. A device with no cubemap arrays — macOS's capped GL, a future
-     * software backend — draws every surface against the analytic sky, which is
-     * a flatter frame and not a broken one. It is the same fallback a board
-     * with no probes placed on it already takes, so there is exactly one code
-     * path for both. */
-    if (!probes_.create())
-        LOGGER.warn("ScenePipeline: no reflection probes - surfaces keep the analytic sky");
+     * THE ARRAY IS THE SCENE'S AND IS CREATED THERE. A probe set describes a
+     * world, so it is brought up with the world rather than with a viewpoint —
+     * see RenderScene::initialise, which also carries the note about why a
+     * device with no cubemap arrays is a flatter frame rather than a broken
+     * one. What stays here are the two pipelines that DRAW into it, because a
+     * pipeline object is pass state. */
 
     ready_ = true;
 
@@ -1169,6 +1885,7 @@ void main()
 }
 
 ScenePipeline::SunProjection ScenePipeline::sunProjection(const SceneFrame& frame,
+                                                          const View& view,
                                                           Vec3 minimum, Vec3 maximum)
 {
     const Vec3 worldCentre = (minimum + maximum) * 0.5f;
@@ -1195,16 +1912,16 @@ ScenePipeline::SunProjection ScenePipeline::sunProjection(const SceneFrame& fram
      * the origin, and a shadow map covering one cubic metre of empty space is
      * indistinguishable from a broken one. The whole-world fit is the honest
      * answer, and is what this function did unconditionally before. */
-    const bool hasCamera = frame.projection.at(3, 2) != 0.0f;
+    const bool hasCamera = view.projectionMatrix().at(3, 2) != 0.0f;
 
-    const float tanHalfFovY = frame.projection.at(1, 1) != 0.0f
-                            ? 1.0f / frame.projection.at(1, 1) : 1.0f;
-    const float aspect = frame.projection.at(0, 0) != 0.0f
-                       ? frame.projection.at(1, 1) / frame.projection.at(0, 0) : 1.0f;
+    const float tanHalfFovY = view.projectionMatrix().at(1, 1) != 0.0f
+                            ? 1.0f / view.projectionMatrix().at(1, 1) : 1.0f;
+    const float aspect = view.projectionMatrix().at(0, 0) != 0.0f
+                       ? view.projectionMatrix().at(1, 1) / view.projectionMatrix().at(0, 0) : 1.0f;
 
-    const Vec3 right{ frame.view.at(0, 0), frame.view.at(0, 1), frame.view.at(0, 2) };
-    const Vec3 up{ frame.view.at(1, 0), frame.view.at(1, 1), frame.view.at(1, 2) };
-    const Vec3 forward{ -frame.view.at(2, 0), -frame.view.at(2, 1), -frame.view.at(2, 2) };
+    const Vec3 right{ view.viewMatrix().at(0, 0), view.viewMatrix().at(0, 1), view.viewMatrix().at(0, 2) };
+    const Vec3 up{ view.viewMatrix().at(1, 0), view.viewMatrix().at(1, 1), view.viewMatrix().at(1, 2) };
+    const Vec3 forward{ -view.viewMatrix().at(2, 0), -view.viewMatrix().at(2, 1), -view.viewMatrix().at(2, 2) };
 
     /* NOT THE REAL FAR PLANE. The camera's is a thousand units out so that
      * nothing ever clips; fitting the sun's box to a frustum that long would
@@ -1219,7 +1936,7 @@ ScenePipeline::SunProjection ScenePipeline::sunProjection(const SceneFrame& fram
         const float distance = slice == 0 ? 0.1f : shadowDistance;
         const float halfHeight = tanHalfFovY * distance;
         const float halfWidth  = halfHeight * aspect;
-        const Vec3  middle = frame.cameraPosition + forward * distance;
+        const Vec3  middle = view.position() + forward * distance;
 
         for (int corner = 0; corner < 4; corner++) {
             const float x = (corner & 1) != 0 ? 1.0f : -1.0f;
@@ -1320,24 +2037,46 @@ ScenePipeline::SunProjection ScenePipeline::sunProjection(const SceneFrame& fram
     return result;
 }
 
-void ScenePipeline::drawShadowMap(const SceneFrame& frame, IGeometrySource& geometry)
+void ScenePipeline::drawShadowMap(const SceneFrame& frame, const View& view)
 {
     CW_PROFILE_ZONE_N("shadow map");
 
-    Vec3 minimum;
-    Vec3 maximum;
-    geometry.worldBounds(minimum, maximum);
+    const Aabb world = worldBoundsOf(view);
+    const Vec3 minimum = world.min;
+    const Vec3 maximum = world.max;
 
     /* An empty world, or a caller that handed over a zero sun. Either produces
      * a degenerate matrix; skipping is the honest response and leaves last
      * frame's depth rather than a NaN one. */
     const Vec3 extent = maximum - minimum;
-    if (extent.length() < 1.0e-4f) return;
+    if (world.empty() || extent.length() < 1.0e-4f) return;
     if (frame.sunDirection.length() < 1.0e-4f) return;
 
+    const SunProjection sun = sunProjection(frame, view, minimum, maximum);
+
     PassBlockData block;
-    block.viewProjection = sunProjection(frame, minimum, maximum).viewProjection;
+    block.viewProjection = sun.viewProjection;
     device_.updateBuffer(passBlock_, &block, sizeof block, 0);
+
+    /* ---- THE SUN'S OWN VIEW, DERIVED FROM THE CAMERA'S -------------------
+     *
+     * SAME SCENE, SAME VIEWER, NO CUTAWAY, AND THAT LAST PART IS THE WHOLE
+     * REASON THE FILTER LIVES ON THE VIEW. What casts a shadow is a question
+     * about the world, not about where the player is standing — and letting the
+     * camera's storey cut reach here is what made the lighting change when the
+     * player changed floor. Today that correctness is a property of
+     * View::derived rather than of a caller remembering; the game cannot
+     * express the wrong thing any more. See CutawayView.hpp for the episode.
+     *
+     * IT IS COLLECTED ONCE AND READ TWICE. The opaque half is this pass; the
+     * translucent half is the transmission plane immediately after, which
+     * wants exactly the surfaces that transmit rather than block. One
+     * collection, two consumers, and no way for the two to disagree about which
+     * geometry the sun sees. */
+    const View sunView = view.derived(ViewKind::Sun, Mat4(), sun.viewProjection, view.position());
+
+    if (RenderScene* scene = view.scene()) scene->collect(sunView, sunList_);
+    else sunList_.clear();
 
     PassDesc pass;
     pass.name          = "shadow map";
@@ -1354,12 +2093,20 @@ void ScenePipeline::drawShadowMap(const SceneFrame& frame, IGeometrySource& geom
     encoder.bindPipeline(depthPipeline_);
     encoder.bindUniformBuffer(1, passBlock_);
 
-    geometry.submit(encoder, GeometryPass::Shadow);
+    /* NO MATERIALS: this shader reads position and writes depth, so binding one
+     * would be work for a stage that cannot see it.
+     *
+     * SWITCHED OFF, THE PASS STILL RUNS AND STILL CLEARS. The lit pass samples
+     * this texture every frame whatever the switch says, so skipping the pass
+     * would leave the last shadowed frame bound - the feature would freeze
+     * rather than turn off. A map cleared to 1.0 is "nothing is in the way". */
+    if (frame.shadows) drawItems(encoder, sunList_.opaque(), /*bindMaterials=*/false);
+
 
     device_.endPass(encoder);
 }
 
-void ScenePipeline::drawShadowTransmission(const SceneFrame& frame, IGeometrySource& geometry)
+void ScenePipeline::drawShadowTransmission(const SceneFrame& frame, const View& view)
 {
     CW_PROFILE_ZONE_N("transmission");
 
@@ -1387,7 +2134,12 @@ void ScenePipeline::drawShadowTransmission(const SceneFrame& frame, IGeometrySou
     encoder.bindTexture(0, shadowDepth_, pointSampler_);
     encoder.bindUniformBuffer(1, passBlock_);
 
-    geometry.submit(encoder, GeometryPass::Transparent);
+    /* THE SUN'S TRANSLUCENT HALF, collected by the pass above — see the note
+     * there. Materials ARE bound here: this shader tints by what the surface is
+     * made of, which is the whole reason the plane is RGBA8 and not a single
+     * fraction. */
+    drawItems(encoder, sunList_.translucent(), /*bindMaterials=*/true);
+
 
     device_.endPass(encoder);
 }
@@ -1414,28 +2166,52 @@ void ScenePipeline::drawShadowTransmission(const SceneFrame& frame, IGeometrySou
 constexpr int kProbeFacesPerFrame = 1;
 constexpr int kProbeFacesWhileStale = 4;
 
-void ScenePipeline::drawProbeCapture(const SceneFrame& frame, IGeometrySource& geometry)
+void ScenePipeline::drawProbeCapture(const SceneFrame& frame, const View& view)
 {
     CW_PROFILE_ZONE_N("probe capture");
 
     if (!frame.reflections) return;
-    if (!probes_.valid() || probes_.probeCount() == 0) return;
+
+    DeviceProbeSet* probeSet = probesOf(view);
+    if (probeSet == nullptr) return;
+
+    DeviceProbeSet& probes = *probeSet;
+    if (!probes.valid() || probes.probeCount() == 0) return;
 
     /* THE SUN'S FIT, RECOMPUTED FROM THE SAME FUNCTION THE SHADOW PASS USED.
      * A capture shades against the shadow map this frame already wrote, so it
      * needs that map's matrix and its two world-unit scales — and reading them
      * off a second, differently-fitted call would offset every shadow inside
      * every reflection from the geometry casting it. */
-    Vec3 minimum;
-    Vec3 maximum;
-    geometry.worldBounds(minimum, maximum);
-    const SunProjection shadow = sunProjection(frame, minimum, maximum);
+    const Aabb world = worldBoundsOf(view);
+    const SunProjection shadow = sunProjection(frame, view, world.min, world.max);
 
-    const int faces = probes_.stale() ? kProbeFacesWhileStale : kProbeFacesPerFrame;
+    const int faces = probes.stale() ? kProbeFacesWhileStale : kProbeFacesPerFrame;
 
     for (int i = 0; i < faces; i++) {
         DeviceProbeSet::Face face;
-        if (!probes_.nextFace(face)) break;
+        if (!probes.nextFace(face)) break;
+
+        /* ---- THIS FACE'S OWN VIEW ---------------------------------------
+         *
+         * DERIVED FROM THE CAMERA'S, so it carries the viewer and drops the
+         * cutaway — the same rule the sun's view follows and with a sharper
+         * consequence. A probe capturing under the iso level records the sky
+         * and the street where its own ceiling and the floor above should be,
+         * so an indoor room's reflections brighten every time the player
+         * changes storey, and the cause is nowhere near the symptom because the
+         * frame that changed is one nobody is looking at.
+         *
+         * AND IT IS A REAL FRUSTUM. A cube face is a 90-degree perspective, so
+         * culling against it discards five sixths of the world per face rather
+         * than submitting all of it six times — which is most of what a capture
+         * used to cost. The old path could not do this at all: it handed the
+         * whole world to every face because the engine did not own the list. */
+        const View faceView = view.derived(ViewKind::ProbeFace, Mat4(),
+                                           face.viewProjection, face.eye);
+
+        if (RenderScene* scene = view.scene()) scene->collect(faceView, probeList_);
+        else probeList_.clear();
 
         LitBlockData block = buildLitBlock(frame, shadow.viewProjection,
                                            shadow.worldTexelSize, shadow.depthRange);
@@ -1450,12 +2226,16 @@ void ScenePipeline::drawProbeCapture(const SceneFrame& frame, IGeometrySource& g
          * arrives a full sweep later than the one before it. */
         block.probeParams[0] = 0.0f;
 
+        /* NO DECALS INSIDE A CAPTURE EITHER, for the reason above: the planes
+         * describe the camera's screen and a cube face is not one. */
+        block.decalParams[0] = 0.0f;
+
         device_.updateBuffer(litBlock_, &block, sizeof block, 0);
 
         PassDesc pass;
         pass.name = "probe face";
 
-        pass.colours[0].texture = probes_.texture();
+        pass.colours[0].texture = probes.texture();
 
         /* THE SLICE, which is what a cube array attachment wants: one flat
          * layer-face number, not a (probe, face) pair. Getting this wrong does
@@ -1476,7 +2256,7 @@ void ScenePipeline::drawProbeCapture(const SceneFrame& frame, IGeometrySource& g
         pass.colourCount = 1;
 
         pass.hasDepth      = true;
-        pass.depth.texture = probes_.captureDepth();
+        pass.depth.texture = probes.captureDepth();
         pass.depth.load    = LoadAction::Clear;
         pass.depth.clearTo = 1.0f;
 
@@ -1498,35 +2278,53 @@ void ScenePipeline::drawProbeCapture(const SceneFrame& frame, IGeometrySource& g
          * that is simultaneously a colour attachment and bound to a live
          * sampler is undefined on every backend, and "the driver probably will
          * not mind" is not a thing to leave in a render loop. */
-        encoder.bindTexture(4, probes_.emptyTexture(), probes_.sampler());
+        encoder.bindTexture(4, probes.emptyTexture(), probes.sampler());
 
-        encoder.bindUniformBuffer(0, probes_.block());
+        /* THE DBUFFER SLOTS, FILLED WITH THE 1x1 WHITE — and this is the same
+         * story SSAO has one field up. The decal planes are SCREEN SPACE and a
+         * 128-pixel cube face has no screen; worse, the plane being sampled is
+         * the camera's, so a capture reading it would ink the whole face with
+         * whichever decal happened to sit at the top left of the player's view.
+         *
+         * WHITE READS AS ALPHA 1, which readDecals treats as "nothing was ever
+         * blended here" and early-outs on. So the stand-in is not merely safe,
+         * it is the exact identity of the decode. The block's uDecalParams.x is
+         * zeroed below as well; either alone would do and both cost nothing. */
+        encoder.bindTexture(5, whitePixel_, pointSampler_);
+        encoder.bindTexture(6, whitePixel_, pointSampler_);
+        encoder.bindTexture(7, whitePixel_, pointSampler_);
+
+        encoder.bindUniformBuffer(0, probes.block());
         encoder.bindUniformBuffer(1, litBlock_);
         encoder.bindUniformBuffer(2, materialBlock_);
 
-        geometry.submit(encoder, GeometryPass::ProbeOpaque);
+        drawItems(encoder, probeList_.opaque(), /*bindMaterials=*/true);
 
         /* THEN WHAT YOU CAN SEE THROUGH, in the same pass — it reads the depth
          * and the colour the opaque half just wrote, exactly as the camera's
          * transparent pass reads the lit scene's. */
         encoder.bindPipeline(probeTransparentPipeline_);
-        geometry.submit(encoder, GeometryPass::ProbeTransparent);
+        drawItems(encoder, probeList_.translucent(), /*bindMaterials=*/true);
 
         device_.endPass(encoder);
 
     }
 }
 
-void ScenePipeline::drawProbePrefilter()
+void ScenePipeline::drawProbePrefilter(const View& view)
 {
     CW_PROFILE_ZONE_N("probe prefilter");
 
-    if (!probes_.valid() || !prefilterPipeline_.valid()) return;
+    DeviceProbeSet* probeSet = probesOf(view);
+    if (probeSet == nullptr) return;
+
+    DeviceProbeSet& probes = *probeSet;
+    if (!probes.valid() || !prefilterPipeline_.valid()) return;
 
     /* ONE PROBE PER FRAME AT MOST, and only one whose six faces are all current.
      * See the header: a lobe that reaches across faces cannot be run against a
      * probe that is half rebuilt. */
-    const int probe = probes_.probeReadyToPrefilter();
+    const int probe = probes.probeReadyToPrefilter();
     if (probe < 0) return;
 
     for (int level = 1; level < DeviceProbeSet::kMipLevels; level++) {
@@ -1538,7 +2336,7 @@ void ScenePipeline::drawProbePrefilter()
 
         /* THE SOURCE IS THE LEVEL ABOVE, bound through a sampler clamped to it
          * so this pass cannot read the level it is writing. */
-        const rhi::SamplerHandle source = probes_.levelSampler(level - 1);
+        const rhi::SamplerHandle source = probes.levelSampler(level - 1);
 
         const uint32_t size = static_cast<uint32_t>(DeviceProbeSet::kFaceSize >> level);
 
@@ -1554,7 +2352,7 @@ void ScenePipeline::drawProbePrefilter()
             PassDesc pass;
             pass.name = "probe prefilter";
 
-            pass.colours[0].texture = probes_.texture();
+            pass.colours[0].texture = probes.texture();
 
             /* THE SLICE AND THE LEVEL. `layer` picks the (probe, face) slice
              * exactly as the capture does; `mip` is what makes this a chain
@@ -1569,24 +2367,176 @@ void ScenePipeline::drawProbePrefilter()
 
             ICommandEncoder& encoder = device_.beginPass(pass);
             encoder.bindPipeline(prefilterPipeline_);
-            encoder.bindTexture(0, probes_.texture(), source);
+            encoder.bindTexture(0, probes.texture(), source);
             encoder.bindUniformBuffer(1, prefilterBlock_);
             encoder.drawFullscreen();
             device_.endPass(encoder);
         }
     }
 
-    probes_.markPrefiltered(probe);
+    probes.markPrefiltered(probe);
 }
 
-void ScenePipeline::drawPrepass(const SceneFrame& frame, IGeometrySource& geometry)
+/* ---- the custom depth / stencil pass -------------------------------------
+ *
+ * Depth-only geometry, tagged. Every renderable carrying a non-zero stencil
+ * value is drawn from the CAMERA'S eye into a small colour target holding that
+ * value, with its own depth attachment.
+ *
+ * IT PRODUCES NOTHING VISIBLE, and that is what it is for. This is the half
+ * that is awkward to retrofit — somewhere for selected geometry to rasterise
+ * apart from the scene, with a depth a later pass can compare against the
+ * frame's. Every effect is then one full-screen shader that reads it.
+ *
+ * CLEARED TO ZERO ALPHA, which is what makes a stencil value of ZERO a real id
+ * rather than "nothing here". A consumer tests coverage first; see the shader.
+ */
+void ScenePipeline::drawCustomDepth(const SceneFrame& frame, const View& view)
+{
+    CW_PROFILE_ZONE_N("custom depth");
+
+    if (!customStencil_.valid() || !customStencilPipeline_.valid()) return;
+
+    PassDesc pass;
+    pass.name = "custom depth";
+    pass.colours[0].texture = customStencil_;
+    pass.colours[0].load    = LoadAction::Clear;
+    pass.colours[0].store   = StoreAction::Store;
+    pass.colours[0].clearTo = ClearColour{ 0.0f, 0.0f, 0.0f, 0.0f };
+    pass.colourCount = 1;
+
+    pass.hasDepth      = true;
+    pass.depth.texture = customDepth_;
+    pass.depth.load    = LoadAction::Clear;
+    pass.depth.clearTo = 1.0f;
+    pass.depth.store   = StoreAction::Store;
+
+    /* THE PASS RUNS AND CLEARS EVEN WITH NOTHING TAGGED. The outline samples
+     * these two every frame whatever happens — a pipeline's bindings are the
+     * same every frame — so skipping would leave the last frame's silhouette on
+     * screen after the selection changed. The same freeze-rather-than-disable
+     * trap the probes and the decals both record. */
+    const bool draw = frame.customDepth && view.scene() != nullptr;
+
+    if (draw) {
+        /* THE CAMERA'S OWN EYE, DERIVED ONLY FOR THE KIND. Not a new viewpoint:
+         * the buffer's entire value is that its depth is comparable with the
+         * frame's, and a derived matrix would silently destroy that. */
+        const View tagged = view.derived(ViewKind::CustomDepth, view.viewMatrix(),
+                                         view.projectionMatrix(), view.position());
+
+        view.scene()->collect(tagged, customList_);
+    } else {
+        customList_.clear();
+    }
+
+    PassBlockData block;
+    block.viewProjection = view.viewProjection();
+    device_.updateBuffer(customStencilBlock_, &block, sizeof block, 0);
+
+    ICommandEncoder& encoder = device_.beginPass(pass);
+
+    if (!customList_.opaque().empty()) {
+        encoder.bindPipeline(customStencilPipeline_);
+        encoder.bindUniformBuffer(1, customStencilBlock_);
+
+        /* NO MATERIALS. The fragment stage writes an id and nothing else, so
+         * binding one would be work for a stage that cannot see it — the same
+         * reason the shadow map does not bind them. */
+        drawItems(encoder, customList_.opaque(), /*bindMaterials=*/false);
+    }
+
+    device_.endPass(encoder);
+}
+
+/* ---- and the first thing that reads it -----------------------------------
+ *
+ * A silhouette over the RESOLVED image, in display colour. See the shader on
+ * why that is the opposite of bloom's decision and why both are right.
+ */
+void ScenePipeline::drawOutline(const SceneFrame& frame, const View& view)
+{
+    CW_PROFILE_ZONE_N("outline");
+
+    if (!outlinePipeline_.valid() || !customStencil_.valid()) return;
+
+    /* NOTHING TAGGED IS NOTHING TO DRAW, and here — unlike the pass above —
+     * skipping is correct rather than dangerous. This pass writes into the
+     * view's target with a blend, so not running it leaves the resolved frame
+     * exactly as the resolve left it. */
+    if (!frame.customDepth || frame.outlineStencil <= 0) return;
+
+    /* THE STENCIL'S SIZE, NOT THE TARGET'S. The shader fetches texels out of the
+     * supersampled buffer while its fragments are output pixels, so it needs the
+     * source's dimensions and the ratio; handing it targetWidth_ here is exactly
+     * the confusion that made the two resolutions disagree. Thickness stays in
+     * OUTPUT pixels — a designer's "two pixels wide" means on screen — and the
+     * shader scales it by the ratio itself. */
+    OutlineBlockData block;
+    block.outline[0]  = static_cast<float>(frame.outlineStencil);
+    block.outline[1]  = frame.outlineThickness;
+    block.outline[2]  = static_cast<float>(targetWidth_ * outlineSupersample_);
+    block.outline[3]  = static_cast<float>(targetHeight_ * outlineSupersample_);
+
+    /* INTEGER BY CONSTRUCTION, because withOutlineSupersample floors the factor
+     * at the scene's. A ratio below one would mean the stencil is coarser than
+     * the depth it is compared against, and there would be no sound reduction
+     * for the shader to do. */
+    block.sampling[0] = static_cast<float>(outlineSupersample_);
+    block.sampling[1] = static_cast<float>(outlineSupersample_ / kSupersample);
+    block.sampling[2] = static_cast<float>(sceneWidth());
+    block.sampling[3] = static_cast<float>(sceneHeight());
+
+    for (int i = 0; i < 4; i++) {
+        block.visible[i]  = frame.outlineVisible[i];
+        block.occluded[i] = frame.outlineOccluded[i];
+    }
+    device_.updateBuffer(outlineBlock_, &block, sizeof block, 0);
+
+    PassDesc pass;
+    pass.name = "outline";
+    pass.colours[0].texture = view.target();
+
+    /* LOADED, NOT CLEARED. This is ink over a finished picture. */
+    pass.colours[0].load  = LoadAction::Load;
+    pass.colours[0].store = StoreAction::Store;
+    pass.colourCount = 1;
+
+    ICommandEncoder& encoder = device_.beginPass(pass);
+    encoder.bindPipeline(outlinePipeline_);
+
+    if (view.hasViewport())
+        encoder.setViewport(view.viewportX(), view.viewportY(),
+                            view.viewportWidth(), view.viewportHeight());
+
+    /* POINT SAMPLERS ON ALL THREE, and it is not a preference. The stencil
+     * channel holds an ID: filtering two neighbouring ids produces a number
+     * that is NEITHER, so a bilinear tap along the boundary between two
+     * soldiers would report a third soldier that does not exist. The same
+     * argument the occlusion pass makes about filtering two normals.
+     *
+     * THE SHADER NO LONGER DEPENDS ON THAT, and the samplers stay anyway. Every
+     * tap in there is a texelFetch, which takes an integer texel and ignores
+     * filtering entirely — so the invariant is now enforced by the shader rather
+     * than by whoever binds it, which is where it belongs. Binding a linear
+     * sampler here would stop being a silent correctness bug; leaving these
+     * point keeps the intent legible and costs nothing. */
+    encoder.bindTexture(0, customStencil_, pointSampler_);
+    encoder.bindTexture(1, customDepth_, pointSampler_);
+    encoder.bindTexture(2, sceneDepth_, pointSampler_);
+    encoder.bindUniformBuffer(1, outlineBlock_);
+    encoder.drawFullscreen();
+    device_.endPass(encoder);
+}
+
+void ScenePipeline::drawPrepass(const SceneFrame& frame, const View& view)
 {
     CW_PROFILE_ZONE_N("prepass");
 
     if (!sceneDepth_.valid() || !sceneNormals_.valid()) return;
 
     PassBlockData block;
-    block.viewProjection = frame.projection * frame.view;
+    block.viewProjection = view.viewProjection();
     device_.updateBuffer(passBlock_, &block, sizeof block, 0);
 
     /* ONE ROUGHNESS FOR EVERY SURFACE, for now. The raylib prepass pushes a
@@ -1623,21 +2573,233 @@ void ScenePipeline::drawPrepass(const SceneFrame& frame, IGeometrySource& geomet
     encoder.bindUniformBuffer(1, passBlock_);
     encoder.bindUniformBuffer(2, materialBlock_);
 
-    geometry.submit(encoder, GeometryPass::Prepass);
+    /* THE OPAQUE HALF OF THE CAMERA'S LIST, collected once at the top of the
+     * frame and read by this pass, the lit pass and — its other half — the
+     * transparent one. Glass is deliberately NOT here: the lit pass tests Equal
+     * against what this wrote, so a pane's depth here means the wall behind it
+     * is never shaded, and no amount of blending can put back geometry that was
+     * never drawn. That used to be a rule a submitter had to know; now it falls
+     * out of the material's blend mode putting the pane in the other bucket. */
+    drawItems(encoder, cameraList_.opaque(), /*bindMaterials=*/false);
+
 
     device_.endPass(encoder);
 }
 
-void ScenePipeline::drawOcclusion(const SceneFrame& frame)
+/* ---- the decals, into the DBuffer ----------------------------------------
+ *
+ * One draw per decal, and the four pieces of state are all load-bearing:
+ *
+ *   BACK FACES ONLY. Front faces vanish the moment the camera enters the box,
+ *   which for a decal the size of a road tile is most of the time. Back faces
+ *   are always present and always cover the box's full screen extent.
+ *
+ *   NO DEPTH TEST, NO DEPTH WRITE. The box is a bounding volume, not geometry;
+ *   which fragments survive is decided in the shader against the box's own
+ *   bounds. Leaving the test on would reject exactly the fragments whose
+ *   receiving surface sits in front of the box's far side — which is all of
+ *   them.
+ *
+ *   SEPARATE BLEND FACTORS. rgb over-blends premultiplied while alpha
+ *   MULTIPLIES, so the planes accumulate the decals' colour in rgb and the base
+ *   material's surviving fraction in alpha. One equation, any number of
+ *   overlapping decals, and the lit shader's decode is a single fused
+ *   multiply-add.
+ *
+ *   CLEARED TO (0, 0, 0, 1) — no ink, base fully intact. That is the identity
+ *   of the blend above, which is why "no decals this frame" and "the pass did
+ *   not run" have to be the same picture and are.
+ *
+ * IT STILL RUNS WITH NOTHING TO DRAW, and that is not waste. The planes are
+ * bound by the lit pipeline every frame whatever happens, so skipping the clear
+ * would leave LAST frame's ink on screen after the last decal was removed —
+ * the freeze-rather-than-disable trap RenderEffects.hpp records. A clear of
+ * three half-resolution targets is the cost of that switch meaning what it
+ * says.
+ */
+/* ONE BUFFER FOR EVERY DECAL'S BLOCK, grown with headroom and never shrunk.
+ *
+ * The same arrangement the debug line buffer has: a board that gains a decal
+ * should not recreate its buffer every frame on the way there, and the steady
+ * state allocates nothing. */
+bool ScenePipeline::ensureDecalCapacity(uint32_t decals)
+{
+    if (decals <= decalObjectCapacity_ && decalObjectBlocks_.valid()) return true;
+
+    const uint32_t wanted = std::max(decals + decals / 4u, 32u);
+
+    if (decalObjectBlocks_.valid()) device_.destroy(decalObjectBlocks_);
+    decalObjectBlocks_ = {};
+    decalObjectCapacity_ = 0;
+
+    BufferDesc desc;
+    desc.name   = "decal object blocks";
+    desc.bytes  = static_cast<uint64_t>(wanted) * kDecalBlockStride;
+    desc.usage  = BufferUsageUniform;
+    desc.access = BufferAccess::CpuToGpuPerFrame;
+
+    decalObjectBlocks_ = device_.createBuffer(desc);
+    if (!decalObjectBlocks_.valid()) return false;
+
+    decalObjectCapacity_ = wanted;
+    return true;
+}
+
+void ScenePipeline::drawDecals(const SceneFrame& frame, const View& view)
+{
+    CW_PROFILE_ZONE_N("decals");
+
+    if (!decalAlbedo_.valid() || !decalPipeline_.valid()) return;
+
+    /* THE PASS DESCRIPTOR IS BUILT WHETHER OR NOT ANYTHING IS DRAWN, because
+     * the clear is the point when the list is empty. */
+    PassDesc pass;
+    pass.name = "decals";
+    pass.colours[0].texture = decalAlbedo_;
+    pass.colours[1].texture = decalNormal_;
+    pass.colours[2].texture = decalSurface_;
+    pass.colourCount = 3;
+
+    for (int i = 0; i < pass.colourCount; i++) {
+        pass.colours[i].load    = LoadAction::Clear;
+        pass.colours[i].store   = StoreAction::Store;
+        pass.colours[i].clearTo = ClearColour{ 0.0f, 0.0f, 0.0f, 1.0f };
+    }
+
+    /* ---- what the whole pass shares ---------------------------------------
+     *
+     * The inverse view-projection is built here from the view's own matrix, so
+     * the unprojection provably matches the prepass this frame drew — the
+     * failure it prevents is every decal landing on a surface that is not
+     * there, which reads as decals floating rather than as a stale matrix. */
+    DecalPassBlockData passBlock;
+    passBlock.viewProjection = view.viewProjection();
+    passBlock.inverseViewProjection = view.viewProjection().inverse();
+    passBlock.resolution[0] = static_cast<float>(targetWidth_);
+    passBlock.resolution[1] = static_cast<float>(targetHeight_);
+    device_.updateBuffer(decalPassBlock_, &passBlock, sizeof passBlock, 0);
+
+    const RenderScene* scene = view.scene();
+    const DeviceDecalSet* decals = scene != nullptr ? &scene->decals() : nullptr;
+
+    /* SWITCHED OFF IS AN EMPTY LIST, NOT A SKIPPED PASS. See the note above:
+     * the clear still has to happen or "off" freezes rather than removes. */
+    const bool draw = frame.decals && decals != nullptr && !decals->empty();
+
+    if (!draw) {
+        ICommandEncoder& empty = device_.beginPass(pass);
+        (void)empty;
+        device_.endPass(empty);
+        return;
+    }
+
+    /* ---- every decal's object block, in one upload ------------------------
+     *
+     * PADDED TO kDecalBlockStride EACH, because a uniform buffer BINDING OFFSET
+     * must be a multiple of the device's alignment — 256 on most desktop GL
+     * drivers. Packing them tightly and binding at sizeof() would be rejected
+     * or, worse, silently rounded down on a driver that does not check, which
+     * hands every decal the previous one's transform. */
+    const std::vector<DeviceDecalSet::Projector>& projectors = decals->projectors();
+    const std::size_t count = projectors.size();
+
+    if (!ensureDecalCapacity(static_cast<uint32_t>(count))) return;
+
+    decalScratch_.assign(count * kDecalBlockStride, 0);
+
+    for (std::size_t i = 0; i < count; i++) {
+        const DeviceDecalSet::Projector& projector = projectors[i];
+
+        DecalObjectBlockData block;
+        block.model = projector.transform;
+
+        /* THE INVERSE, ON THE CPU AND ONCE PER DECAL. GLSL has inverse(mat4)
+         * and calling it per fragment for a value constant across the draw is
+         * work in the wrong place — the raylib path builds it here too. */
+        block.inverseModel = projector.transform.inverse();
+
+        for (int c = 0; c < 4; c++) block.tint[c] = projector.tint[c];
+
+        block.factors[0] = projector.roughness;
+        block.factors[1] = projector.metalness;
+        block.factors[2] = projector.normalStrength;
+        block.factors[3] = projector.opacity;
+
+        block.fade[0] = projector.angleFadeStart;
+        block.fade[1] = projector.angleFadeEnd;
+        block.fade[2] = projector.depthFade;
+        block.fade[3] = projector.emissive;
+
+        block.wrap[0] = projector.wrap ? 1.0f : 0.0f;
+
+        std::memcpy(decalScratch_.data() + i * kDecalBlockStride, &block, sizeof block);
+    }
+
+    device_.updateBuffer(decalObjectBlocks_, decalScratch_.data(), decalScratch_.size(), 0);
+
+    ICommandEncoder& encoder = device_.beginPass(pass);
+    encoder.bindPipeline(decalPipeline_);
+
+    /* The prepass's two attachments, which every decal unprojects and reads. */
+    encoder.bindTexture(0, sceneDepth_, pointSampler_);
+    encoder.bindTexture(1, sceneNormals_, pointSampler_);
+    encoder.bindUniformBuffer(1, decalPassBlock_);
+
+    for (std::size_t i = 0; i < count; i++) {
+        const DeviceDecalSet::Projector& projector = projectors[i];
+        const DeviceDecalSet::Material& material = decals->material(projector.material);
+
+        /* A DECAL WHOSE ALBEDO NEVER LOADED IS SKIPPED, NOT SUBSTITUTED. Its
+         * ALPHA is the decal's shape, so a white stand-in would ink the whole
+         * projector box as a solid rectangle over the world — which is a far
+         * worse answer than nothing at all. The other two maps fall back. */
+        if (!material.albedo.valid()) continue;
+
+        encoder.bindTexture(2, material.albedo, linearSampler_);
+        encoder.bindTexture(3, material.packed.valid() ? material.packed
+                                                       : assets_.white(), linearSampler_);
+        encoder.bindTexture(4, material.normal.valid() ? material.normal
+                                                       : assets_.flatNormal(), linearSampler_);
+
+        encoder.bindUniformBuffer(3, decalObjectBlocks_, i * kDecalBlockStride,
+                                  sizeof(DecalObjectBlockData));
+        encoder.draw(decalCube_);
+    }
+
+    device_.endPass(encoder);
+}
+
+void ScenePipeline::drawOcclusion(const SceneFrame& frame, const View& view)
 {
     CW_PROFILE_ZONE_N("ssao");
 
     if (!occlusion_.valid() || !sceneDepth_.valid() || !sceneNormals_.valid()) return;
 
+    /* SWITCHED OFF, THE PLANE IS WRITTEN WHITE RATHER THAN LEFT ALONE. The lit
+     * pass samples occlusionBlurred_ unconditionally - a pipeline's bindings
+     * are the same every frame - so skipping both halves would leave the last
+     * occluded frame bound and the switch would freeze the effect instead of
+     * turning it off. White is "nothing is occluded", which is the same
+     * stand-in whitePixel_ provides inside a probe capture and for the same
+     * reason. One clear, no geometry, no blur. */
+    if (!frame.ambientOcclusion) {
+        PassDesc white;
+        white.name = "ssao off";
+        white.colours[0].texture = occlusionBlurred_;
+        white.colours[0].load    = LoadAction::Clear;
+        white.colours[0].store   = StoreAction::Store;
+        white.colours[0].clearTo = ClearColour{ 1.0f, 1.0f, 1.0f, 1.0f };
+        white.colourCount = 1;
+
+        ICommandEncoder& blank = device_.beginPass(white);
+        device_.endPass(blank);
+        return;
+    }
+
     OcclusionBlockData block;
-    block.projection        = frame.projection;
-    block.inverseProjection = frame.projection.inverse();
-    block.view              = frame.view;
+    block.projection        = view.projectionMatrix();
+    block.inverseProjection = view.projectionMatrix().inverse();
+    block.view              = view.viewMatrix();
 
     /* THE SCENE TARGET'S SIZE, NOT THE SURFACE'S — this pass draws into the
      * supersampled occlusion plane and addresses the supersampled depth and
@@ -1666,9 +2828,9 @@ void ScenePipeline::drawOcclusion(const SceneFrame& frame)
      * THEY BELONG ON SceneFrame, borrowed from the live AmbientOcclusion the
      * way the sun is, so the dev panel's sliders reach both renderers. Until
      * that is wired they are its defaults, copied. */
-    block.resolutionAndRadius[2] = 0.45f;
-    block.resolutionAndRadius[3] = 0.008f;
-    block.strength[0] = 1.0f;
+    block.resolutionAndRadius[2] = frame.occlusionRadius;
+    block.resolutionAndRadius[3] = frame.occlusionBias;
+    block.strength[0] = frame.occlusionStrength;
 
     /* THE PASS BLOCK IS A DIFFERENT SHAPE FROM THE GEOMETRY PASSES', and shares
      * their binding. That is legal and deliberate: binding 1 means "the block
@@ -1699,14 +2861,18 @@ void ScenePipeline::drawOcclusion(const SceneFrame& frame)
     device_.endPass(encoder);
 }
 
-void ScenePipeline::drawOcclusionBlur(const SceneFrame& frame)
+void ScenePipeline::drawOcclusionBlur(const SceneFrame& frame, const View& view)
 {
     CW_PROFILE_ZONE_N("ssao blur");
+
+    /* NOTHING TO FINISH when the pass above wrote white — see it for why that
+     * is a clear rather than a skip. */
+    if (!frame.ambientOcclusion) return;
 
     if (!occlusion_.valid() || !occlusionBlurred_.valid() || !sceneDepth_.valid()) return;
 
     BlurBlockData block;
-    block.inverseProjection = frame.projection.inverse();
+    block.inverseProjection = view.projectionMatrix().inverse();
     block.resolution[0] = static_cast<float>(sceneWidth());
     block.resolution[1] = static_cast<float>(sceneHeight());
     device_.updateBuffer(blurBlock_, &block, sizeof block, 0);
@@ -1729,8 +2895,14 @@ void ScenePipeline::drawOcclusionBlur(const SceneFrame& frame)
     device_.endPass(encoder);
 }
 
-void ScenePipeline::drawSky(const SceneFrame& frame)
+void ScenePipeline::drawSky(const SceneFrame& frame, const View& view)
 {
+    /* SKIPPED OUTRIGHT, unlike the two above, and the difference is that
+     * nothing SAMPLES the sky — it is simply the first colour into the scene
+     * target. What replaces it is the lit pass clearing rather than loading;
+     * see drawLitScene. */
+    if (!frame.sky) return;
+
     CW_PROFILE_ZONE_N("sky");
 
     if (!sceneColour_.valid()) return;
@@ -1741,7 +2913,7 @@ void ScenePipeline::drawSky(const SceneFrame& frame)
      * transform — the projection is the whole point of it — and the fast
      * inverse would return a matrix that looks plausible and unprojects every
      * pixel to the wrong ray. */
-    block.inverseViewProjection = (frame.projection * frame.view).inverse();
+    block.inverseViewProjection = view.viewProjection().inverse();
 
     block.resolution[0] = static_cast<float>(sceneWidth());
     block.resolution[1] = static_cast<float>(sceneHeight());
@@ -1778,15 +2950,13 @@ void ScenePipeline::drawSky(const SceneFrame& frame)
     device_.endPass(encoder);
 }
 
-void ScenePipeline::drawLitScene(const SceneFrame& frame, IGeometrySource& geometry)
+void ScenePipeline::drawLitScene(const SceneFrame& frame, const View& view)
 {
     CW_PROFILE_ZONE_N("lit scene");
 
     if (!sceneColour_.valid() || !sceneDepth_.valid()) return;
 
-    Vec3 minimum;
-    Vec3 maximum;
-    geometry.worldBounds(minimum, maximum);
+    const Aabb world = worldBoundsOf(view);
 
     /* THE SAME PROJECTION THE SHADOW PASS USED, recomputed rather than cached —
      * it is a frustum fit against a lookup that would have to be invalidated
@@ -1798,21 +2968,25 @@ void ScenePipeline::drawLitScene(const SceneFrame& frame, IGeometrySource& geome
      * and are meaningless against a different one, so recomputing the matrix and
      * reading the numbers off the SAME call is what stops a refit and a bias
      * getting a frame out of step. */
-    const SunProjection shadow = sunProjection(frame, minimum, maximum);
+    const SunProjection shadow = sunProjection(frame, view, world.min, world.max);
 
     /* THE SAME BUILDER THE PROBE CAPTURE USES, so a reflection is lit by this
      * frame's sun rather than by a second one that drifted. See buildLitBlock. */
     LitBlockData block = buildLitBlock(frame, shadow.viewProjection,
                                        shadow.worldTexelSize, shadow.depthRange);
 
-    block.viewProjection = frame.projection * frame.view;
-    writeVec3(block.cameraPosition, frame.cameraPosition);
+    block.viewProjection = view.viewProjection();
+    writeVec3(block.cameraPosition, view.position());
+
+    /* THE SCENE'S PROBES. render() has already established that a view names a
+     * scene, so this is a reference rather than a check. */
+    DeviceProbeSet& probes = view.scene()->probes();
 
     /* HOW MANY PROBES THE SHADER SHOULD CONSIDER — zero when the dev panel's
      * reflections switch is off, which turns the ambient specular back into the
      * analytic sky with no second code path to keep in step. */
     block.probeParams[0] = frame.reflections
-                         ? static_cast<float>(probes_.probeCount()) : 0.0f;
+                         ? static_cast<float>(probes.probeCount()) : 0.0f;
 
     device_.updateBuffer(litBlock_, &block, sizeof block, 0);
 
@@ -1824,8 +2998,14 @@ void ScenePipeline::drawLitScene(const SceneFrame& frame, IGeometrySource& geome
     /* LOADED, NOT CLEARED — the sky pass has already filled this target and
      * clearing here would paint over it. This was a Clear to a dim blue-grey
      * while there was no sky, which is exactly the kind of placeholder that
-     * survives the thing it stood in for. */
-    pass.colours[0].load  = LoadAction::Load;
+     * survives the thing it stood in for.
+     *
+     * UNLESS THE SKY IS SWITCHED OFF, in which case nothing has filled it and
+     * loading would show the PREVIOUS frame behind this one's geometry — which
+     * reads as a smear rather than as a missing sky. */
+    pass.colours[0].load  = frame.sky ? LoadAction::Load : LoadAction::Clear;
+    pass.colours[0].clearTo = ClearColour{ frame.clearColour[0], frame.clearColour[1],
+                                           frame.clearColour[2], frame.clearColour[3] };
     pass.colours[0].store = StoreAction::Store;
     pass.colourCount = 1;
 
@@ -1862,9 +3042,26 @@ void ScenePipeline::drawLitScene(const SceneFrame& frame, IGeometrySource& geome
      * every frame: branching here would leave slot 4 holding whatever a
      * previous pass put there on exactly the frames nothing checks it. The
      * count in the block is what turns the term off, not the binding. */
-    encoder.bindTexture(4, probes_.valid() ? probes_.texture() : probes_.emptyTexture(),
-                        probes_.sampler());
-    encoder.bindUniformBuffer(0, probes_.block());
+    encoder.bindTexture(4, probes.valid() ? probes.texture() : probes.emptyTexture(),
+                        probes.sampler());
+
+    /* THE DBUFFER, AT SLOTS 5, 6 AND 7, AND BOUND UNCONDITIONALLY for the same
+     * reason the probes are one line up: a pipeline's bindings are the same
+     * every frame, and branching on `frame.decals` here would leave three slots
+     * holding whatever a previous pass put there on exactly the frames nothing
+     * checks them. The switch that turns decals off is uDecalParams.x in the
+     * block, not the absence of a binding.
+     *
+     * LINEAR, NOT POINT. The planes are half this pass's resolution, so these
+     * are magnifying reads and a point sampler would give every decal a hard
+     * two-pixel staircase along its edge — the one place the upsample is
+     * visible. Filtering premultiplied data is correct, which is why the planes
+     * are stored that way. */
+    encoder.bindTexture(5, decalAlbedo_, linearSampler_);
+    encoder.bindTexture(6, decalNormal_, linearSampler_);
+    encoder.bindTexture(7, decalSurface_, linearSampler_);
+
+    encoder.bindUniformBuffer(0, probes.block());
 
     encoder.bindUniformBuffer(1, litBlock_);
 
@@ -1874,12 +3071,140 @@ void ScenePipeline::drawLitScene(const SceneFrame& frame, IGeometrySource& geome
      * nothing between the two passes touches it. */
     encoder.bindUniformBuffer(2, materialBlock_);
 
-    geometry.submit(encoder, GeometryPass::Lit);
+    drawItems(encoder, cameraList_.opaque(), /*bindMaterials=*/true);
 
     device_.endPass(encoder);
 }
 
-void ScenePipeline::drawResolve(const SceneFrame& frame)
+/* ---- one stage of the chain ----------------------------------------------
+ *
+ * Every stage is the same five things — set the block, open a pass on one mip
+ * of one target, bind one source with a level-pinned sampler, draw a covering
+ * triangle. Written once because the five differ only in their arguments, and
+ * because the one that is easy to get wrong is the SIZE pair: a stage told its
+ * source's size instead of its target's samples the right texture at the wrong
+ * scale, which comes out as a bloom that is offset rather than absent.
+ */
+void ScenePipeline::bloomStage(PipelineHandle pipeline, TextureHandle source,
+                               SamplerHandle sampler,
+                               uint32_t sourceWidth, uint32_t sourceHeight,
+                               TextureHandle target, uint32_t targetLevel,
+                               uint32_t targetWidth, uint32_t targetHeight,
+                               const SceneFrame& frame, float intensity, bool additive)
+{
+    BloomBlockData block;
+    block.params[0] = frame.bloomThreshold;
+    block.params[1] = frame.bloomKnee;
+    block.params[2] = intensity;
+    block.params[3] = frame.bloomRadius;
+
+    block.sourceTexel[0] = 1.0f / static_cast<float>(std::max(sourceWidth, 1u));
+    block.sourceTexel[1] = 1.0f / static_cast<float>(std::max(sourceHeight, 1u));
+    block.sourceTexel[2] = static_cast<float>(sourceWidth);
+    block.sourceTexel[3] = static_cast<float>(sourceHeight);
+
+    block.targetSize[0] = static_cast<float>(targetWidth);
+    block.targetSize[1] = static_cast<float>(targetHeight);
+
+    device_.updateBuffer(bloomBlock_, &block, sizeof block, 0);
+
+    PassDesc pass;
+    pass.name = "bloom";
+    pass.colours[0].texture = target;
+    pass.colours[0].mip     = targetLevel;
+
+    /* LOAD WHEN ADDITIVE, DontCare WHEN REPLACING. An additive stage sums onto
+     * what is already there, so discarding it first would throw away the very
+     * thing it is adding to — and on a tiler that is not a slow path, it is a
+     * different picture. The downsamples write every pixel and want DontCare. */
+    pass.colours[0].load  = additive ? LoadAction::Load : LoadAction::DontCare;
+    pass.colours[0].store = StoreAction::Store;
+    pass.colourCount = 1;
+
+    ICommandEncoder& encoder = device_.beginPass(pass);
+    encoder.bindPipeline(pipeline);
+    encoder.bindTexture(0, source, sampler);
+    encoder.bindUniformBuffer(1, bloomBlock_);
+    encoder.drawFullscreen();
+    device_.endPass(encoder);
+}
+
+/* ---- the whole chain -----------------------------------------------------
+ *
+ * Prefilter down into level 0, halve to the bottom, then climb back adding, and
+ * finally add level 0 into the scene. Between the debug lines and the resolve,
+ * so it reads linear radiance and writes linear radiance.
+ *
+ * WHY THE UPSAMPLE STOPS AT LEVEL 0 AND THE COMPOSITE IS SEPARATE. The chain's
+ * levels are all half-resolution or smaller and share a format; the scene
+ * target is full size and is the thing being composited INTO rather than a
+ * further level of the same signal. Folding the composite into the loop would
+ * mean the loop's last iteration had a different source scale, a different
+ * intensity and a different target format, which is three special cases inside
+ * something whose whole value is that every iteration is identical.
+ */
+void ScenePipeline::drawBloom(const SceneFrame& frame)
+{
+    CW_PROFILE_ZONE_N("bloom");
+    CW_GPU_ZONE("bloom");
+
+    if (!bloomChain_.valid() || !sceneColour_.valid()) return;
+
+    /* NOTHING AT ALL WHEN THE INTENSITY IS ZERO, as opposed to a chain that
+     * runs and adds nothing. Six passes writing a result multiplied by zero is
+     * the definition of work nobody can see, and the switch above it in
+     * ViewLayers already means "do not spend this". */
+    if (frame.bloomIntensity <= 0.0f) return;
+
+    const uint32_t chainWidth  = std::max(sceneWidth() / kBloomDownscale, 1u);
+    const uint32_t chainHeight = std::max(sceneHeight() / kBloomDownscale, 1u);
+
+    /* HOW MANY LEVELS THIS WINDOW CAN ACTUALLY HOLD. Six is the budget, not a
+     * promise: a small window runs out of pixels first, and a level of zero
+     * width is a pass with no fragments whose upsample partner then reads an
+     * undefined level. Clamped here rather than at creation, because the
+     * texture is allocated once for the largest case and the LOOP is what has
+     * to agree with the window in front of it. */
+    uint32_t levels = 1;
+    while (levels < kBloomLevels
+           && (chainWidth >> levels) >= 2u && (chainHeight >> levels) >= 2u)
+        levels++;
+
+    /* ---- 1. the scene's bright half, into level 0 ---------------------- */
+    bloomStage(bloomPrefilterPipeline_, sceneColour_, linearSampler_,
+               sceneWidth(), sceneHeight(),
+               bloomChain_, 0, chainWidth, chainHeight,
+               frame, 1.0f, /*additive=*/false);
+
+    /* ---- 2. down the chain -------------------------------------------- */
+    for (uint32_t level = 1; level < levels; level++) {
+        bloomStage(bloomDownPipeline_, bloomChain_, bloomLevelSamplers_[level - 1],
+                   chainWidth >> (level - 1), chainHeight >> (level - 1),
+                   bloomChain_, level, chainWidth >> level, chainHeight >> level,
+                   frame, 1.0f, /*additive=*/false);
+    }
+
+    /* ---- 3. and back up, ADDING ---------------------------------------
+     *
+     * Downwards from the second-deepest level, each stage reading the level
+     * below it and accumulating onto its own. The sum over levels is what gives
+     * a bloom a bright core and a long tail rather than one uniform smear. */
+    for (uint32_t level = levels - 1; level > 0; level--) {
+        bloomStage(bloomUpPipeline_, bloomChain_, bloomLevelSamplers_[level],
+                   chainWidth >> level, chainHeight >> level,
+                   bloomChain_, level - 1,
+                   chainWidth >> (level - 1), chainHeight >> (level - 1),
+                   frame, 1.0f, /*additive=*/true);
+    }
+
+    /* ---- 4. into the scene, once, at the authored intensity ------------ */
+    bloomStage(bloomCompositePipeline_, bloomChain_, bloomLevelSamplers_[0],
+               chainWidth, chainHeight,
+               sceneColour_, 0, sceneWidth(), sceneHeight(),
+               frame, frame.bloomIntensity, /*additive=*/true);
+}
+
+void ScenePipeline::drawResolve(const SceneFrame& frame, const View& view)
 {
     CW_PROFILE_ZONE_N("resolve");
 
@@ -1893,23 +3218,49 @@ void ScenePipeline::drawResolve(const SceneFrame& frame)
      * the same fragment is several times that, which is what the operator's
      * shoulder is for and what makes the exposure the number that matters. */
     block.exposureAndFlags[0] = frame.exposure;
-    block.exposureAndFlags[1] = 1.0f;   /* the filmic curve on */
+
+    /* THE FILMIC CURVE, OR THE RAW RADIANCE. This was hardcoded on, which made
+     * ViewLayers' `toneMap` the last of the eight feature switches this
+     * pipeline ignored. Off is not "no resolve": the exposure still applies and
+     * the supersample still collapses, and what goes is the curve — see
+     * ViewLayers::features and the branch in tonemap.fs.glsl, which was already
+     * written for it. */
+    block.exposureAndFlags[1] = frame.toneMap ? 1.0f : 0.0f;
     block.exposureAndFlags[2] = static_cast<float>(frame.debugView);
 
     block.outputTexel[0] = targetWidth_ > 0 ? 1.0f / static_cast<float>(targetWidth_) : 1.0f;
     block.outputTexel[1] = targetHeight_ > 0 ? 1.0f / static_cast<float>(targetHeight_) : 1.0f;
     device_.updateBuffer(resolveBlock_, &block, sizeof block, 0);
 
-    /* THE BACKBUFFER: an attachment carrying no texture. Past this line
-     * everything is display colour. */
+    /* WHERE THE FINISHED PICTURE LANDS, and it is the VIEW's rather than the
+     * pipeline's — see View.hpp. An attachment carrying no texture is the
+     * backbuffer, which is what a view with no target means. A minimap, a
+     * security camera, a portal or a split-screen pane is this field and
+     * nothing else.
+     *
+     * WHAT IS NOT THE VIEW'S is everything before this line: scene colour,
+     * depth, the normal plane, the occlusion plane, the shadow map. Those are
+     * the pipeline's, their formats and sizes are what a quality preset moves,
+     * and §4.11 depends on nobody outside having pinned one.
+     *
+     * Past this line everything is display colour. */
     PassDesc pass;
     pass.name = "resolve";
+    pass.colours[0].texture = view.target();
     pass.colours[0].load  = LoadAction::DontCare;
     pass.colours[0].store = StoreAction::Store;
     pass.colourCount = 1;
 
     ICommandEncoder& encoder = device_.beginPass(pass);
     encoder.bindPipeline(resolvePipeline_);
+
+    /* AND WHICH RECTANGLE OF IT. Four panes into one target differ only here —
+     * which is what keeps §4.12's last open question open: whether N players
+     * means N pipelines or one reused N times is a question about the TARGET,
+     * and neither answer needs this type or this pass to change. */
+    if (view.hasViewport())
+        encoder.setViewport(view.viewportX(), view.viewportY(),
+                            view.viewportWidth(), view.viewportHeight());
 
     /* LINEAR, NOT POINT, and it is the linear filter that does the resolve. The
      * scene target is exactly twice the backbuffer on each axis, so one bilinear
@@ -1952,21 +3303,62 @@ void ScenePipeline::drawBackbuffer(const SceneFrame& frame)
     device_.endPass(encoder);
 }
 
-void ScenePipeline::render(const SceneFrame& frame, IGeometrySource& geometry)
+void ScenePipeline::render(const SceneFrame& frame, const View& view)
 {
     CW_PROFILE_ZONE_N("scene pipeline");
 
     if (!ready_) return;
 
+    /* A VIEW NAMES ITS SCENE. That is the contract, and it is checked once
+     * rather than defended at every pass: without one there is no world to
+     * cull, no probe set to sample and nothing for the bindings that must be
+     * the same every frame to point at. */
+    RenderScene* scene = view.scene();
+    if (scene == nullptr) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            LOGGER.error("ScenePipeline: the view names no scene - nothing will be drawn. "
+                         "Call View::withScene before rendering");
+        }
+        return;
+    }
+
+    /* WHAT THE GAME REGISTERED THAT IS RUNNING AT ALL, said once. See
+     * IScenePass.hpp: a hatch used for something ordinary means the engine is
+     * missing a feature, and that signal is worthless if nobody can see it. */
+    if (!hatchReported_) {
+        hatchReported_ = true;
+        if (!hatchPasses_.empty()) {
+            for (const HatchPass& entry : hatchPasses_)
+                LOGGER.info("game: 1 custom pass '{}' at insertion point {}",
+                            entry.pass != nullptr ? entry.pass->name() : "(null)",
+                            static_cast<int>(entry.point));
+        }
+    }
+
+    /* ---- ONE COLLECTION FOR THE CAMERA, READ BY THREE PASSES -------------
+     *
+     * The prepass, the lit pass and the transparent pass all draw parts of this
+     * one list. Collecting per pass would cull the same world three times to
+     * get three answers that are identical by construction, and would give the
+     * three passes three chances to disagree about what exists — which is the
+     * shape of the bug where glass appears in the depth prepass and the wall
+     * behind it is never shaded.
+     *
+     * THE SUN'S AND EACH PROBE FACE'S ARE COLLECTED IN THEIR OWN PASSES,
+     * because their matrices do not exist until those passes have fitted them. */
+    scene->collect(view, cameraList_);
+
     /* THE SUN FIRST, because the lit pass samples what it writes. Then the
      * camera's own depth and normals, which the occlusion and decal passes are
      * both unprojected from. The order is the pipeline's and not the caller's,
      * which is the point of the caller not being able to express one. */
-    drawShadowMap(frame, geometry);
+    drawShadowMap(frame, view);
 
     /* AND WHAT GOT THROUGH IT. Immediately after, because it depth-tests
      * against the map the pass above just wrote. */
-    drawShadowTransmission(frame, geometry);
+    drawShadowTransmission(frame, view);
 
     /* THEN THE REFLECTION PROBES, and the position in the order is forced from
      * both sides.
@@ -1982,59 +3374,107 @@ void ScenePipeline::render(const SceneFrame& frame, IGeometrySource& geometry)
      * direction. Moving it after the lit pass would leave the transparent pass,
      * which deliberately reuses the block rather than re-uploading it, drawing
      * the camera's glass through a cube face's projection. */
-    drawProbeCapture(frame, geometry);
+    drawProbeCapture(frame, view);
 
     /* AND THE CHAIN OVER WHAT IT WROTE. Immediately after, because it reads the
      * faces that pass just captured — and it runs at most once per frame, on a
      * probe whose six faces are all current, so most frames it returns without
      * opening a pass at all. */
-    drawProbePrefilter();
+    drawProbePrefilter(view);
 
-    drawPrepass(frame, geometry);
+    drawPrepass(frame, view);
+
+    /* THE DECALS, BETWEEN THE PREPASS THAT FEEDS THEM AND THE LIT PASS THAT
+     * READS THEM, and there is no other place they can go. They unproject the
+     * prepass's depth to find the surface under each pixel, and they write a
+     * material override the lit pass blends over its own inputs — so both
+     * neighbours are hard constraints rather than an ordering preference. */
+    /* THE TAGGED SUBSET, from the camera's own eye. After the prepass so both
+     * depth buffers describe the same instant, and before anything reads
+     * either. */
+    drawCustomDepth(frame, view);
+
+    drawDecals(frame, view);
+
+    /* DEPTH AND NORMALS EXIST AND THERE IS NO COLOUR YET — which is exactly
+     * what a decal wants to write into, and why this point is before the
+     * occlusion pass rather than after it. */
+    runHatch(ScenePassPoint::AfterDepthPrepass, view);
 
     /* Occlusion AFTER the prepass, because it is unprojected from what the
      * prepass wrote — depth to reconstruct a position, normals to orient the
      * sampling hemisphere. */
-    drawOcclusion(frame);
+    drawOcclusion(frame, view);
 
     /* AND THE BLUR THAT FINISHES IT. Not separable from the pass above: the
      * occlusion kernel is rotated per pixel to turn banding into noise, and
      * this is what removes the noise. Running one without the other leaves a
      * grainy four-pixel field over every lit surface. */
-    drawOcclusionBlur(frame);
+    drawOcclusionBlur(frame, view);
 
     /* THE SKY, BEFORE ANY COLOUR GOES INTO THE SCENE TARGET — it is what the
      * lit pass loads rather than clears. After the depth passes rather than
      * before them only because it does not interact with depth at all; putting
      * it here keeps the two geometry passes adjacent. */
-    drawSky(frame);
+    drawSky(frame, view);
 
     /* THEN THE PICTURE. The lit pass tests Equal against the prepass's depth
      * and samples both the shadow map and the occlusion plane, so it has to
      * follow all three. The resolve leaves linear space and is therefore last —
      * anything drawn after it is drawing in display colour, which is where the
      * HUD and the overlays will go. */
-    drawLitScene(frame, geometry);
+    drawLitScene(frame, view);
+
+    runHatch(ScenePassPoint::AfterOpaque, view);
 
     /* THEN WHAT YOU CAN SEE THROUGH, after the opaque scene because it reads
      * what is already in the colour buffer. A blended surface drawn before the
      * wall behind it has nothing to see through to and reads as a tinted
      * solid. */
-    drawTransparent(frame, geometry);
+    drawTransparent(frame, view);
 
     /* AFTER THE SCENE AND BEFORE THE RESOLVE. Debug geometry belongs over a
      * finished frame, and it needs the scene's depth buffer, which the resolve
      * is the end of. */
     drawDebugLines(frame);
 
-    drawResolve(frame);
+    /* THE LAST POINT AT WHICH THE BUFFER HOLDS RADIANCE. Custom post belongs
+     * here; anything after the resolve is working on display colour. */
+    /* BLOOM, INTO THE HDR TARGET, BEFORE THE RESOLVE AND BEFORE THE HATCH.
+     *
+     * Before the resolve because the whole point is that the glow is radiance
+     * like everything else — exposed with the frame, tone-mapped with the
+     * frame, and correct under the no-tonemap debug view. The raylib path's
+     * GlowPass composites AFTER the tone map in display colour, and every one
+     * of those three properties is what it gives up.
+     *
+     * Before the hatch because a game's custom pass at BeforeToneMap is
+     * entitled to see the finished HDR scene, and a bloom added after it would
+     * be a term that pass could neither read nor affect. */
+    if (frame.bloom) drawBloom(frame);
+
+    runHatch(ScenePassPoint::BeforeToneMap, view);
+
+    drawResolve(frame, view);
+
+    /* THE OUTLINE, OVER THE RESOLVED PICTURE. After the tone map because it is
+     * INTERFACE rather than light — see the shader, which sets that against
+     * bloom's opposite decision and explains why both are right.
+     *
+     * Before the AfterToneMap hatch, so a game's own post pass sees the
+     * finished frame including its silhouettes. */
+    drawOutline(frame, view);
+
+    runHatch(ScenePassPoint::AfterToneMap, view);
 }
 
-void ScenePipeline::drawTransparent(const SceneFrame& frame, IGeometrySource& geometry)
+void ScenePipeline::drawTransparent(const SceneFrame& frame, const View& view)
 {
     CW_PROFILE_ZONE_N("transparent");
 
     if (!sceneColour_.valid() || !sceneDepth_.valid()) return;
+
+    DeviceProbeSet& probes = view.scene()->probes();
 
     /* THE SAME BLOCK THE LIT PASS FILLED, unchanged and not re-uploaded. The
      * transparent pass is the lit pass over different geometry with a different
@@ -2066,14 +3506,20 @@ void ScenePipeline::drawTransparent(const SceneFrame& frame, IGeometrySource& ge
      * sky, so a window here shows its room's cubemap essentially at full
      * strength — which is most of what makes a pane read as a pane rather than
      * as a hole. See rhi/transparent.fs.glsl. */
-    encoder.bindTexture(4, probes_.valid() ? probes_.texture() : probes_.emptyTexture(),
-                        probes_.sampler());
-    encoder.bindUniformBuffer(0, probes_.block());
+    encoder.bindTexture(4, probes.valid() ? probes.texture() : probes.emptyTexture(),
+                        probes.sampler());
+    encoder.bindUniformBuffer(0, probes.block());
 
     encoder.bindUniformBuffer(1, litBlock_);
     encoder.bindUniformBuffer(2, materialBlock_);
 
-    geometry.submit(encoder, GeometryPass::Transparent);
+    /* BACK TO FRONT, which is the bug this whole design was most likely to be
+     * forced by. The old path drew the transparent bucket in BUCKET order, so
+     * two overlapping panes blended in whatever order the geometry happened to
+     * be built in — and nothing in that architecture could fix it, because the
+     * engine did not own the draws. See RenderScene::collect. */
+    drawItems(encoder, cameraList_.translucent(), /*bindMaterials=*/true);
+
 
     device_.endPass(encoder);
 }

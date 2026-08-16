@@ -63,11 +63,99 @@ public static class BaExport
         Run(manifestOnly: false);
     }
 
+    /// Report how each rig's skinned meshes relate to the object being
+    /// exported. Written after two wrong guesses at why Blender refuses 54 of
+    /// these files: the point is to find out where the bones actually live
+    /// rather than to keep proposing causes.
+    public static void Diagnose()
+    {
+        var listFile = Arg("-baList", "");
+        HashSet<string> only = null;
+        if (File.Exists(listFile))
+            only = new HashSet<string>(File.ReadAllLines(listFile).Select(l => l.Trim())
+                .Where(l => l.Length > 0), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var guid in AssetDatabase.FindAssets("t:Prefab"))
+        {
+            var path = AssetDatabase.GUIDToAssetPath(guid);
+            var name = Path.GetFileNameWithoutExtension(path);
+            if (only != null && !only.Contains(name)) continue;
+            var go = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+            if (go == null) continue;
+            var animator = go.GetComponentInChildren<Animator>(true);
+            if (animator == null || animator.runtimeAnimatorController == null) continue;
+
+            var root = animator.transform;
+            var smrs = go.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            int outside = 0, nullRoot = 0;
+            var rootBones = new HashSet<string>();
+            foreach (var s in smrs)
+            {
+                if (s.rootBone == null) { nullRoot++; continue; }
+                rootBones.Add(s.rootBone.name);
+                // Is every bone this mesh is skinned to inside the subtree we
+                // export? If not, the FBX names a skeleton it does not contain.
+                foreach (var b in s.bones)
+                {
+                    if (b == null) continue;
+                    if (!b.IsChildOf(root)) { outside++; break; }
+                }
+            }
+            // Does any single mesh skin across TWO skeletons? That is the shape
+            // io_scene_fbx cannot represent: it builds one armature per
+            // skeleton root and then looks the mesh up under a single one.
+            int spanning = 0;
+            foreach (var s in smrs)
+            {
+                var tops = new HashSet<Transform>();
+                foreach (var b in s.bones)
+                {
+                    if (b == null) continue;
+                    var t = b;
+                    while (t.parent != null && t.parent != root) t = t.parent;
+                    tops.Add(t);
+                }
+                if (tops.Count > 1) spanning++;
+            }
+            foreach (var s in smrs)
+            {
+                var lp = root.InverseTransformPoint(s.transform.position);
+                var rb = s.rootBone != null ? root.InverseTransformPoint(s.rootBone.position)
+                                            : Vector3.zero;
+                if (lp.magnitude > 20f || rb.magnitude > 20f)
+                    Debug.Log($"BADIAG-FAR {name}\t{s.name}\tmat={(s.sharedMaterial ? s.sharedMaterial.name : "-")}" +
+                              $"\tobj=({lp.x:F1},{lp.y:F1},{lp.z:F1})\trootBone={(s.rootBone ? s.rootBone.name : "-")}" +
+                              $"=({rb.x:F1},{rb.y:F1},{rb.z:F1})");
+            }
+            Debug.Log($"BADIAG {name}\tspanningMeshes={spanning}\tanimatorOn={root.name}\tprefabRoot={go.name}" +
+                      $"\tanimatorIsRoot={(root == go.transform)}\tsmr={smrs.Length}" +
+                      $"\tsmrWithBonesOutside={outside}\tnullRootBone={nullRoot}" +
+                      $"\trootBones={string.Join("|", rootBones)}");
+        }
+        Debug.Log("BADIAG-DONE");
+    }
+
     static void Run(bool manifestOnly)
     {
         var filter = Arg("-baFilter", "");
         var outDir = Arg("-baOut", "D:/ba_extracted/fbx");
+        var listFile = Arg("-baList", "");
+        // Strip crew rigs nested inside a vehicle rig. Off by default because
+        // it removes geometry; on for the rigs Blender cannot otherwise read.
+        bool stripNested = Environment.GetCommandLineArgs().Contains("-baStripNested");
         Directory.CreateDirectory(outDir);
+
+        // An explicit list, because the rigs that need this are 54 specific
+        // ones and -baFilter is a single substring. Names are prefab
+        // basenames, one per line.
+        HashSet<string> only = null;
+        if (!string.IsNullOrEmpty(listFile) && File.Exists(listFile))
+        {
+            only = new HashSet<string>(File.ReadAllLines(listFile)
+                .Select(l => l.Trim()).Where(l => l.Length > 0),
+                StringComparer.OrdinalIgnoreCase);
+            Debug.Log($"BAEXPORT-LIST {only.Count} names from {listFile}");
+        }
 
         // RIGS ONLY, and the filtering has to happen BEFORE names are assigned.
         // There are 1,410 prefabs and 422 rigs; if a non-rig prefab sharing a
@@ -85,6 +173,7 @@ public static class BaExport
             var a = go.GetComponentInChildren<Animator>(true);
             if (a == null || a.runtimeAnimatorController == null) continue;
             if (!a.runtimeAnimatorController.animationClips.Any(c => c != null)) continue;
+            if (only != null && !only.Contains(Path.GetFileNameWithoutExtension(path))) continue;
             prefabs.Add(path);
         }
 
@@ -140,6 +229,113 @@ public static class BaExport
             {
                 inst = (GameObject)UnityEngine.Object.Instantiate(asset);
                 var animator = inst.GetComponentInChildren<Animator>(true);
+
+                // NESTED CREW RIGS ARE WHAT BREAK BLENDER. An An-72 prefab
+                // contains RU_Pilot_Plane; the Mi-8s, the Su-24s and the
+                // RU_Morskaya family all carry a second Animator with its own
+                // skeleton inside the first. The FBX then holds two armatures,
+                // and io_scene_fbx dies on it with `KeyError: root` at
+                // mesh.armature_setup[self] - every import option, including
+                // use_anim=False, so there is no setting that rescues it.
+                //
+                // FBX2glTF reads those files, which is why they existed at all,
+                // but it wrote RU_Morskaya with FOUR joints against a ~50-bone
+                // rig: most vertices bind to joints absent from the skin and
+                // the mesh scrambles the moment it is posed. A correctly
+                // skinned airframe without its pilot beats a complete file
+                // that cannot deform - and the crew rigs are exported in their
+                // own right anyway, since they are prefabs with Animators too.
+                // ONE SKELETON PER FILE. These prefabs carry an airframe rig and
+                // a crew rig side by side - `root`/`body` plus `Hips` - and that
+                // plurality is what Blender's FBX importer cannot represent
+                // (`KeyError: root`). FBX2glTF reads such files but writes the
+                // crew mesh into a broken bind space: the pilot of a MiG-35
+                // lands 145 m from the aircraft with a 185 m span, against an
+                // 18 m airframe, and no amount of fixing the viewer helps
+                // because the geometry in the file is already wrong.
+                //
+                // So the crew comes out. Skinned meshes are grouped by the
+                // top-level bone they hang from and only the largest group
+                // survives; the rest, and their skeletons, are deleted. Nothing
+                // is lost from the library - the crew are prefabs with their own
+                // Animators and export as rigs in their own right.
+                if (Environment.GetCommandLineArgs().Contains("-baOneSkeleton"))
+                {
+                    // GROUPED BY rootBone ITSELF, not by its top-level ancestor.
+                    // A pilot is parented INTO the cockpit, so his `Hips` hangs
+                    // under the airframe's `body` bone and walking up to the
+                    // top merges the two rigs back into one group - which is
+                    // why the first attempt at this dropped nothing at all.
+                    var smrs = inst.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+                    var groups = smrs.Where(s => s.rootBone != null)
+                        .GroupBy(s => s.rootBone)
+                        .OrderByDescending(g => g.Sum(s => s.sharedMesh ? s.sharedMesh.vertexCount : 0))
+                        .ToList();
+                    // Deleting a bone deletes its whole subtree, so a later
+                    // group's root - or the Animator - can already be gone by
+                    // the time the loop reaches it. Unity reports that as
+                    // "the object has been destroyed but you are still trying
+                    // to access it", which killed 27 of 134 rigs on the first
+                    // run. Hence the guards: skip anything already dead, and
+                    // never delete a bone that the kept rig or the Animator
+                    // lives under.
+                    var keepRoot = groups.Count > 0 ? groups[0].Key : null;
+                    foreach (var g in groups.Skip(1))
+                    {
+                        var bone = g.Key;
+                        if (bone == null) continue;
+                        if (animator != null && animator.transform.IsChildOf(bone)) continue;
+                        if (keepRoot != null && keepRoot.IsChildOf(bone)) continue;
+                        int verts = g.Sum(s => s != null && s.sharedMesh ? s.sharedMesh.vertexCount : 0);
+                        Debug.Log($"BAEXPORT-DROPSKEL {asset.name}: {bone.name} " +
+                                  $"({g.Count()} meshes, {verts} verts)");
+                        foreach (var s in g)
+                            if (s != null && s.gameObject != null)
+                                UnityEngine.Object.DestroyImmediate(s.gameObject);
+                        if (bone != null && bone.gameObject != null)
+                            UnityEngine.Object.DestroyImmediate(bone.gameObject);
+                    }
+                }
+
+                if (stripNested)
+                {
+                    var nested = inst.GetComponentsInChildren<Animator>(true)
+                        .Where(a => a != animator).ToArray();
+                    foreach (var n in nested)
+                    {
+                        if (n == null || n.gameObject == null) continue;
+                        Debug.Log($"BAEXPORT-STRIP {asset.name}: {n.gameObject.name}");
+                        UnityEngine.Object.DestroyImmediate(n.gameObject);
+                    }
+                }
+
+                // THE REAL AVATAR, OR EVERY HUMAN CLIP IS WRONG.
+                // Humanoid clips are muscle values; they retarget onto whatever
+                // the Avatar maps and freeze everything it does not. The Avatar
+                // AssetRipper reconstructs resolves 22 of 55 human bones, so
+                // hips, spine, head, both shoulders, one hip, one knee and one
+                // foot never move - which is why every human animation in this
+                // library was wrong while the vehicles, which use generic clips
+                // and no Avatar at all, were fine.
+                //
+                // tools/ba/ba_avatars.py pulls the game's own Avatar objects out
+                // of the bundles: the bone mapping AND the reference pose the
+                // muscles were authored against. Rebuilding from bone names
+                // alone gets the mapping and misses the reference, and Unity
+                // then treats the rig's current pose as the T-pose.
+                string avatarData = Arg("-baAvatarData", "");
+                if (!string.IsNullOrEmpty(avatarData) && animator.avatar != null
+                    && animator.avatar.isHuman)
+                {
+                    var real = BaPreview.BuildAvatarFromData(
+                        animator.gameObject, animator.avatar.name, avatarData);
+                    if (real != null && real.isValid)
+                        animator.avatar = real;
+                    else
+                        Debug.LogWarning($"BAEXPORT-AVATAR {asset.name}: could not rebuild " +
+                                         $"{animator.avatar.name}, keeping the original");
+                }
+
                 var root = animator.transform;
 
                 var bones = new List<Transform>();
@@ -153,7 +349,6 @@ public static class BaExport
                     float fps = Mathf.Max(clip.frameRate, 30f);
                     int frames = Mathf.Max(1, Mathf.RoundToInt(clip.length * fps) + 1);
 
-                    var rootCurves = RootCurves(clip);
                     var keys = new Keyframe[bones.Count][][];
                     for (int b = 0; b < bones.Count; b++)
                     {
@@ -173,18 +368,25 @@ public static class BaExport
                         {
                             var tr = bones[b];
                             Vector3 p = tr.localPosition; Quaternion q = tr.localRotation; Vector3 s = tr.localScale;
-                            // Bone 0 is the Animator object; its motion is the
-                            // clip's root curves, which sampling never applies.
-                            if (b == 0 && (rootCurves[0] != null || rootCurves[3] != null))
-                            {
-                                if (rootCurves[0] != null) p.x = rootCurves[0].Evaluate(t);
-                                if (rootCurves[1] != null) p.y = rootCurves[1].Evaluate(t);
-                                if (rootCurves[2] != null) p.z = rootCurves[2].Evaluate(t);
-                                if (rootCurves[3] != null) q.x = rootCurves[3].Evaluate(t);
-                                if (rootCurves[4] != null) q.y = rootCurves[4].Evaluate(t);
-                                if (rootCurves[5] != null) q.z = rootCurves[5].Evaluate(t);
-                                if (rootCurves[6] != null) q.w = rootCurves[6].Evaluate(t);
-                            }
+                            // NO ROOT-CURVE OVERWRITE ON BONE 0.
+                            //
+                            // An earlier version wrote the clip's RootT/RootQ
+                            // onto the Animator's transform here, reasoning that
+                            // sampling never applies root motion and that stance
+                            // height lives in RootT.y - 0.17 prone against 0.88
+                            // standing. That was reasoning about the clip data
+                            // rather than about what retargeting produces, and
+                            // it was wrong.
+                            //
+                            // Measured on Stand_death with the real Avatar: the
+                            // Animator transform stays at (0,0,0) for the entire
+                            // clip while the HIPS fall from y=0.99 to y=0.25,
+                            // travel a metre and rotate 88 degrees onto the
+                            // character's back. The retargeted pose already
+                            // carries the whole body motion, so adding the root
+                            // curves applied every bit of it twice - a soldier
+                            // who dies standing up and then flips over. Correct
+                            // pose, corrupted placement.
                             var v = new float[] { p.x, p.y, p.z, q.x, q.y, q.z, q.w, s.x, s.y, s.z };
                             for (int c = 0; c < Props.Length; c++) keys[b][c][f] = new Keyframe(t, v[c]);
                         }
@@ -223,7 +425,20 @@ public static class BaExport
                 //     and the takes, and no animation on the skinned mesh. That
                 //     is the same silent-empty-output failure as every other
                 //     stage of this pipeline, one layer further out.
-                ModelExporter.ExportObject(file, legacy, new ExportModelOptions
+                // EXPORT THE PREFAB ROOT WHEN THE ANIMATOR IS NOT ON IT.
+                // The US Marines put their Animator on a child called
+                // `SupportBones`. The skeleton is under it, but the fourteen
+                // SkinnedMeshRenderers are siblings of it - so exporting the
+                // Animator's subtree wrote 10 MB of animation curves and not
+                // one triangle. Nine rigs came out with a working clip list and
+                // no geometry at all, which in the browser is an invisible
+                // model rather than an error.
+                //
+                // The Animation component stays on the Animator's object, so
+                // the clip paths built above are still relative to the right
+                // thing; only the exported hierarchy widens.
+                var exportRoot = legacy == inst ? legacy : inst;
+                ModelExporter.ExportObject(file, exportRoot, new ExportModelOptions
                 {
                     ExportFormat = ExportFormat.Binary,
                     ModelAnimIncludeOption = Include.ModelAndAnim,
