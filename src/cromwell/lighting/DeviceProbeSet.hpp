@@ -185,7 +185,16 @@ public:
      * vectors legitimately point DOWN and every one of them looks like a typo.
      * See kFaces in the .cpp. `face` is 0..5 in GL's order (+X, -X, +Y, -Y, +Z,
      * -Z); out of range returns identity. */
-    static Mat4 faceViewProjection(int face, Vec3 eye, float farPlane);
+    /* `nearPlane` defaults to what a probe wants and is a PARAMETER because the
+     * decal visibility capture wants something much smaller. A capture's near
+     * plane deletes everything closer to the eye than itself, which for a probe
+     * in the middle of a room is nothing and for a decal on a wall is the
+     * adjoining wall of every corner it is placed in — the capture then says
+     * "nothing in the way" exactly where the wall is, and the mark bleeds
+     * through. Passing it in keeps the ONE face table this comment is about
+     * while letting the two callers disagree about the only value that differs. */
+    static Mat4 faceViewProjection(int face, Vec3 eye, float farPlane,
+                                   float nearPlane = 0.05f);
 
     explicit DeviceProbeSet(rhi::IRenderDevice& device);
     ~DeviceProbeSet();

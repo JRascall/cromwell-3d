@@ -81,13 +81,13 @@ void writeVec3(float (&destination)[4], Vec3 value)
 
 }  // namespace
 
-Mat4 DeviceProbeSet::faceViewProjection(int face, Vec3 eye, float farPlane)
+Mat4 DeviceProbeSet::faceViewProjection(int face, Vec3 eye, float farPlane, float nearPlane)
 {
     if (face < 0 || face > 5) return Mat4{};
 
     const CubeFace& current = kFaces[face];
     const Mat4 view = Mat4::lookAt(eye, eye + current.forward, current.up);
-    const Mat4 projection = Mat4::perspective(kFaceFovY, 1.0f, kFaceNear, farPlane);
+    const Mat4 projection = Mat4::perspective(kFaceFovY, 1.0f, nearPlane, farPlane);
     return projection * view;
 }
 

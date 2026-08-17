@@ -51,6 +51,13 @@ cromwell::DeviceDecalSet::Projector toProjector(const cromwell::Decal& decal,
     out.transform = toMat4(decal.transform);
     out.material  = material;
 
+    /* CARRIED ACROSS, not re-derived. The device set is rebuilt wholesale every
+     * frame and its order is the DRAW order, so the only stable name a decal has
+     * is the one the authoritative list stamped on it. The preview has none — it
+     * was never added to a set — and -1 is exactly right there: it moves with the
+     * cursor, so nothing about it is worth caching. */
+    out.id = decal.id;
+
     /* BYTE OVER 255 WITH NO sRGB DECODE, matching what RhiBodies does for a
      * body's tint and what the static world's vertex colours already do. The
      * tint multiplies an albedo map the hardware has already decoded, so

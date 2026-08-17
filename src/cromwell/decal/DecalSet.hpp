@@ -101,6 +101,10 @@ private:
      * permit that would push the lie outward instead of containing it here. */
     mutable std::vector<Decal> decals_;
 
+    /* The next Decal::id to hand out. Never rewound, not even by clear() —
+     * see the note in add(). */
+    int nextId_ = 0;
+
     /* Owned textures, for the destructor. white_ is NOT in here: it is rlgl's
      * shared default, and unloading it would take the default texture out from
      * under every other material in the program. */

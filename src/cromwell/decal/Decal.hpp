@@ -46,6 +46,20 @@ struct Decal {
 
     DecalMaterialId material = kInvalidDecalMaterial;
 
+    /* WHO THIS DECAL IS, FOR THE LIFE OF THE MARK. Stamped by DecalSet::add
+     * from a counter that never reuses a value, and left alone by everything
+     * else — including the sort, which is why an index into `inDrawOrder()`
+     * cannot serve instead: adding one mark at a low sortOrder shifts every
+     * index behind it while moving nothing.
+     *
+     * WHAT NEEDS IT: the renderer caches per-decal work — today the visibility
+     * capture, which renders the world once from where the mark was thrown —
+     * and a cache keyed by position in a list that re-sorts is a cache that
+     * silently hands one decal another's answer. Left at -1 on a decal that was
+     * never added to a set, which the preview relies on: no id, no cache, and
+     * it is re-captured every frame because it moves with the cursor. */
+    int id = -1;
+
     /* Multiplies the albedo map, exactly as colDiffuse does for a surface. */
     Color tint = WHITE;
 

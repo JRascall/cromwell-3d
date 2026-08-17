@@ -88,6 +88,23 @@ public:
 
         DeviceDecalMaterialId material = kInvalidDeviceDecalMaterial;
 
+        /* WHO THIS DECAL IS, ACROSS FRAMES, and it exists for exactly one
+         * consumer: the visibility capture.
+         *
+         * The pass renders the world from each decal's own position once, when
+         * the decal is placed, and keeps it — so it needs to know that the
+         * projector it is looking at this frame is the same one it captured
+         * last frame. The set is REBUILT WHOLESALE every frame (see RhiDecals
+         * on why), so an index into it is not that: place one decal at the
+         * front of the list and every id behind it shifts, invalidating every
+         * capture in the world for a change that moved nothing.
+         *
+         * So the id comes from whoever owns the authoritative list and must be
+         * stable for the life of a decal. NEGATIVE MEANS TRANSIENT: no cached
+         * capture, re-rendered every frame it is seen, which is what a dev
+         * tool's preview wants because it moves with the cursor. */
+        int id = -1;
+
         /* Multiplies the albedo map. */
         float tint[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 

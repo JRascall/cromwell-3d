@@ -53,6 +53,15 @@ public static class BaPreview
             .FirstOrDefault(c => c != null && c.name == clipName);
         if (clip == null) { Debug.Log("BARANGE-FAIL no clip"); return; }
 
+        // Apply the real Avatar here too. Without it this measures the broken
+        // one and reports ten moving bones no matter what is being compared.
+        string avD = Arg("-baAvatarData", "");
+        if (!string.IsNullOrEmpty(avD) && animator.avatar != null && animator.avatar.isHuman)
+        {
+            var real = BuildAvatarFromData(animator.gameObject, animator.avatar.name, avD);
+            if (real != null && real.isValid) animator.avatar = real;
+        }
+
         var bones = inst.GetComponentsInChildren<Transform>(true);
         var q = new Quaternion[2][];
         var first = new Quaternion[2][];
@@ -437,6 +446,32 @@ public static class BaPreview
         }
         graph.Destroy();
         Debug.Log("BAROOT-DONE");
+    }
+
+    /// List every skinned mesh on a rig with the skeleton it hangs from, so a
+    /// vehicle's crew can be told apart from its bodywork.
+    public static void Crew()
+    {
+        string rigName = Arg("-baRig", "");
+        var path = AssetDatabase.FindAssets("t:Prefab").Select(AssetDatabase.GUIDToAssetPath)
+            .FirstOrDefault(p => Path.GetFileNameWithoutExtension(p) == rigName);
+        if (path == null) { Debug.Log($"BACREW-FAIL no prefab {rigName}"); return; }
+        var go = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+        var an = go.GetComponentInChildren<Animator>(true);
+        Debug.Log($"BACREW {rigName}  prefab={path}");
+        foreach (var s in go.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+        {
+            var mesh = s.sharedMesh;
+            Debug.Log($"BACREW-SMR\t{s.name}\tmesh={(mesh ? mesh.name : "null")}" +
+                      $"\tverts={(mesh ? mesh.vertexCount : 0)}\tbones={s.bones.Length}" +
+                      $"\trootBone={(s.rootBone ? s.rootBone.name : "-")}" +
+                      $"\tmat={(s.sharedMaterial ? s.sharedMaterial.name : "-")}");
+        }
+        foreach (var a in go.GetComponentsInChildren<Animator>(true))
+            Debug.Log($"BACREW-ANIM\t{a.gameObject.name}\tavatar={(a.avatar ? a.avatar.name : "null")}" +
+                      $"\thuman={(a.avatar && a.avatar.isHuman)}" +
+                      $"\tcontroller={(a.runtimeAnimatorController ? a.runtimeAnimatorController.name : "-")}");
+        Debug.Log("BACREW-DONE");
     }
 
     public static void Shoot()

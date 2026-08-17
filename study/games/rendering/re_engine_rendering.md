@@ -2290,6 +2290,62 @@ argument applies to the SDF, not to the shelved lightmap — the SDF caches
 *geometry*, which is small, cheap to update locally, and does not go subtly wrong
 the way a stale lighting cache does.
 
+> **RE-RANKED, 2026-08-16 — two of these three payoffs do not survive
+> `plans/indirect_lighting.md`, and the heading overstates what is left.**
+>
+> **Item 1, SDF AO, is redundant.** Not marginal — redundant, and in all three
+> target genres rather than merely on this map. Ambient occlusion splits into two
+> bands and this list assumed a third that does not exist:
+>
+> | band | owner |
+> |---|---|
+> | below cell scale — creases, contacts, the line where a crate meets the floor | **SSAO**, at depth-buffer resolution. Nothing else can reach it; a field at one value per cell cannot represent a crease. |
+> | cell scale and above — a room being enclosed, a courtyard under an overhang | **the irradiance field**, which answers the same question *directionally and in colour*, with bounce, instead of as a scalar multiply on an ambient term that was already the wrong colour. |
+>
+> SDF AO sits between them computing a degraded version of the field's answer.
+> And this is an engine-level judgement rather than a content one: the split is a
+> property of the techniques, and the field is genre-neutral by construction —
+> `plans/indirect_lighting.md` §8's seam means an RTS or FPS supplies a field of
+> the same shape from a mesh trace or a bake and gets the same term. **The engine
+> should not carry SDF AO.**
+>
+> Note also that RE4R — the title §4.4 establishes as the best-looking and the
+> one this document keeps citing — ships **plain SSAO and no SDF AO**, and
+> Capcom describe their SDF as deliberately *"low-precision"* and *"designed to
+> be used for distant scenery"* (§3.3). The SDF talk is framed around open worlds
+> with a moving sun, i.e. Dragon's Dogma 2's problem.
+>
+> **Item 3, leak rejection, is superseded.** An SDF at cell resolution cannot
+> represent a wall 0.09 tiles thick sitting *on* a cell boundary, which is
+> precisely the geometry that leaks. `plans/indirect_lighting.md` §5.1 does it
+> with three bits per cell — is the +X/+Y/+Z edge blocking — which is exact,
+> 5 KB for the map, and at most three bit tests per tap because a tap is always
+> in the sample point's 2×2×2 neighbourhood.
+>
+> **Item 2, soft shadows, survives untouched — and losing the other two makes it
+> stronger rather than weaker.** No projection to refit, no texel crawl, penumbra
+> in world units, no cascades, no bias, no re-render on destruction.
+>
+> **Because look at which genre Capcom's framing names.** Distant scenery, long
+> view distances, a moving sun — that is the **large-map** case, and large maps
+> are what cromwell is aimed at. The tile board is a prototype that exercises
+> engine features; it is not the content any of this is being built for, and
+> "our map is 24×24" is not an argument the engine may accept. Cascaded shadow
+> maps are *at their worst* exactly where the SDF is at its best, so the feature
+> whose case this board cannot demonstrate is the one with the largest headroom
+> on the target content.
+>
+> The honest consequence is about **evidence, not priority**: §5.2's experiment
+> has never been run because this repo has no content that would make it
+> meaningful, and the 2.5 ms-added figure is measured against a frame drawing one
+> 4096² map and nothing else. That is a gap in what we know, and it argues for
+> building the map before drawing the conclusion — not for demoting the item.
+>
+> So: **"build the SDF, it is the largest single win" was true of a three-payoff
+> item and is not true of a one-payoff item** — but the payoff that survives is
+> the one aimed squarely at the genre the engine exists for, and it should be
+> ranked there rather than against this board.
+
 ### 11.2 Four-direction probe storage — §4.1
 
 R11G11B10Float × 4 = 16 bytes per probe, 83 KB for the whole lattice. A modest
@@ -2320,6 +2376,21 @@ already on the list. 2.2 ms → 0.4 ms is Capcom's measurement of doing the
 expensive part once into a LUT rather than per pixel.
 
 ### 11.3.1 Octahedral probe storage — the measurement solves a stated blocker
+
+> **STATUS: steps 1 and 2 below are DONE, and step 3 is the only thing left.**
+> `DeviceProbeSet` ships a six-level GGX-prefiltered chain
+> (`rhi/scene/probe_prefilter.fs.glsl`, `PROBE_MIP_LEVELS 6`), `sampleProbe`
+> reads roughness straight off as a LOD, and the roughness fade this section is
+> written around **is deleted** — `rhi/include/probes.glsl` records the deletion
+> as the prefilter's payoff. Everything below is retained as the reasoning that
+> produced it, not as outstanding work.
+>
+> **And the two-renderer framing has expired with it.** This section treats
+> `common/environment.glsl` as a live constraint on a shipping path; that path
+> is being deleted at RHI parity, so the file is quoted below as history. The
+> mip chain was never the reason to want octahedral storage — per-mip control is
+> — which is what step 3 says and is why it is still open and still not urgent.
+> `plans/indirect_lighting.md` §1 is where this now reads from.
 
 `common/environment.glsl` records a limitation as though it were a fact of life:
 

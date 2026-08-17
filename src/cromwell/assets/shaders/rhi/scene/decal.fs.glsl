@@ -56,6 +56,12 @@ layout(binding = 2) uniform sampler2D uDecalAlbedo;    /* sRGB, ALPHA IS COVERAG
 layout(binding = 3) uniform sampler2D uDecalPacked;    /* metal R, rough G, emis B */
 layout(binding = 4) uniform sampler2D uDecalNormal;    /* tangent space, linear  */
 
+/* ---- what this decal could SEE from where it was thrown ------------------
+ * One cube per decal, holding the distance to the nearest surface in every
+ * direction, rendered when the decal was placed. See the test in main() and
+ * rhi/scene/decal_visibility.vs.glsl for what fills it and why it exists. */
+layout(binding = 5) uniform samplerCubeArray uDecalVisibility;
+
 void main()
 {
     vec2 screen = gl_FragCoord.xy / uResolution.xy;
@@ -89,56 +95,152 @@ void main()
     /* ---- the receiver ---------------------------------------------------- */
     vec3 receiver = normalize(texture(uSceneNormals, screen).rgb * 2.0 - 1.0);
 
-    /* ============ THE SURFACE MUST FACE WHERE THE DECAL WAS THROWN =========
+    /* ============ COULD THIS SURFACE BE SEEN FROM WHERE THE DECAL WAS
+     * ============ THROWN? IF NOT, IT TAKES NO INK.
      *
-     * ONE DOT PRODUCT, AND IT IS THE ONLY THING KEEPING A MARK OUT OF THE NEXT
-     * ROOM. The signed distance of the decal's centre from the plane the
-     * receiver lies in: positive when the centre is on the side the receiver
-     * faces, negative when the receiver has its back to it.
+     * ONE FETCH AND ONE COMPARE, and it replaces two tests that were guesses.
      *
-     * WHY IT IS NEEDED, and why a flat wall never showed it. The box test above
-     * bounds `local` and nothing else, so the box contains every surface inside
-     * it — and inside a CORNER that includes the far side of the adjoining
-     * wall, 9 cm away, with a normal perpendicular to the projection axis. The
-     * angle fade is a test against the box's AXES, and that face is aligned
-     * with one of them exactly as squarely as the near face is, so it takes the
-     * same ink. On a flat wall there is no such face and nothing leaks, which is
-     * why this only ever appears in corners.
+     * THE PROBLEM IT SOLVES. The box test above bounds `local` and nothing
+     * else, so the box contains every surface inside it — in a corner that
+     * includes the far side of the adjoining wall, 9 cm away, with a normal
+     * perpendicular to the projection axis and therefore as square to one of
+     * the box's axes as the near face is. The angle fade cannot tell them
+     * apart, because it is a test against the box's AXES and both faces pass
+     * it. On a flat wall no such face exists, which is why the artefact only
+     * ever appeared in corners.
      *
-     * ================= WHY SOURCE DOES NOT HAVE THIS PROBLEM ================
+     * WHY THE TWO OBVIOUS TESTS BOTH FAILED, since they are the ones anybody
+     * reaches for first and both shipped here briefly. Rejecting a surface
+     * whose UNWRAP DOUBLES BACK over the decal's own area catches the far face
+     * of a wall in front of the placement plane and misses it behind, where the
+     * fold sign flips and takes the unwrap's direction with it. Rejecting a
+     * surface the decal's CENTRE IS BEHIND catches both — and also catches
+     * every stair riser, kerb edge and outside corner, because a fold that
+     * turns away from the decal has exactly the same shape as a wall seen from
+     * the wrong side. THAT IS NOT A TUNING PROBLEM. A riser and the back of a
+     * wall present identical normals at identical angles; the only difference
+     * between them is whether anything is standing in the way, and no function
+     * of a normal and a position can see that.
      *
-     * Because Source does not project into a volume at all — checked against
-     * the 2013 SDK rather than remembered. `UTIL_DecalTrace` hands the decal to
-     * `pTrace->m_pEnt` (game/shared/util_shared.cpp), the entity the trace
-     * actually hit, and `IStudioRender::AddDecal` takes a ray, an up vector and
-     * a radius to do "a planar projection along the ray" onto THAT model's
-     * triangles (public/istudiorender.h). The decal is addressed to the surface
-     * that was struck and clipped into its triangles; a face on the other side
-     * of a wall is never enumerated, because nothing ever asks "what else is
-     * near here". A screen-space pass has no such list — it has a depth buffer,
-     * which contains whatever the camera can see, including things the decal
-     * has no business touching.
+     * SO ASK THE GEOMETRY INSTEAD. When the decal is placed, the world around
+     * it is rendered from its own position into one cube of distances. A
+     * surface is inked only if it is no further away than what that capture saw
+     * in its direction — which is to say, only if it was VISIBLE from the point
+     * the decal was thrown at. The far side of a wall is not: the wall itself
+     * is in the way, at a shorter distance, in that exact direction. A stair
+     * riser is. So is a kerb, a crate, a beam, a rubble pile, and anything else
+     * a game puts in a room, at any orientation, with no notion of what any of
+     * them are.
      *
-     * Valve hit the same class of artefact where they DO project — their name
-     * for it is in the API: `AddDecal(..., bool noPokethru, ...)`, and the
-     * shadow manager's cure is `AddExtraClipPlane(normal, dist)`, commented
-     * "used to prevent pokethru and back-casting" (public/engine/ishadowmgr.h).
-     * This IS that clip plane, chosen per pixel from the receiver rather than
-     * fixed per projector, because here the receiver is the only thing that
-     * knows which way it faces.
+     * THIS IS SOURCE'S RULE — the surfaces reachable from the impact point,
+     * `UTIL_DecalTrace` handing the decal to the entity the trace actually hit
+     * — reached with a rasteriser rather than a triangle list, and it asks
+     * nothing of the game. Valve's own name for the artefact is in their API
+     * (`AddDecal(..., bool noPokethru, ...)`) and their cure where they project
+     * is an extra clip plane, "used to prevent pokethru and back-casting"
+     * (public/engine/ishadowmgr.h). This is that idea with the planes replaced
+     * by a depth buffer, so it costs nothing to be exact about geometry no
+     * plane could describe.
      *
-     * THE SLACK IS 2 cm: the placement surface itself has the centre exactly IN
-     * its plane, so the distance there is zero and must survive, and anything
-     * coplanar with it must survive too. Two centimetres clears the noise and
-     * still rejects the far face of a 9 cm wall by a wide margin.
+     * THE SLACK IS TWO CENTIMETRES AND STAYS SMALL. The capture's resolution
+     * error is handled by moving the LOOKUP rather than by loosening the
+     * threshold — see the normal offset below, and the note there on why no
+     * value of a depth bias can satisfy both corners and floors. What is left
+     * for this to cover is the placement surface itself, whose own value in the
+     * capture is the thing being compared.
      *
-     * WHAT IT COSTS: a fold that turns AWAY from the decal — running down over
-     * a kerb edge, or round the outside corner of a building — has the centre
-     * behind the wrapped face's plane and is now refused. That is the same
-     * trade Source's per-face clipping makes, and it is the right way round: a
-     * mark that stops at an edge reads as a mark, and one that appears through
-     * a wall reads as a bug. */
-    if (dot(receiver, uModel[3].xyz - world.xyz) < -0.02) discard;
+     * The reasoning that got here, kept because it is the trap:
+     *
+     * This is ordinary shadow acne and it has the ordinary cause. One texel of
+     * a cube face covers an ARC, so it covers more world the further out it is,
+     * and vastly more of a surface seen edge-on than one seen square: at
+     * grazing incidence a single texel spans a long strip of wall whose near
+     * and far ends are centimetres apart in distance, and the one value stored
+     * for it is right for a point somewhere in the middle and short for
+     * everything beyond. Tested against a tight bias, half the strip rejects
+     * itself and the mark breaks up — worst exactly where a wrap needs the
+     * capture most, because the adjoining wall of a corner is the most grazing
+     * surface in the box.
+     *
+     * So the slack is the width of a texel AT THIS DISTANCE, divided by how
+     * square the receiver is to the ray. Head-on it is one texel; edge-on it
+     * opens up to twenty, which is not generosity but the honest resolution of
+     * the answer being tested. `uWrap.z` carries the arc a texel subtends so
+     * this cannot drift from the capture's actual size.
+     *
+     * The two centimetres on the end is the placement surface itself: every ray
+     * along it grazes it, so the capture's own value there IS the thing being
+     * compared. See the origin offset in the capture shader for the other half.
+     *
+     * uWrap.y IS ZERO WHEN THERE IS NO CAPTURE, and then every surface inside
+     * the box takes ink — the pass's old behaviour. A decal that could not be
+     * given a slice is better slightly wrong than absent, and the count of them
+     * is a budget question rather than a correctness one. */
+    /* THE FALLBACK, AND CURRENTLY THE PATH THAT RUNS. Reject a receiver whose
+     * plane the decal's centre sits behind. It is the cheap approximation the
+     * capture is meant to replace — right for walls, wrong for every fold that
+     * turns away from the decal — and it is here because it is KNOWN GOOD on
+     * corners, which the capture is not yet. See uWrap.y: the pipeline stops
+     * setting it while the capture is being diagnosed, and this runs instead. */
+    if (uWrap.y < 0.5 && dot(receiver, uModel[3].xyz - world.xyz) < -0.02) discard;
+
+    if (uWrap.y > 0.5) {
+        /* THE LOOKUP MOVES, NOT THE THRESHOLD, and that distinction is the
+         * whole difference between this working and breaking every corner.
+         *
+         * A DEPTH BIAS CANNOT WORK HERE, and it was tried. One texel of the
+         * capture covers an arc, so it covers a long strip of a surface seen
+         * edge-on, and the single distance stored for that strip is short for
+         * everything past its middle. Sizing a bias to cover that means sizing
+         * it to the strip — which at grazing incidence is tens of centimetres,
+         * far more than the 6 cm a floor is thick. So the bias that stops
+         * corners breaking up is the same bias that lets ink through a floor:
+         * the two requirements meet in the middle at "impossible", and no
+         * amount of tuning finds a value that satisfies both.
+         *
+         * SO OFFSET THE SAMPLE ALONG THE RECEIVER'S NORMAL INSTEAD — the normal
+         * offset every shadow map ends up using, for the identical reason. The
+         * test point is lifted off its own surface by about a texel, scaled up
+         * as the surface turns edge-on, so a grazing surface stops shadowing
+         * itself. THE DIRECTION IS WHAT MAKES IT SAFE: the offset runs along
+         * the surface's own normal, never toward the projector, so it lifts a
+         * receiver clear of ITSELF and never out from behind something else. A
+         * point on the wall below a floor still has the floor between it and
+         * the decal after the offset, so it stays rejected — which is exactly
+         * the case a fat bias got wrong. */
+        vec3  toward     = normalize(world.xyz - uCapture.xyz);
+        float square     = abs(dot(receiver, toward));
+        float texelWorld = length(world.xyz - uCapture.xyz) * uWrap.z;
+
+        /* CLAMPED BELOW THE THINNEST SOLID, and this is the other half of what
+         * makes an offset safe rather than a bias in disguise.
+         *
+         * The offset grows with distance, because a texel does — at a couple of
+         * metres and grazing incidence it reaches fifteen centimetres, which is
+         * more than the 9 cm a wall is thick. A surface in the next room facing
+         * back toward the decal is then lifted THROUGH that wall, lands in front
+         * of it, and takes ink: a fragment of the mark on a wall it was never
+         * thrown at, which is exactly the artefact this test exists to remove.
+         *
+         * Four centimetres is under a floor's 6 and a wall's 9, so no offset can
+         * ever cross one. It costs the grazing case at long range, where the
+         * offset is no longer big enough to lift a surface off itself — that
+         * shows up as a decal thinning out at its far edge, which is a fade,
+         * not a mark in another room. */
+        float lift       = min(texelWorld * (0.5 + 2.0 * (1.0 - square)), 0.04);
+        vec3  sampleAt   = world.xyz + receiver * lift;
+
+        vec3  fromOrigin = sampleAt - uCapture.xyz;
+        float reach      = length(fromOrigin);
+        float visible    = texture(uDecalVisibility, vec4(fromOrigin, uCapture.w)).r;
+
+        /* CLAMPED AT A TWENTIETH, which is about 87 degrees off square. Past
+         * that the surface is edge-on to the capture and no bias makes the
+         * stored value meaningful; letting the term run to infinity there would
+         * switch the test off on exactly the surfaces most likely to be behind
+         * something. */
+        if (reach > visible + 0.02) discard;
+    }
 
     /* The projector's own frame, read straight back out of the model matrix's
      * columns: +Z out of the surface, X and Y the decal's U and V. Lengths are
@@ -195,38 +297,6 @@ void main()
     vec3  tangentDir;   /* the world direction the decal's U runs along HERE */
     float facing;
 
-    /* HOW FAR A WRAP MAY REACH BEHIND THE SURFACE THE DECAL IS STUCK TO, in
-     * world units, and after the plane test above this costs nothing that still
-     * worked.
-     *
-     * WHAT IT IS FOR: a decal on a third-storey floor wrapping down onto the
-     * walls of the storey BELOW. The plane test cannot see it, because that
-     * wall genuinely does face back toward the decal's centre — it is a real
-     * surface, correctly oriented, on the far side of the floor the decal is
-     * stuck to. What disqualifies it is that the box reaches it at all: the box
-     * is centred on the placement surface and its depth is the wrap budget, so
-     * a decal a few units across reaches a couple of units DOWN as well, and
-     * the floor it was placed on is 6 cm thick.
-     *
-     * WHY IT IS FREE. Behind the placement plane, the plane test has already
-     * rejected everything that turns AWAY from the decal — a kerb edge, a stair
-     * riser, the outside of a building corner. So the only ink left back there
-     * is on surfaces facing toward the decal from behind it, and in a world
-     * made of solids that means through the floor or through the wall. There is
-     * nothing legitimate left to lose.
-     *
-     * TWO CENTIMETRES: under the 6 cm a floor slab is thick and the 9 cm a wall
-     * is, so a wrap can never cross either, and above the rounding at the fold
-     * itself, which IS local.z == 0 and must not lose its first row of pixels.
-     *
-     * THE PRIMARY BRANCH IS DELIBERATELY NOT CAPPED. A surface parallel to the
-     * placement plane and below it is the lower tread of a stair or the road
-     * below a kerb, which is the continuous mark this technique exists to make.
-     * If a decal ever reaches the FLOOR of the storey below, that is the box
-     * being too deep, and the depth is chosen at placement — it is not this
-     * shader's decision to override. */
-    const float kSolidReach = 0.02;
-
     /* WHICH WAY THE UNWRAP RUNS PAST A FOLD, and it took three wrong answers to
      * get here, so the reasoning is written out.
      *
@@ -264,9 +334,6 @@ void main()
         float foldSign   = (local.z >= 0.0) ? 1.0 : -1.0;   /* + concave, - convex */
         float side  = -facingSign * foldSign;
 
-        /* Not through the floor or the wall this decal is stuck to. */
-        if (-local.z * lenW > kSolidReach) discard;
-
         float u = local.x + side * abs(local.z) * (lenW / lenU);
         uv = vec2(u + 0.5, 0.5 - local.y);
 
@@ -282,8 +349,6 @@ void main()
         float facingSign = (dot(receiver, dirV) >= 0.0) ? 1.0 : -1.0;
         float foldSign   = (local.z >= 0.0) ? 1.0 : -1.0;
         float side  = -facingSign * foldSign;
-
-        if (-local.z * lenW > kSolidReach) discard;   /* see the branch above */
 
         float v = local.y + side * abs(local.z) * (lenW / lenV);
         uv         = vec2(local.x + 0.5, 0.5 - v);

@@ -257,15 +257,17 @@ vec4 sampleProbe(int probe, vec3 reflection, vec3 worldPosition, float roughness
 /* WHAT A SURFACE SEES ALONG ITS REFLECTION VECTOR — the probe where one claims
  * this fragment, the analytic sky where none does.
  *
- * TWO BLENDS, AND THEY DO DIFFERENT JOBS. The first is the probe's ALPHA:
- * geometry where the capture found some, analytic sky where it saw open air —
- * which is what keeps the sky gradient smooth without the sky ever being
- * rendered into the cubemap. The second is ROUGHNESS: there is no prefiltered
- * mip chain to sample (see DeviceProbeSet::create), so rather than hand a rough
- * surface a mirror-sharp reflection it could never produce, the result slides
- * back to the analytic sky as roughness rises. That is not a fudge — a fully
- * rough reflection converges on the irradiance, and the two-lobe sky is already
- * an irradiance approximation.
+ * ONE BLEND, AND IT IS THE PROBE'S ALPHA: geometry where the capture found
+ * some, analytic sky where it saw open air — which is what keeps the sky
+ * gradient smooth without the sky ever being rendered into the cubemap.
+ *
+ * THERE USED TO BE A SECOND, ON ROUGHNESS, and this paragraph outlived it. With
+ * no prefiltered chain the only level available was a mirror, so the whole term
+ * slid back to the analytic sky as roughness rose rather than hand a rough
+ * surface a reflection it could never produce. The chain exists now
+ * (DeviceProbeSet::kMipLevels, rhi/probe_prefilter.fs.glsl) and sampleProbe
+ * reads roughness straight off as a LOD, so the fade is gone — see the note at
+ * the end of this function, which is where the argument for deleting it lives.
  *
  * THE PROBE IS NOT SCALED BY THE AMBIENT INTENSITY AND THE SKY IS, and they are
  * not the same kind of quantity. skyIrradiance returns lobe colours that need a

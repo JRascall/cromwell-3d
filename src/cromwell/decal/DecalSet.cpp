@@ -131,6 +131,13 @@ const char* DecalSet::materialName(DecalMaterialId id) const
 void DecalSet::add(const Decal& decal)
 {
     decals_.push_back(decal);
+
+    /* STAMPED HERE AND NEVER REUSED, including across clear(). See Decal::id:
+     * the renderer caches work per decal, and a value that came back after the
+     * mark wearing it was deleted would hand the new one a cache of the old
+     * one's surroundings. Monotonic is the cheapest way to make that
+     * impossible; at one decal per shot it outlives any session. */
+    decals_.back().id = nextId_++;
     sorted_ = false;
 }
 

@@ -407,6 +407,36 @@ from arms hanging limp to the rifle shouldered in a firing stance, and
 Re-baking is `BaExport.Export -baAvatarData avatars.txt`, which rebuilds the
 Avatar per rig before sampling. 221 humanoid rigs.
 
+### And do NOT add root motion on top
+
+A separate fault, found only after the Avatar was fixed, because until then the
+poses were too wrong to see it: a soldier would kneel correctly and then flip
+into an impossible position partway through a death.
+
+An earlier version wrote each clip's `RootT`/`RootQ` curves onto the Animator's
+transform, on the reasoning that sampling never applies root motion and that
+stance height lives in `RootT.y` - 0.17 prone against 0.88 standing. That was
+reasoning about the clip data rather than about what retargeting produces.
+
+Measured on `Stand_death` with the real Avatar: **the Animator transform stays
+at (0,0,0) for the entire clip** while the hips fall from y=0.99 to y=0.25,
+travel a metre and rotate 88 degrees onto the character's back. The retargeted
+pose already carries the whole body motion. Adding the root curves applied every
+bit of it twice - and doubling an 88-degree rotation is why the first half of a
+death read correctly and the second half flipped. A correct pose with corrupted
+placement.
+
+After removing it, only `Hips` translates, and the posed bounding box falls from
+1.81 m standing to 0.71 m on the ground.
+
+**Both sampling paths agree.** `AnimationMode.SampleAnimationClip` (what the
+bake uses) and a `PlayableGraph` (the runtime path) produce identical per-bone
+rotation ranges once the real Avatar is applied - 22 moving bones, bone for
+bone. Worth knowing, because it rules the export path out when something still
+looks wrong. Note that `BaPreview.Ranges` must be given `-baAvatarData` too, or
+it silently measures the broken Avatar and reports ten moving bones whatever it
+is comparing.
+
 **How to check this, since nothing automated caught it:** render the clip from
 Unity itself with `BaPreview.Shoot` and compare against the browser. Anything
 downstream of Unity - the FBX exporter, Blender, the glTF loader, the viewer's

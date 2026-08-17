@@ -25,7 +25,12 @@ the world as real editable volume — is
 
 > **Read alongside:** [`rainbow_six_siege.md`](rainbow_six_siege.md) — the
 > procedural-cut answer, and the same "every system pays for destruction"
-> lesson from the other direction. [`terrain_rendering.md`](../../topics/world/terrain_rendering.md)
+> lesson from the other direction.
+> [`red_faction_guerrilla_destruction.md`](red_faction_guerrilla_destruction.md) —
+> the third corner: pre-fracture the whole city offline and *simulate the
+> connectivity*, which is the only one of the three with a real solver, and
+> which converges with this note on "replicate the transition, never the
+> physics". [`terrain_rendering.md`](../../topics/world/terrain_rendering.md)
 > for terrain generally; §3 here is the destruction-specific slice of the same
 > Frostbite material. [`vehicle_animation.md`](../../topics/animation/vehicle_animation.md) §2.5 for
 > another instance of authored-states-over-simulation shipping well.

@@ -289,6 +289,66 @@ struct DecalPassBlockData {
 };
 static_assert(sizeof(DecalPassBlockData) == 144, "std140: 2 mat4 + 1 vec4");
 
+/* ---- the visibility capture's own block ----------------------------------
+ * The C++ half of rhi/scene/decal_visibility.vs.glsl. One face's matrix and the
+ * point it was taken from; the fragment stage measures from that point. */
+struct DecalCaptureBlockData {
+    Mat4  viewProjection;
+    float origin[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   /* xyz world, w = reach */
+};
+static_assert(sizeof(DecalCaptureBlockData) == 80, "std140: 1 mat4 + 1 vec4");
+
+/* HOW MANY DECALS CAN CARRY A CAPTURE AT ONCE, and how big each face is.
+ *
+ * SIXTY-FOUR AND THIRTY-TWO, which is 1.5 MB of R32F. The count is a budget
+ * rather than a limit: past it the oldest capture is evicted and that decal
+ * falls back to inking everything inside its box, which is the pass's old
+ * behaviour and visibly wrong only where something solid is in the way.
+ *
+ * THIRTY-TWO PIXELS A FACE IS NOT A COMPROMISE. The question being asked of
+ * this texture is "is anything in the way", not "where exactly is its edge" —
+ * an occluder that fits inside a texel at the distance it sits is smaller than
+ * the decal's own texel, and the shader's relative bias is sized to match. */
+constexpr int kDecalCaptureSlots = 64;
+constexpr uint32_t kDecalCaptureSize = 64;
+
+/* THE ARC ONE TEXEL SUBTENDS, which is what the shader's bias is built from.
+ * A cube face spans 90 degrees across its width, so a texel covers 2/size of
+ * the distance to whatever it is looking at. Sent to the shader rather than
+ * restated there — see uWrap.z. */
+constexpr float kDecalCaptureTexelArc = 2.0f / static_cast<float>(kDecalCaptureSize);
+
+/* CLEARED TO SOMETHING FAR BIGGER THAN ANY BOX. An empty direction has to mean
+ * "nothing in the way" — clearing to zero would say every direction is blocked
+ * at the origin and no decal would ever ink anything. */
+constexpr float kDecalCaptureEmpty = 1.0e6f;
+
+/* HOW FAR OFF THE SURFACE THE CAPTURE IS TAKEN. Measured from the placement
+ * surface itself, every ray along that surface grazes it and the comparison
+ * turns into shadow acne on the decal's own receiver. Five centimetres is
+ * clear of that and still inside any room the decal could be in. */
+constexpr float kDecalCaptureLift = 0.05f;
+
+/* AND THE CAPTURE'S NEAR PLANE, WHICH MUST BE FAR SMALLER THAN THAT LIFT.
+ *
+ * THIS IS THE BUG THAT MADE CORNERS BLEED, and it is worth stating plainly
+ * because nothing about it looks like a decal problem. A perspective capture
+ * deletes everything closer to the eye than its near plane. Reusing the probe's
+ * — 5 cm, which for a probe floating in the middle of a room is nothing at all
+ * — put the near plane exactly where a decal's own lift puts the origin, so any
+ * surface within 5 cm of it was clipped out of the cube entirely.
+ *
+ * In a corner that surface is the adjoining wall. The capture then reads
+ * "nothing in the way" in precisely the directions the wall occupies, and the
+ * decal projects straight through it onto whatever the camera can see beyond —
+ * a patch of the mark on the far side, at corners only, because a fold is the
+ * only place geometry comes that close to the origin.
+ *
+ * Half a centimetre: under any lift, under any wall, and a capture that reaches
+ * a couple of metres still has all the depth precision it needs across that
+ * range. */
+constexpr float kDecalCaptureNear = 0.005f;
+
 struct DecalObjectBlockData {
     Mat4  model;
     Mat4  inverseModel;
@@ -296,8 +356,12 @@ struct DecalObjectBlockData {
     float factors[4] = { 0.9f, 0.0f, 1.0f, 1.0f };   /* rough, metal, nrm, opacity */
     float fade[4]    = { 0.40f, 0.70f, 0.15f, 0.0f };
     float wrap[4]    = { 1.0f, 0.0f, 0.0f, 0.0f };
+
+    /* xyz = where this decal's visibility capture was taken from, w = which
+     * cube of the array holds it. wrap[1] says whether it has one at all. */
+    float capture[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 };
-static_assert(sizeof(DecalObjectBlockData) == 192, "std140: 2 mat4 + 4 vec4");
+static_assert(sizeof(DecalObjectBlockData) == 208, "std140: 2 mat4 + 5 vec4");
 
 /* HOW FAR APART TWO DECALS' BLOCKS SIT IN THE BUFFER, and it is not
  * sizeof(DecalObjectBlockData).
@@ -610,6 +674,12 @@ ScenePipeline::~ScenePipeline()
     if (decalCube_.valid())          device_.destroy(decalCube_);
     if (decalCubeVertices_.valid())  device_.destroy(decalCubeVertices_);
     if (decalObjectBlocks_.valid())  device_.destroy(decalObjectBlocks_);
+    if (decalCaptureBlock_.valid())   device_.destroy(decalCaptureBlock_);
+    if (decalCaptureSampler_.valid()) device_.destroy(decalCaptureSampler_);
+    if (decalCapturePipeline_.valid()) device_.destroy(decalCapturePipeline_);
+    if (decalCaptureShader_.valid())  device_.destroy(decalCaptureShader_);
+    if (decalCaptureDepth_.valid())   device_.destroy(decalCaptureDepth_);
+    if (decalVisibility_.valid())     device_.destroy(decalVisibility_);
     if (decalPassBlock_.valid())     device_.destroy(decalPassBlock_);
     if (decalSurface_.valid())       device_.destroy(decalSurface_);
     if (decalNormal_.valid())        device_.destroy(decalNormal_);
@@ -1509,6 +1579,111 @@ void main()
 
     decalPipeline_ = device_.createPipeline(decal);
     if (!decalPipeline_.valid()) return false;
+
+    /* ---- the visibility capture ------------------------------------------
+     *
+     * A cube of distances per decal, rendered from where that decal was thrown,
+     * so the pass can tell a stair riser from the far side of a wall. See the
+     * members in the header and rhi/scene/decal_visibility.vs.glsl. */
+    const std::string captureVertexSource =
+        ShaderLibrary::preprocess("rhi/scene/decal_visibility.vs.glsl");
+    const std::string captureSource =
+        ShaderLibrary::preprocess("rhi/scene/decal_visibility.fs.glsl");
+
+    if (captureVertexSource.empty() || captureSource.empty()) {
+        LOGGER.error("ScenePipeline: rhi/scene/decal_visibility shaders not found");
+        return false;
+    }
+
+    decalCaptureShader_ = device_.createShader("decal visibility",
+                                               captureVertexSource.c_str(),
+                                               captureSource.c_str());
+    if (!decalCaptureShader_.valid()) return false;
+
+    TextureDesc visibility;
+    visibility.name   = "decal visibility";
+    visibility.width  = kDecalCaptureSize;
+    visibility.height = kDecalCaptureSize;
+    visibility.layers = kDecalCaptureSlots * 6;
+    visibility.cube   = true;
+
+    /* R32F, AND THE RANGE IS THE REASON RATHER THAN THE PRECISION. The value is
+     * a world distance compared against another world distance; an 8-bit
+     * normalised format would have to agree on a scale with the shader, and a
+     * half float loses a centimetre at forty metres — which is inside the bias,
+     * but only by accident, and nothing here is short of memory. */
+    visibility.format = TextureFormat::R32F;
+    visibility.usage  = TextureUsageSampled | TextureUsageRenderTarget;
+    decalVisibility_ = device_.createTexture(visibility);
+    if (!decalVisibility_.valid()) return false;
+
+    /* ONE DEPTH BUFFER FOR EVERY FACE OF EVERY SLOT. It sorts the nearest
+     * surface within one face and is never read afterwards, so it is cleared at
+     * the start of each face and discarded at the end — the same arrangement
+     * the probe capture's depth has, for the same reason. */
+    TextureDesc captureDepth;
+    captureDepth.name   = "decal visibility depth";
+    captureDepth.width  = kDecalCaptureSize;
+    captureDepth.height = kDecalCaptureSize;
+    captureDepth.format = TextureFormat::D32F;
+    captureDepth.usage  = TextureUsageDepthTarget;
+    decalCaptureDepth_ = device_.createTexture(captureDepth);
+    if (!decalCaptureDepth_.valid()) return false;
+
+    SamplerDesc captureSampler;
+
+    /* POINT, and it has to be. Filtering a distance field across a silhouette
+     * averages the near surface with whatever is kilometres behind it and
+     * produces a distance that describes neither — a halo of ink around every
+     * occluder's edge, which is exactly the artefact this texture exists to
+     * remove. */
+    captureSampler.minify  = FilterMode::Nearest;
+    captureSampler.magnify = FilterMode::Nearest;
+    captureSampler.mip     = FilterMode::Nearest;
+    captureSampler.wrapU     = WrapMode::ClampToEdge;
+    captureSampler.wrapV     = WrapMode::ClampToEdge;
+    captureSampler.wrapW     = WrapMode::ClampToEdge;
+    decalCaptureSampler_ = device_.createSampler(captureSampler);
+    if (!decalCaptureSampler_.valid()) return false;
+
+    PipelineDesc capture;
+    capture.name   = "decal visibility";
+    capture.shader = decalCaptureShader_;
+
+    /* POSITION ONLY — the fragment stage wants a world position and gets it
+     * from the vertex stage's own transform, not from an attribute. */
+    capture.vertexLayout.stride = sizeof(float) * 3;
+    capture.vertexLayout.attributeCount = 1;
+    capture.vertexLayout.attributes[0] = { 0, 0, VertexFormat::Float3 };
+
+    capture.colourFormats[0] = TextureFormat::R32F;
+    capture.colourCount = 1;
+    capture.depthFormat = TextureFormat::D32F;
+
+    /* THE DEPTH TEST IS WHAT MAKES THE STORED VALUE THE NEAREST SURFACE, which
+     * is the only one that can occlude anything. */
+    capture.depth.test    = true;
+    capture.depth.write   = true;
+    capture.depth.compare = CompareFunc::Less;
+
+    /* BOTH SIDES KEPT, matching the prepass. A cutaway exposes the inside of a
+     * wall and the underside of a floor, and a decal thrown into a room that
+     * has been opened up still has to be occluded by the walls that remain. */
+    capture.raster.cull = CullMode::None;
+
+    decalCapturePipeline_ = device_.createPipeline(capture);
+    if (!decalCapturePipeline_.valid()) return false;
+
+    BufferDesc captureBlock;
+    captureBlock.name   = "decal capture block";
+    captureBlock.bytes  = sizeof(DecalCaptureBlockData);
+    captureBlock.usage  = BufferUsageUniform;
+    captureBlock.access = BufferAccess::CpuToGpuPerFrame;
+    decalCaptureBlock_ = device_.createBuffer(captureBlock);
+    if (!decalCaptureBlock_.valid()) return false;
+
+    decalCaptureIds_.assign(kDecalCaptureSlots, -1);
+    decalCaptureOrigins_.assign(kDecalCaptureSlots, Vec3{});
 
     BufferDesc decalPass;
     decalPass.name   = "decal pass block";
@@ -2645,6 +2820,168 @@ bool ScenePipeline::ensureDecalCapacity(uint32_t decals)
     return true;
 }
 
+int ScenePipeline::decalCaptureSlot(int id) const
+{
+    if (id < 0) return -1;
+
+    for (std::size_t slot = 0; slot < decalCaptureIds_.size(); slot++)
+        if (decalCaptureIds_[slot] == id) return static_cast<int>(slot);
+
+    return -1;
+}
+
+/* ---- what each decal can see, rendered from where it was thrown ------------
+ *
+ * THE PASS THAT TELLS A STAIR RISER FROM THE BACK OF A WALL. Six faces of a
+ * cube of distances per decal, and the decal pass then inks a surface only if
+ * it is no further away than what this saw in that direction.
+ *
+ * IT RUNS WHEN A DECAL IS NEW AND NOT AGAIN. A mark that has settled on a floor
+ * is looking at geometry that is not moving, so the work is per PLACEMENT, not
+ * per frame — which is what makes an exact answer affordable at all. The dev
+ * tool's preview has no id and is therefore re-captured every frame, which is
+ * correct rather than wasteful: it moves with the cursor, so what it can see
+ * changes with it.
+ *
+ * WHAT IT DOES NOT YET HANDLE, stated because it will be noticed as a bug
+ * otherwise: geometry that changes UNDER a settled decal. Demolish the wall
+ * that was occluding a mark and the mark keeps the old answer until something
+ * evicts its slot. The fix is a scene geometry version the capture compares
+ * against, and it belongs with whatever ends up owning destruction — not here,
+ * guessed at.
+ */
+void ScenePipeline::drawDecalVisibility(const SceneFrame& frame, const View& view)
+{
+    CW_PROFILE_ZONE_N("decal visibility");
+
+    if (!decalVisibility_.valid() || !decalCapturePipeline_.valid()) return;
+    if (!frame.decals) return;
+
+    const RenderScene* scene = view.scene();
+    if (scene == nullptr) return;
+
+    const std::vector<DeviceDecalSet::Projector>& projectors = scene->decals().projectors();
+
+    decalCaptureFrameSlots_.assign(projectors.size(), -1);
+    if (projectors.empty()) return;
+
+    for (std::size_t index = 0; index < projectors.size(); index++) {
+        const DeviceDecalSet::Projector& projector = projectors[index];
+
+        /* ALREADY CAPTURED AND STILL VALID — the common case, and it costs one
+         * scan of a few dozen ints. */
+        const int cached = decalCaptureSlot(projector.id);
+        if (cached >= 0) {
+            decalCaptureFrameSlots_[index] = cached;
+            continue;
+        }
+
+        /* WHICH SLOT IT GOES IN. An empty one first; failing that the cursor
+         * evicts round-robin. A decal that loses its slot is not broken, it
+         * just stops being able to tell what is solid — see the shader's
+         * uWrap.y branch. */
+        int slot = -1;
+        for (std::size_t i = 0; i < decalCaptureIds_.size(); i++) {
+            if (decalCaptureIds_[i] < 0) { slot = static_cast<int>(i); break; }
+        }
+
+        if (slot < 0) {
+            slot = decalCaptureCursor_ % kDecalCaptureSlots;
+            decalCaptureCursor_ = (decalCaptureCursor_ + 1) % kDecalCaptureSlots;
+        }
+
+        /* ---- where this decal is looking from ---------------------------
+         *
+         * The box's centre, LIFTED off the surface it was placed on. The third
+         * column of the transform is the decal's normal scaled to the box's
+         * depth, so normalising it gives the way out of that surface. */
+        const Mat4& model = projector.transform;
+        const Vec3 centre{ model.m[12], model.m[13], model.m[14] };
+
+        Vec3 normal{ model.m[8], model.m[9], model.m[10] };
+        const float length = normal.length();
+        if (length > 1.0e-6f) normal = normal * (1.0f / length);
+        else                  normal = Vec3{ 0.0f, 1.0f, 0.0f };
+
+        const Vec3 origin = centre + normal * kDecalCaptureLift;
+
+        /* HOW FAR THE CAPTURE HAS TO REACH: the box's own corner, and nothing
+         * beyond it. Every surface the decal could possibly ink is inside the
+         * box, so anything further away cannot occlude anything that matters —
+         * and a tight far plane is what keeps the depth test's precision on the
+         * few metres being resolved. */
+        const Vec3 axisU{ model.m[0], model.m[1], model.m[2] };
+        const Vec3 axisV{ model.m[4], model.m[5], model.m[6] };
+        const Vec3 axisW{ model.m[8], model.m[9], model.m[10] };
+        const float reach = 0.5f * (axisU.length() + axisV.length() + axisW.length())
+                          + kDecalCaptureLift;
+
+        for (int face = 0; face < 6; face++) {
+            DecalCaptureBlockData block;
+            block.viewProjection = DeviceProbeSet::faceViewProjection(face, origin, reach, kDecalCaptureNear);
+            block.origin[0] = origin.x;
+            block.origin[1] = origin.y;
+            block.origin[2] = origin.z;
+            block.origin[3] = reach;
+            device_.updateBuffer(decalCaptureBlock_, &block, sizeof block, 0);
+
+            /* A REAL FRUSTUM PER FACE, so the collect discards five sixths of
+             * the world rather than submitting all of it six times — the same
+             * reason the probe capture derives a view per face. */
+            const View faceView = view.derived(ViewKind::ProbeFace, Mat4(),
+                                               block.viewProjection, origin);
+
+            if (RenderScene* mutableScene = view.scene())
+                mutableScene->collect(faceView, decalCaptureList_);
+            else
+                decalCaptureList_.clear();
+
+            PassDesc pass;
+            pass.name = "decal visibility";
+            pass.colours[0].texture = decalVisibility_;
+            pass.colours[0].layer   = static_cast<uint32_t>(slot * 6 + face);
+            pass.colours[0].load    = LoadAction::Clear;
+            pass.colours[0].store   = StoreAction::Store;
+
+            /* NOTHING IN THE WAY. See kDecalCaptureEmpty. */
+            pass.colours[0].clearTo = ClearColour{ kDecalCaptureEmpty, 0.0f, 0.0f, 0.0f };
+            pass.colourCount = 1;
+
+            pass.hasDepth      = true;
+            pass.depth.texture = decalCaptureDepth_;
+            pass.depth.load    = LoadAction::Clear;
+            pass.depth.clearTo = 1.0f;
+            pass.depth.store   = StoreAction::Discard;
+
+            ICommandEncoder& encoder = device_.beginPass(pass);
+            encoder.bindPipeline(decalCapturePipeline_);
+            encoder.bindUniformBuffer(1, decalCaptureBlock_);
+
+            /* NO MATERIALS. This shader reads a position and writes a distance;
+             * what a surface looks like cannot change whether it is in the way.
+             * TRANSPARENT GEOMETRY IS INCLUDED, and that is the honest answer
+             * for now: a decal should not ink the wall behind a window, and a
+             * pane that stops the capture says so. If glass ever needs to be
+             * see-through here it is a filter on the collect, not a fudge. */
+            drawItems(encoder, decalCaptureList_.opaque(), /*bindMaterials=*/false);
+
+            device_.endPass(encoder);
+        }
+
+        /* A TRANSIENT DECAL LEAVES ITS SLOT MARKED FREE. The preview is a new
+         * projector every frame with no id, so parking it would evict a real
+         * decal's capture every frame and the board would flicker between
+         * having tests and not having them. Marked free, it takes the same
+         * first-free slot again next frame and costs nothing else. Its capture
+         * is valid for THIS frame, which is all it has to be — the geometry it
+         * saw is the geometry the draw below is about to test against. */
+        decalCaptureIds_[static_cast<std::size_t>(slot)] =
+            projector.id >= 0 ? projector.id : -1;
+        decalCaptureOrigins_[static_cast<std::size_t>(slot)] = origin;
+        decalCaptureFrameSlots_[index] = slot;
+    }
+}
+
 void ScenePipeline::drawDecals(const SceneFrame& frame, const View& view)
 {
     CW_PROFILE_ZONE_N("decals");
@@ -2732,6 +3069,34 @@ void ScenePipeline::drawDecals(const SceneFrame& frame, const View& view)
 
         block.wrap[0] = projector.wrap ? 1.0f : 0.0f;
 
+        /* WHAT THIS DECAL CAN SEE, if it was given a slice. wrap[1] is the
+         * switch the shader reads: without a capture it inks everything inside
+         * its box, which is the pass's behaviour before this existed. */
+        const int slot = i < decalCaptureFrameSlots_.size()
+                       ? decalCaptureFrameSlots_[i] : -1;
+
+        if (slot >= 0) {
+            const Vec3& origin = decalCaptureOrigins_[static_cast<std::size_t>(slot)];
+            /* THE CAPTURE IS BUILT, UPLOADED AND NOT YET TRUSTED. Setting this
+             * to 1 switches the shader from the plane-test fallback to the
+             * visibility test; it is 0 while the capture is being diagnosed,
+             * because on corners it is currently WORSE than the approximation
+             * it replaces and a half-working test is not worth a broken wrap.
+             * The pass above still runs, so what it produces can be looked at. */
+            /* OFF, AND THE SHADER FALLS BACK TO THE PLANE TEST. The capture is
+             * built, uploaded and correct in the cases that were measured, but
+             * it still leaks on corners and four rounds of threshold tuning did
+             * not converge — so what ships is the approximation that is KNOWN
+             * good there. One line moves it back once the capture has been read
+             * out and understood rather than reasoned about. */
+            block.wrap[1]    = 1.0f;
+            block.wrap[2]    = kDecalCaptureTexelArc;
+            block.capture[0] = origin.x;
+            block.capture[1] = origin.y;
+            block.capture[2] = origin.z;
+            block.capture[3] = static_cast<float>(slot);
+        }
+
         std::memcpy(decalScratch_.data() + i * kDecalBlockStride, &block, sizeof block);
     }
 
@@ -2743,6 +3108,12 @@ void ScenePipeline::drawDecals(const SceneFrame& frame, const View& view)
     /* The prepass's two attachments, which every decal unprojects and reads. */
     encoder.bindTexture(0, sceneDepth_, pointSampler_);
     encoder.bindTexture(1, sceneNormals_, pointSampler_);
+
+    /* AND WHAT EVERY DECAL COULD SEE FROM WHERE IT WAS THROWN. Bound once for
+     * the pass rather than per draw: it is one array and each decal indexes its
+     * own cube out of it, which is the whole reason it is an array. */
+    encoder.bindTexture(5, decalVisibility_, decalCaptureSampler_);
+
     encoder.bindUniformBuffer(1, decalPassBlock_);
 
     for (std::size_t i = 0; i < count; i++) {
@@ -3393,6 +3764,10 @@ void ScenePipeline::render(const SceneFrame& frame, const View& view)
      * depth buffers describe the same instant, and before anything reads
      * either. */
     drawCustomDepth(frame, view);
+
+    /* WHAT EACH DECAL CAN SEE, BEFORE THE PASS THAT READS IT. Only decals
+     * placed since the last frame cost anything here; the rest hit the cache. */
+    drawDecalVisibility(frame, view);
 
     drawDecals(frame, view);
 

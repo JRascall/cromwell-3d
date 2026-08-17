@@ -593,6 +593,12 @@ private:
     /* Grows the per-decal block buffer to hold at least this many. */
     bool ensureDecalCapacity(uint32_t decals);
 
+    /* THE VISIBILITY CAPTURES THIS FRAME OWES, rendered before the decal pass
+     * reads them. Returns the slot a projector's cube lives in, or -1 when it
+     * has none and the test must be switched off for it. See the members. */
+    void drawDecalVisibility(const SceneFrame& frame, const View& view);
+    int  decalCaptureSlot(int id) const;
+
     void drawOcclusion(const SceneFrame& frame, const View& view);
     void drawOcclusionBlur(const SceneFrame& frame, const View& view);
     void drawSky(const SceneFrame& frame, const View& view);
@@ -809,6 +815,55 @@ private:
 
     /* KEPT ACROSS FRAMES FOR ITS CAPACITY. Same arrangement as debugScratch_. */
     std::vector<std::uint8_t> decalScratch_;
+
+    /* ---- WHAT EACH DECAL COULD SEE FROM WHERE IT WAS THROWN ---------------
+     *
+     * A cube array of DISTANCES, one cube per decal: for every direction, how
+     * far the nearest surface is from that decal's own origin. The decal pass
+     * inks a recovered surface only if it is no further away than that — the
+     * far side of a wall is not, a stair riser is — which is the only thing in
+     * this pass that knows what is SOLID. See rhi/scene/decal_visibility.vs.glsl
+     * for the argument and decal.fs.glsl for the test.
+     *
+     * RENDERED WHEN A DECAL IS PLACED, NOT PER FRAME, which is what makes it
+     * affordable: a mark that has settled is looking at geometry that is not
+     * moving. `decalCaptureIds_` is the cache — slot to Projector::id — and a
+     * decal whose id is already in it costs nothing at all this frame.
+     *
+     * SMALL ON PURPOSE. The test is "is anything in the way", not "where
+     * exactly is its edge", so a 32-pixel face is plenty and the relative bias
+     * in the shader is sized for it. Six faces of R32F at 32x32 is 24 KB a
+     * decal; the whole array is under two megabytes. */
+    rhi::TextureHandle  decalVisibility_;
+    rhi::TextureHandle  decalCaptureDepth_;
+    rhi::ShaderHandle   decalCaptureShader_;
+    rhi::PipelineHandle decalCapturePipeline_;
+    rhi::BufferHandle   decalCaptureBlock_;
+    rhi::SamplerHandle  decalCaptureSampler_;
+
+    /* Slot -> the Projector::id it holds, or -1 for empty. Linear: the count is
+     * tens, it is walked once per decal per frame, and a map here would be a
+     * hash lookup to save a scan of a few dozen ints. */
+    std::vector<int>    decalCaptureIds_;
+
+    /* Where each slot's capture was taken from, which the decal pass needs to
+     * measure against and cannot recompute — the origin is offset off the
+     * surface, so it is not the projector's translation. */
+    std::vector<Vec3>   decalCaptureOrigins_;
+
+    SceneDrawList       decalCaptureList_;
+
+    /* THIS FRAME'S PROJECTOR INDEX -> ITS SLOT, or -1 for none. Rebuilt by the
+     * capture pass and read by the draw, because the two disagree about what a
+     * decal is called: the cache is keyed by a decal's LIFETIME id, and the
+     * transient preview has none while still needing a slice for one frame.
+     * One vector spares the draw both the lookup and the special case. */
+    std::vector<int>    decalCaptureFrameSlots_;
+
+    /* Round-robin eviction cursor. With more decals than slots the oldest
+     * capture is replaced, which degrades to "some decals lose their test and
+     * ink everything in their box" rather than to a black frame. */
+    int                 decalCaptureCursor_ = 0;
 
     /* ---- custom depth / stencil ------------------------------------------
      *

@@ -58,9 +58,23 @@ layout(std140, binding = 3) uniform DecalObjectBlock {
      * corners, 0 for a single fixed axis. Kept switchable rather than always on
      * because the two are genuinely different looks — a poster is a flat
      * rectangle that should stop at the edge of its wall, and a splatter is a
-     * thing thrown at the world that should run over whatever it hits. yzw
-     * spare. */
+     * thing thrown at the world that should run over whatever it hits.
+     *
+     * y: 1 when this decal has a visibility capture and the test below is live,
+     * 0 when it has none and every surface inside the box takes ink.
+     *
+     * z: the arc one texel of that capture subtends, which is how the visibility
+     * test sizes its bias. CARRIED RATHER THAN ASSUMED: the shader would
+     * otherwise hold its own copy of the capture's resolution, and the two
+     * drifting apart shows up as a decal that speckles at corners rather than
+     * as a number in the wrong place. w spare. */
     vec4 uWrap;
+
+    /* WHERE THE DECAL WAS THROWN FROM, and which slice of the capture array
+     * holds what it could see: xyz is the origin in world space, w is the cube
+     * index. See rhi/scene/decal_visibility.vs.glsl for what the capture is and
+     * why the origin is not exactly the decal's centre. */
+    vec4 uCapture;
 };
 
 #endif

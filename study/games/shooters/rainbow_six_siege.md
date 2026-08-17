@@ -25,6 +25,9 @@ is the single most surprising fact in the deck:
 > independently and under harder constraints.
 > [`space_engineers.md`](../space/space_engineers.md) for the other destructible-world
 > game here, and §7 reads them against each other.
+> [`red_faction_guerrilla_destruction.md`](red_faction_guerrilla_destruction.md) —
+> the opposite trade at the same problem: pre-fracture *everything* offline and
+> give up arbitrary holes, which buys the whole city instead of one wall layer.
 > [`source2_rendering.md`](../valve/source2_rendering.md) §13 for clustered lighting.
 > [`elite_dangerous.md`](../space/elite_dangerous.md) §2.4 for the other treatment of
 > determinism as an architecture.

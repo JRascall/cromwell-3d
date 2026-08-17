@@ -752,6 +752,29 @@ the cross product, not the picture**: `(v1-v0) x (v2-v0)` must point out of the
 cube for all twelve triangles. Any hand-written bounding volume on this path
 wants the same check.
 
+**AND THE DEVICE PATH NOW KNOWS WHAT IS SOLID, WHICH THE RAYLIB ONE DOES NOT.**
+This is the first deliberate FEATURE divergence between the two decal paths, so
+it is recorded rather than left to be discovered as a difference. A projected
+decal cannot tell a stair riser from the far side of a wall — identical normals,
+identical angles, and the only difference is whether anything is in the way — so
+the device path renders a small cube of DISTANCES from each decal's own position
+when the decal is placed, and inks a surface only if it is no further away than
+what that capture saw. Six 32-pixel faces of R32F per decal, sixty-four slots,
+cached by `Projector::id` and re-rendered only for new decals and the preview.
+It is Source's "surfaces reachable from the impact point" done with a rasteriser
+instead of a triangle list, and it asks nothing of the game.
+
+The raylib path keeps the cheaper approximation it had — reject a receiver whose
+plane the decal's centre is behind — which is right for walls and wrong for
+every fold that turns away. Both are in their shaders' comments. The raylib one
+goes at parity rather than being brought level.
+
+**WHAT IT DOES NOT HANDLE YET**, so it is not rediscovered as a bug: geometry
+that changes UNDER a settled decal. Demolish the wall that was occluding a mark
+and the mark keeps the answer captured before the wall fell, until its slot is
+evicted. The fix is a scene geometry version the capture compares against, and
+it belongs with whatever owns destruction.
+
 **WHERE THINGS LIVE, by the three lifetimes.** The projectors are a
 `DeviceDecalSet` on the **scene** — a scorch mark is on a floor, not in a
 viewpoint, which is the identical argument the probes make. The maps are

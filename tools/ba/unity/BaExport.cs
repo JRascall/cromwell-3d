@@ -221,7 +221,7 @@ public static class BaExport
                 .Where(c => c != null).Distinct().ToArray();
             if (clips.Length == 0) { skipped++; continue; }
 
-            var file = Path.Combine(outDir, names[path] + ".fbx");
+            var file = Path.Combine(outDir, names[path] + Arg("-baNameSuffix", "") + ".fbx");
             if (File.Exists(file)) { skipped++; continue; }   // resumable
 
             GameObject inst = null;
@@ -279,6 +279,27 @@ public static class BaExport
                     // run. Hence the guards: skip anything already dead, and
                     // never delete a bone that the kept rig or the Animator
                     // lives under.
+                    // WHICH skeleton to keep. 0 is the largest - the vehicle
+                    // itself. Higher indices are the crew: a HMMWV gunner is a
+                    // 40-bone humanoid with three LODs rooted at `Hips`, using
+                    // the same shared US_Army material as the standalone
+                    // infantry. Running the exporter once per index, with
+                    // -baNameSuffix to keep the outputs apart, gets the vehicle
+                    // AND its crew as separate single-skeleton files - which is
+                    // what Blender wants regardless, and loses nothing.
+                    int keepIndex = int.TryParse(Arg("-baSkeletonIndex", "0"), out var ki) ? ki : 0;
+                    if (keepIndex >= groups.Count)
+                    {
+                        Debug.Log($"BAEXPORT-NOSKEL {asset.name}: only {groups.Count} skeletons");
+                        skipped++;
+                        continue;
+                    }
+                    if (keepIndex > 0)
+                    {
+                        var swap = groups[0];
+                        groups[0] = groups[keepIndex];
+                        groups[keepIndex] = swap;
+                    }
                     var keepRoot = groups.Count > 0 ? groups[0].Key : null;
                     foreach (var g in groups.Skip(1))
                     {
