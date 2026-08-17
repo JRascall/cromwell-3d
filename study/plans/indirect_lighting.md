@@ -222,6 +222,18 @@ Hunter: World (§4.1.1). Four reasons not to follow them:
 4. **Evaluation is four dots and a normalise.** No basis evaluation, nothing to
    get wrong, nothing to profile.
 
+**And the objection those four do not answer: is four lobes simply too crude?**
+Every reason above is *a priori* — arithmetic about bytes and fetches, which
+says the format is cheap and says nothing about whether it is enough. The answer
+is empirical and it is the strongest single piece of evidence in this note:
+**Resident Evil 4 Remake shipped its indirect lighting on exactly this structure
+in 2023, with ray-traced GI switched off entirely** (`re_engine_rendering.md`
+§4.4, §11.2), and it is the best-looking title in the series. Four directional
+colours per probe is not a compromise this note is talking itself into; it is
+what carries a shipped frame that comfortably outclasses ours. If the field
+looks flat after P3, suspect the tracer's energy before suspecting the lobe
+count — §11's last question exists for that reason.
+
 **And one argument for SH that turns out not to be one.** §4.1.1 lists MHW's
 "time of day is a linear interpolation between coefficient sets" as an SH
 property. It is not — it is a property of *any linear projection of the
@@ -333,6 +345,20 @@ gets an 83 KB upload it never reads back. With tracing in compute, the field is
 authoritative on the GPU and the CPU needs it back — for a dev overlay, for a
 gameplay query about how lit a cell is, for anything — and CLAUDE.md's GPU note
 is exactly this: *"the readback is usually the problem, not the dispatch."*
+
+**And GL has no second queue, which is the argument the readback one overshadows.**
+Capcom's figures for this class of work — 1.5 ms to sample the probe network,
+2.5 ms for SDF shadows — are all quoted as *overlapped*, running on an async
+compute queue behind the shadow pass, because a console lets them. GL has one
+queue: `dispatch` orders against the draws around it, so every millisecond of a
+compute tracer lands on the critical path in full. **A CPU tracer is the only
+configuration here that genuinely runs concurrently with the GPU frame.** That
+is a property of the API rather than of this map, so unlike everything else in
+this section it does not soften at larger scale — it changes only if the
+renderer gains a second queue, which means Vulkan, not a bigger world. §8.1's
+"compute tracer + GPU field" substitution should be read with that attached: it
+is the right answer when the world outgrows a CPU, and it is still buying
+concurrency it will not get until the RHI has a queue to put it on.
 
 Three supporting reasons:
 
@@ -569,6 +595,31 @@ with a measurement.
 | **An ambient lightmap** | §3. Reproduces the sun bake's first named failure. |
 | **Probes at cell corners rather than centres** | Makes the eight taps the eight corners of the cell you are in, which sounds like it localises the interpolation and does not — a corner is shared with the room next door either way. Cell centres match the lattice's own indexing and the dead-probe test is then "is this cell solid", which is one lookup. |
 | **Hand-placed probe volumes** | The thing Capcom retreated *from*, and we have no reason to build what they abandoned. If a room ever needs an override, that is a `LightProbeBlocker`-shaped feature and it is not this note. |
+| **Lumen-shaped realtime GI** | Most of Lumen is machinery for tracing arbitrary triangle meshes — a surface cache of material cards so a ray hit can be shaded without re-evaluating its material, per-mesh distance fields merged into a global one, and a screen-space radiance-probe final gather. On a lattice the first two collapse to nothing: the cells *are* the surface representation and `RayCaster` already traces them. What is left is the probes, which is this note. **We are not rejecting Lumen; we are building the part of it that does not evaporate.** Its multi-bounce trick — the cache feeding itself — is §7.4 verbatim. |
+| **Hardware path tracing** | What RE ENGINE itself now ships for Requiem and PRAGMATA (GDC 2026), replacing everything §4.1 describes. Needs ray-tracing hardware and an API that exposes it; the RHI targets GL 4.3 and `raytracing.md` is a research note, not a plan. Revisit if a Vulkan backend lands with RT extensions — and note the seam in §8 survives it, because a path tracer supplying an irradiance field is still a field. |
+
+**A note on the shape of those last two, because §2's framing invites the
+objection.** §2 says *"we start where Capcom finished"*, meaning Monster Hunter:
+World in 2017 — and Capcom did not finish there. **Both reference engines have
+since left the approach this note adopts:** Epic ships Lumen, and Capcom's own
+2025–26 titles path trace direct and indirect light in one pipeline. Read
+honestly, this note is adopting a technique its two sources moved on from.
+
+That is not the argument against it that it first appears to be, and the reason
+is worth stating rather than assuming. **They moved on to solve problems this
+project does not have** — open worlds, a moving sun, streamed instanced meshes,
+arbitrary triangle geometry — and they moved on *to hardware we cannot reach*.
+`re_engine_rendering.md` §11.0 makes the point in the other direction and it is
+the same point: RE2R's architecture was excellent because it was aimed precisely
+at bounded interiors with static geometry and no day/night cycle, and **every one
+of those conditions describes this board**. The techniques worth taking are the
+ones that exploit that, not the ones Capcom built after their content outgrew
+them.
+
+The honest residual: §8.1 already marks the tracer and the field extent as the
+parts expected to be replaced wholesale for a different genre. **A Lumen-shaped
+or path-traced future is that replacement**, and it lands on the game side of the
+seam. If it ever arrives, `DeviceIrradianceField` should not notice.
 
 ---
 

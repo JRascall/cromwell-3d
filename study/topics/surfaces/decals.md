@@ -420,39 +420,132 @@ then share one definition of reachable — which is the definition Source's
 
 ## 9.3 The cheap test that has to come first
 
-Before building any of it there is a discriminating observation available,
-because reading the shader turned up a discrepancy nobody has looked at.
+Before building any of it there is a discriminating observation to make, and
+getting to it took one wrong turn that is worth recording rather than deleting.
 
-The wrap carries the texture by `|local.z|` — distance from the **placement
-plane**, along the box's own W axis (`decal.fs.glsl`, "THE FOLD IS local.z == 0").
-And for a ramp this world has **two different surfaces in the same place**: the
-renderer emits a *staircase*, a stack of separate tread and riser boxes,
-`kRampArtSteps` of them, while `WorldTrace` treats a ramp as a **smooth inclined
-plane** — and it is the trace that supplies the placement point and normal. So a
-decal on a stair is currently parameterised from a plane the visible geometry
-only zigzags about.
+**The wrong turn.** The wrap carries the texture by `|local.z|` — distance from
+the **placement plane**, along the box's own W axis (`decal.fs.glsl`, "THE FOLD IS
+local.z == 0"). And for a ramp this world has two different surfaces in the same
+place: the renderer emits a *staircase*, a stack of separate tread and riser
+boxes, `kRampArtSteps` of them, while `WorldTrace` models a ramp as a **smooth
+inclined plane** — its own comment says *"the visible treads are art"*. So it
+looked as though a stair decal was being parameterised from a horizontal plane
+the geometry climbs away from, and that aligning the box to the incline would fix
+a whole flight for free.
 
-If the box is instead **aligned to the incline** — W along the ramp plane's
-normal, U down the slope — every tread and riser sits within about one riser
-height of `local.z == 0` for the whole length of the flight, however long, rather
-than drifting monotonically away from a horizontal placement plane until it
-leaves the texture. **That is a placement change, in the game, with no renderer
-work at all**, and the game is exactly the layer allowed to know that the thing
-under the cursor is a ramp.
+**It is already aligned, so that fix is a no-op.** `rampPlane` returns the
+incline's normal, `WorldTrace` reports it as the contact normal, `SurfacePicker`
+passes it through untouched (`hit.normal = toRaylib(found->normal)`), and
+`PlayerController::updateDecalPreview` hands it straight to `Decal::onSurface`.
+A decal placed on a ramp tile with the cursor **already** has its W along the
+incline, so `|local.z|` there is bounded by the tread/riser zigzag — about one
+riser — rather than growing with the flight. The model behind the proposed fix
+was wrong and no code was written on it.
 
-It splits the hypotheses cleanly:
+**What that leaves, and it is a sharper question.** There are two placement paths
+and only one of them has a horizontal plane:
 
-- **If the mark then runs the whole flight** and the only remaining artefact is a
-  small per-step wobble, the stair case never needed geodesic parameterisation —
-  it needed a basis, and §9's justification narrows to genuinely arbitrary folded
-  geometry: rubble heaps, stacked crates, a mark crossing a kerb *and* a wall.
-- **If it still breaks up**, the failure is the tread/riser zigzag rather than the
-  wrap budget, no choice of plane fixes it, the walk is warranted — and §9.2
-  already says where its input has to come from.
+| path | placement normal | `|local.z|` down a flight |
+|---|---|---|
+| cursor, on a ramp tile | the **incline** normal | bounded by one riser |
+| ground marks (`DecalDemo`, the explosion case) | straight down, `(0, 1, 0)` | grows with the **full vertical drop** |
 
-This is the discipline the last three defects were found by: get the observation
-that names the fault before writing the fix. The test costs one decal placed at
-the top of a flight.
+The second is by construction: the demo's ground pass projects down through a
+3.0-deep box precisely so *"a mark laid on the floor also reaches anything
+standing on that floor, so it wraps over kerbs, crates and stair treads instead
+of stopping at them"*. Centred on the floor, that is ±1.5 m of budget — a metre
+and a half of drop, which is a few steps, and then the mark leaves the box. **A
+mark that runs out partway down a flight is what that path is supposed to do**,
+not a defect in the unwrap.
+
+So the observation that splits it is which of the two the failing decal came
+from:
+
+- **A ground mark projected down.** Then the fault is budget and basis, not
+  parameterisation, and the fixes are ordinary: size the box from the drop the
+  flight actually has, or place per-tread as §7.3 already recommends. Geodesic
+  parameterisation is not what that case needs.
+- **A cursor mark on the ramp itself, still breaking up.** Then the box is
+  already on the right plane, the budget is not binding, and the failure is the
+  tread/riser zigzag or the fold count — which no choice of plane reaches, the
+  walk is warranted, and §9.2 says where its input has to come from.
+
+This is the discipline the last three defects were found by, applied to the
+hypothesis in this very section: it did not survive contact with the placement
+code, so it is marked wrong here rather than built on.
+
+## 9.3.1 What the grid actually showed, and why it changes the recommendation
+
+The instrument was built because the label could not distinguish four failure
+modes (see `DecalDemo`'s `uv_grid`). Two shots settled it, and neither of the
+hypotheses in §9.3 was what they found.
+
+**Shot one, placed at the top of a flight.** Red climbs left-to-right on every
+tread, green falls steadily from the top tread to the bottom. **Both ramps are
+monotonic the whole way down** — so the unwrap does not double back, nothing is
+mirrored, and the fold-sign reading of `local.z` is not the fault. The premise
+this whole section began with — *"the image runs out of texture partway down"* —
+is wrong as stated: what is missing is not the tail of the texture, it is the
+**risers**, which take no ink at all, so the mark arrives sliced with a gap at
+every step.
+
+**Shot two, placed on the floor at the bottom, looking up.** Exactly inverted:
+the risers ink and the treads go blank.
+
+**So the blank faces are the visibility capture, working correctly.** You cannot
+see a riser from the top of a staircase — it is in the shadow of the nose above
+it — and you cannot see a tread from the bottom. The capture renders the world
+from the decal's own position and inks only what was visible from there, which
+is §5.1's rule doing exactly what it was built to do. There is no bug here to
+fix. There is a **requirement conflict**, and that is a different thing.
+
+Shot two also shows two more faults, which the flat floor patch in the same
+image proves are not general: on the floor the cells are square and the ramps
+clean, so the primary projection is exact.
+
+1. **The wrap budget genuinely does run out**, but on the *steps*, not on the
+   texture — the mark climbs about three of them and the ones above are blank.
+   That is `|local.z|` leaving the box, and it is the one thing §9.3's second
+   hypothesis got right.
+2. **The wrapped faces are compressed.** Cells that are square on the floor are
+   squashed on every riser, because the carry advances the coordinate by
+   `|local.z|` — the **vertical** height climbed — while the distance actually
+   travelled across the surface also includes every tread's run. Straight-line
+   against along-the-surface, measured, in one picture.
+
+### The argument that follows, and it is stronger than §9's original one
+
+The stated requirement is a mark that prints on any surface and wraps like a
+stamp. Against that requirement the capture is not a solution with a cost, it is
+an **obstacle**: it is answering "was this visible from one point", and a stamp
+wants "is this part of the surface I hit".
+
+Those two questions have been treated as separate systems — the capture for
+visibility, the plane unwrap for parameterisation, with a bias, a clip plane and
+an angle fade patching the seams between them. **Geodesic distance answers both
+at once.** A stair riser is about five centimetres from the tread above it
+*along the surface*; the far side of a wall is a metre away, round the end of the
+wall. So "ink everything within radius r along the connected surface":
+
+- **includes** the riser, the kerb, the crate face and the stair nose — every
+  fold the capture currently refuses because a nose is in the way
+- **excludes** the far side of a wall, the storey below and the next room — every
+  leak §5's three defects were spent closing
+- **and carries the texture the same distance it measured**, so the compression
+  in (2) goes with it
+
+with no capture cube, no clip plane, no depth bias and no threshold to tune.
+That is also what Source's rule *means* — `UTIL_DecalTrace` hands the mark to the
+entity it hit, and reachability along the surface is what "the surface you hit"
+is. The capture is a rasteriser approximating that from a single point; a walk
+measures it directly.
+
+**This is the first argument in this note where the geodesic path makes the
+system simpler rather than adding a second one beside it**, and it is the reason
+the recommendation changes. §7 still stands for everything else: the projector
+is correct and cheap for floors, walls and single folds, which is most marks.
+What changes is that the multi-fold case now has a route that removes machinery
+instead of adding it.
 
 ## 9.4 The invalidation answer, which §6 says is owed before it ships
 

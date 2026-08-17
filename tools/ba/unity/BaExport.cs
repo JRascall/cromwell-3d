@@ -304,16 +304,26 @@ public static class BaExport
                     foreach (var g in groups.Skip(1))
                     {
                         var bone = g.Key;
-                        if (bone == null) continue;
-                        if (animator != null && animator.transform.IsChildOf(bone)) continue;
-                        if (keepRoot != null && keepRoot.IsChildOf(bone)) continue;
                         int verts = g.Sum(s => s != null && s.sharedMesh ? s.sharedMesh.vertexCount : 0);
-                        Debug.Log($"BAEXPORT-DROPSKEL {asset.name}: {bone.name} " +
+                        Debug.Log($"BAEXPORT-DROPSKEL {asset.name}: {(bone ? bone.name : "?")} " +
                                   $"({g.Count()} meshes, {verts} verts)");
+
+                        // THE MESHES ALWAYS GO. Only the BONES need guarding.
+                        // A vehicle's crew hangs off the vehicle's own skeleton
+                        // - a HMMWV gunner's `Hips` is a descendant of the
+                        // chassis `root` - so deleting the chassis bones would
+                        // take the gunner with them. An earlier version guarded
+                        // the whole group and skipped the meshes too, which for
+                        // a crew-only export left the entire vehicle in the
+                        // file: 59,938 verts of HMMWV under a "crew" name.
                         foreach (var s in g)
                             if (s != null && s.gameObject != null)
                                 UnityEngine.Object.DestroyImmediate(s.gameObject);
-                        if (bone != null && bone.gameObject != null)
+
+                        if (bone == null) continue;
+                        if (animator != null && animator.transform.IsChildOf(bone)) continue;
+                        if (keepRoot != null && keepRoot.IsChildOf(bone)) continue;
+                        if (bone.gameObject != null)
                             UnityEngine.Object.DestroyImmediate(bone.gameObject);
                     }
                 }

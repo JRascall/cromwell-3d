@@ -474,8 +474,7 @@ unit area, 100 is the base reference value"* with no unit given, and
 numbers. The stress ratio is **not** flat with height: it peaks near the base in
 almost every building, and in a building whose ground floor is columns rather
 than walls it peaks catastrophically. `0102ga` puts **1,709 tonnes on 7.8 m² of
-joint**, a fifth of the cut area its own upper floors get for a tenth of the
-load.
+joint**, a seventh of the cut area its own upper floors get for 27× the load.
 
 That is the mechanism behind the moment everyone remembers. **You are not
 "damaging the building" when you sledgehammer the ground-floor columns; you are
@@ -673,7 +672,7 @@ descriptions **[XTBL]**:
 | `groan` | *"when a tall, skinny chunk breaks off the parent object and **tips over slowly**"* | **min mass** | *"if an object has a valid groan event it will play instead of a detach"*; **Pole type only** |
 | `collapse` | *"when a large section collapses"* | **XZ area** | *"this event should only be defined for Concrete:solid, **it is hard coded game side**"* |
 | `shatter` | material shatters | min dimension | *"Must have 'shatter' flag for this to happen"* — one material has it: Glass-Weak |
-| `stress` | *"when object is under heavy stress"* | **load / yield ratio** | the creak (§3.1) |
+| `stress` | *"when object is under heavy stress"* | **load / yield ratio** | the creak (§3.2) |
 | `explode` | *"during heavy destruction"* | dimension | promotes to a full entry in `explosions.xtbl` |
 | `load_balance` | pieces deleted (§6) | min dimension | the cover story |
 
@@ -946,7 +945,8 @@ Ranked by how much it is worth to this project, not by how clever it is.
    survives, and conflating them is why materials feel samey.
 10. **Store the graph twice** — edge list for the solver, adjacency for the
     flood fill — when you cannot afford to build the second at load. Costs
-    2 bytes per half-edge here.
+    2 bytes per half-edge here, and the instance keeps a *writable* copy so a
+    break physically shortens the list the fill walks.
 11. **Difficulty as a physics constant.** Wrecking Crew's Low/High is
     `Force_Scalar` 0.08 vs 0.2, nothing else.
 

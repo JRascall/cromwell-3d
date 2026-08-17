@@ -17,8 +17,8 @@ packed the way it is.
 
 | tag | source |
 |---|---|
-| **[SRC57]** | **CRYENGINE 5.7 LTS shader library** — 145 files (`.cfx` HLSL shaders, `.cfi` includes, `.ext` material-feature manifests) plus 19 `sys_spec_*` quality-dial configs, read from the [CRYENGINE Community Edition](https://github.com/Pterosoft/-CRYENGINE-Community-Edition-) redistribution, which ships the whole `Engine/Shaders` tree in plain text. This is the **newest first-party rendering source that exists publicly**, stamped `Copyright 2004-2021 Crytek GmbH`. |
-| **[SRC567]** | **CRYENGINE 5.6.7 C++ engine source** — 1,275 files across `RenderDll` (renderer + all 53 graphics-pipeline stages), `Cry3DEngine` (terrain, vegetation, SVO GI, LOD, decals, ocean), `CryAnimation` and `CryNetwork`. The last full public tree; see §0.2 on why this version. |
+| **[SRC57]** | **CRYENGINE 5.7.1 LTS — the complete source tree**, from Crytek's account-gated `CRYENGINE_Source` repository: engine C++ (`RenderDll`, `Cry3DEngine`, `CryAnimation`, `CryPhysics`, `CryNetwork`), the full `Engine/Shaders` library (145 `.cfx`/`.cfi`/`.ext` files), the `sys_spec_*` quality-dial configs, and the **Sandbox editor and tools** — which is where several features turn out to actually live (§14.4). The last public release of the engine. |
+| **[SRC567]** | **CRYENGINE 5.6.7 C++ engine source** — the last tree ever public on GitHub. Retained only where a claim was checked against both versions and is being reported as unchanged; §0.2 has the measured diff. |
 | **[CFG]** | The shipped `sys_spec_*.cfg` CVar groups — Crytek's own quality dials, which say what they consider expendable at low spec. Part of [SRC57]. |
 | **[GDC14]** | GDC 2014 — *Moving to the Next Generation: The Rendering Technology of Ryse*, **Nicolas Schulz**, Crytek. The single most load-bearing talk here: it is where deferred-vs-Forward+, the GBuffer packing and the PBS transition are argued. |
 | **[SIG14-GC]** | SIGGRAPH 2014 — *Real-Time Geometry Caches*, **Axel Gneiting**, Crytek. Slides *plus speaker notes*, which is where the compression numbers are. Answers the "do they use VATs" question. |
@@ -58,19 +58,54 @@ separately in §20.** Where a section says "CryEngine does X", it means the
 version we can read. That is a real limitation and it is not hidden anywhere
 below.
 
-### 0.2 Why 5.6.7 for the C++ and 5.7 for the shaders
+### 0.2 The 5.6.7 → 5.7.1 delta, measured
 
-They are not the same version, and the mismatch is deliberate rather than
-sloppy. The 5.7 shader tree is redistributable and is what Community Edition
-ships; the 5.7 C++ tree is not, and Crytek gate it behind an account request.
-5.6.7 is the last C++ tree that was ever public.
+An earlier draft of this note was written against the **5.6.7** C++ tree (the last
+one ever public on GitHub) plus the **5.7** shader library, and argued that the gap
+between them was small. That is no longer an argument: **the full CRYENGINE 5.7.1
+source is now in hand** — `cryengine.cryengine` reports
+`"id": "engine-5.7", "version": "5.7.1"` — and the two trees have been diffed
+file by file.
 
-The gap between them is small and knowable. 5.7's headline changes were
-Scaleform 4, the GamePlatform plugin, VS2022/C++17 support and bug fixes [CE] —
-**no renderer architecture changes were announced**. Every shader in [SRC57]
-that has a matching stage in [SRC567] agrees with it: same constant-buffer
-layouts, same technique names, same `TILED_SHADING_TILE_SIZE_X 8`. Where the two
-disagree the shader wins and it is marked.
+The result, over the 1,379 files common to both (renderer, 3D engine, animation,
+physics, network, shared headers):
+
+| | files |
+|---|---|
+| byte-identical | 9 |
+| differing **only** in the `// Copyright …` header line | **1,295** |
+| **containing any real code change** | **75** |
+
+And of those 75, the changes are concentrated in exactly the places 5.7's release
+notes said they would be — Scaleform 4 (`IScaleform.h`, 92 lines), the PSO/device
+layer (`DevicePSO.cpp`, 194), `DriverD3D.cpp` (143), `IRenderer.h` (211). The
+graphics-pipeline stages this document describes are almost untouched:
+`ShadowMask.cpp` 10 lines, `Snow.cpp` 9, `Water.cpp` 4, `SceneForward.cpp` 4,
+`DeferredDecals.cpp` 4 — and reading them, **most of that is a mechanical
+`int32`/`const int` → `uint64` widening of the render-state bitfield**, because
+CryEngine ran out of state bits:
+
+```cpp
+-  const int   gsDepthFunc = bReverseDepth ? GS_DEPTHFUNC_LEQUAL : GS_DEPTHFUNC_GEQUAL;
++  const uint64 gsDepthFunc = bReverseDepth ? GS_DEPTHFUNC_LEQUAL : GS_DEPTHFUNC_GEQUAL;
+```
+
+The stage list is identical header-for-header. `MaxNumTileLights` is still 255,
+`LightTileSizeX/Y` still 8 with the same `static_assert`, the antialiasing enum is
+still the same five modes defaulting to `eAT_SMAA_1TX`, the five shadow pass types
+are unchanged, and `MAX_RENDERNODES_PER_FRAME` is still 50.
+
+**So every architectural claim in this document holds for 5.7.1, verified rather
+than assumed.** Two real changes are worth recording, and both are noted where
+they belong:
+
+- a genuine **bug fix in deferred decal mip selection** — `tan(fov)` → `tan(fov * 0.5f)`
+  (§11);
+- **VCloth gained wind and per-vertex neighbourhood matrices** (§16.5).
+
+Tags: **[SRC57]** now means the full 5.7.1 tree — engine, shaders, Sandbox editor
+and tools. **[SRC567]** is retained only where a claim was checked against 5.6.7
+and is being reported as unchanged between the two.
 
 ### 0.3 What was not done
 
@@ -997,6 +1032,20 @@ The deferred path [SRC567] `DeferredDecals.cpp`:
   original.
 - the GBuffer's YCbCr specular encoding (§2.2) exists **specifically** so
   non-metal decals can blend without writing alpha.
+- decal **mip selection** is computed from the decal's projected screen size, and
+  5.7.1 contains a one-character fix to it — one of only a handful of real code
+  changes in the whole 5.6.7 → 5.7.1 renderer delta (§0.2):
+
+  ```cpp
+  -  const float mipLevelFactor = (tan(viewInfo[0].pCamera->GetFov())        * texScale / decalSize) / screenRes;
+  +  const float mipLevelFactor = (tan(viewInfo[0].pCamera->GetFov() * 0.5f) * texScale / decalSize) / screenRes;
+  ```
+
+  `GetFov()` returns the *full* vertical FOV, so the projection needs the half
+  angle. Shipping the full angle made every decal pick a mip that was too coarse,
+  increasingly so at wide FOV. Worth noting for `src/cromwell/decal/`: this is a
+  bug that looks like "our decal textures are blurry" and gets misdiagnosed as a
+  streaming or compression problem.
 
 The lifetime management is the part games actually need and rarely build:
 `e_DecalsNeighborMaxLifeTime` makes a *new* decal accelerate the fade of nearby
@@ -1477,8 +1526,9 @@ hard pop, and not geomorphing.
 
 ### 14.4 Billboard impostors — yes, and they are one quad
 
-**Do they have billboard impostors?** Yes, and the implementation is much simpler
-than the question usually implies.
+**Do they have billboard impostors?** Yes — a **16-view camera-facing impostor
+atlas with view-dependent cell selection**, albedo *and* normals, baked out of the
+real GBuffer. It is a proper impostor system, not a sprite.
 
 ```
 e_VegetationBillboards 0   "Allow replacing distant vegetation with billboards
@@ -1486,23 +1536,124 @@ e_VegetationBillboards 0   "Allow replacing distant vegetation with billboards
                             ed_GenerateBillboardTextures command in the editor"
 ```
 
-`CObjManager::GetBillboardRenderMesh()` [SRC567] builds **one shared mesh, ever**:
-four vertices, two triangles, a unit quad in XZ with a fixed tangent frame. Every
-billboarded tree in the level draws that same mesh with a different material. The
-material carries the baked texture, generated offline by
-`ed_GenerateBillboardTextures`, and `%BILLBOARD` (mask 0x2000) is a feature flag
-on the standard `Illum` shader — so a billboard is lit by the normal material
-system, GBuffer and all, not by a special path.
+#### Baking — `ed_GenerateBillboardTextures`
 
-There is a whole **`BillboardGraphicsPipeline`** [SRC567] whose job is to render
-the scene into those impostor textures — impostor baking is a *pipeline
-configuration*, reusing the real GBuffer and shadow stages, rather than a
+From `Sandbox/EditorQt/Vegetation/VegetationMap.cpp` [SRC57]:
+
+```cpp
+const int FAR_TEX_COUNT = 16;                    // IRenderNode.h — "Number of sprites per object"
+const int FAR_TEX_ANGLE = (360 / FAR_TEX_COUNT); // 22.5°
+
+int nSpriteResFinal = 128;
+int nSpriteResInt   = nSpriteResFinal << 1;      // rendered at 256, downsampled to 128
+int nLine           = (int)sqrtf(FAR_TEX_COUNT); // 4
+int nAtlasRes       = nLine * nSpriteResFinal;   // 512
+ITexture* pAtlasD = CreateTexture("$BillboardsAtlasD", nAtlasRes, nAtlasRes, …);
+ITexture* pAtlasN = CreateTexture("$BillboardsAtlasN", nAtlasRes, nAtlasRes, …);
+
+for (int j = 0; j < FAR_TEX_COUNT; j++) {
+    float fAngle    = FAR_TEX_ANGLE * (float)j + 90.f;
+    float fGenDist  = 18.f;                              // bake distance, metres
+    float fFOV      = 0.565f / fGenDist * 200.f * (gf_PI / 180.0f);
+    …
+    StoreGBufferToAtlas(rcDst, nSpriteResInt, nSpriteResInt,
+                        nSpriteResFinal, nSpriteResFinal, pAtlasD, pAtlasN, …);
+}
+SaveBillboardTIFF(name + "_billbAlb.tif",  pAtlasD, "Diffuse_highQ",   true);
+SaveBillboardTIFF(name + "_billbNorm.tif", pAtlasN, "Normalmap_highQ", false);
+```
+
+**16 yaw views at 22.5°, in a 4×4 atlas of 128 px cells (512² total), rendered at
+2× and downsampled, producing two atlases — albedo and normal — captured by
+resolving the actual GBuffer.** `StoreGBufferToAtlas` is the key call: the
+impostor's normals are the real deferred normals, not a flat card normal, which is
+why a billboarded tree still lights directionally.
+
+This is what the **`BillboardGraphicsPipeline`** exists for (§1) — impostor baking
+is a *pipeline configuration* reusing the real GBuffer and shadow stages, not a
 bespoke tool renderer. That is the design worth taking.
 
-Note what is *not* there: **no octahedral impostors, no multi-angle impostor
-atlas** in the public source. It is a single baked view. The older
-`e_VegetationSprites` system and its five companion CVars are all marked
-**`VF_DEPRECATED`** — Crytek replaced sprites with billboards and left the tombstones.
+#### Runtime — the cell is chosen in the vertex shader
+
+`ModificatorVT.cfi` [SRC57], under `#if %BILLBOARD`, and this is the whole trick:
+
+```hlsl
+// calculate billboard rotation angle  (vPosWS is camera-relative)
+float3 vPosWS = mul(IN.InstMatrix, float4(0,0,0,1));
+float2 vDir   = normalize(vPosWS.xy);
+float  fAngle = atan2(vDir.x, -vDir.y);
+
+// calculate object rotation angle
+float3 vRotDir = IN.InstMatrix[0];
+vRotDir.xy     = normalize(vRotDir.xy);
+float fRotAngle = atan2(vRotDir.y, vRotDir.x);
+
+// rotate position  → the card turns to face the camera
+IN.Position.x = vXY.x * cs - vXY.y * sn;
+IN.Position.y = vXY.x * sn + vXY.y * cs;
+
+// calculate texture atlas offset from rotation angle
+const int nAtlasDim = 4;
+int nId = floor((-(fAngle + fRotAngle) / PI_X2 + .5) * nAtlasDim * nAtlasDim + .5f);
+nId = nId & (nAtlasDim*nAtlasDim - 1);
+int nX = (nId / nAtlasDim) & nAtlasMsk;
+int nY = (nId & nAtlasMsk);
+IN.baseTC.x = (IN.baseTC.x + nY) / nAtlasDim;
+IN.baseTC.y = (IN.baseTC.y + nX) / nAtlasDim;
+
+// calculate tangent space  → rebuilt so the baked normals light correctly
+float3 vNorm = -float3(normalize(vDir), 0);
+IN.ObjToTangentSpace[2] = -float3(0,0,1);
+IN.ObjToTangentSpace[1] = cross(vNorm, IN.ObjToTangentSpace[2].xyz);
+IN.ObjToTangentSpace[0] = vNorm;
+```
+
+**The atlas cell comes from `view angle + object yaw` combined**, so two instances
+of the same tree at different rotations show different baked views from the same
+camera — which is what stops a forest of impostors looking like one cloned card.
+The index is wrapped with a mask rather than a modulo, and the tangent frame is
+rebuilt per vertex so the baked normal map is interpreted in the card's frame.
+
+`CObjManager::GetBillboardRenderMesh()` still builds **one shared quad, ever** —
+four vertices, two triangles — because all the per-instance variation lives in the
+instance matrix and the UV offset the vertex shader computes from it.
+
+Two shading overrides complete it, in `CommonZPass.cfi`:
+
+```hlsl
+#if %BILLBOARD
+    vNormalTS.xyz = GetNormalMap(normalsTex, IN.baseTC.xy).zyx;   // baked frame swizzle
+    …
+    attribs.LightingModel  = LIGHTINGMODEL_TRANSMITTANCE;
+    attribs.Transmittance  = .15;
+    attribs.Smoothness     = .15;
+#endif
+```
+
+Impostors are **forced into the transmittance lighting model** so distant foliage
+keeps the through-leaf scattering the real vegetation shader gives it. Without
+that, a treeline goes flat and dark exactly where it stops being geometry.
+
+The material is a clone of `EngineAssets/Materials/billboard_default.mtl` —
+`Shader="Illum"`, `%BILLBOARD %NORMAL_MAP %SUBSURFACE_SCATTERING`, `AlphaTest=0.5`,
+`SurfaceType="mat_vegetation"` — with the two atlases assigned by
+`CheckCreateBillboardMaterial()`, which simply looks for `<mesh>_billbalb.dds` and
+`<mesh>_billbnorm.dds` beside the CGF and only builds the material if **both**
+exist.
+
+Still absent: **no octahedral impostor mapping** (yaw only, no pitch — look down
+on a billboarded forest from a hill and the cards are still edge-on cards), and no
+runtime impostor capture. The older `e_VegetationSprites` system and its five
+companion CVars are all marked **`VF_DEPRECATED`** — Crytek replaced sprites with
+billboards and left the tombstones.
+
+> **Correction.** An earlier draft of this note said CryEngine had "a single baked
+> view, no multi-angle atlas". That was wrong, and it was wrong because the
+> billboard *mesh* builder is trivially simple and the mining stopped there. The
+> angle machinery lives in the editor's bake command and a vertex modifier, in two
+> different trees, neither of which is called "billboard impostor". Worth
+> remembering as a search failure mode: **the interesting half of a feature is
+> often in the tool, not the runtime.**
 
 ---
 
@@ -1725,6 +1876,25 @@ right instinct for any optional simulation: it should have an opinion about the
 frame budget and a way to give up gracefully. See
 [`rigging_ik.md`](../../topics/animation/rigging_ik.md) and
 [`networked_animation_physics.md`](../../topics/animation/networked_animation_physics.md).
+
+**5.7.1 added wind and shape matching** — one of the few real code changes in the
+release (§0.2). `AttachmentVCloth.h` gains:
+
+```cpp
+std::vector<int>      m_vtxNeighbCount;
+std::vector<Vec3>     m_vtxNeighbCenter;
+std::vector<Matrix33> m_vtxNeighbCmtx;     // per-vertex neighbourhood covariance
+Vec3                  m_wind = Vec3(ZERO);
+int                   m_windCheckTimer = 0;
+Vec3                  m_velGlobal = Vec3(ZERO);
+```
+
+The three `m_vtxNeighb*` arrays are the standard **shape-matching** setup — a
+neighbourhood centroid and covariance matrix per vertex, from which a best-fit
+rotation is extracted so the cloth resists deformation *relative to its own local
+frame* rather than to world space. That is what lets cloth on a spinning character
+keep its folds. `m_windCheckTimer` says the wind field is sampled on a timer
+rather than every step, which is the same amortisation as `collideEveryNthStep`.
 
 `AttachmentVClothPreProcess` + `AttachmentVClothPreProcessDijkstra` do the offline
 half: building the constraint graph and computing geodesic distances from the
@@ -1954,7 +2124,7 @@ Two systems in the tree:
 Not a rendering topic, but asked for, and CryNetwork is genuinely unusual. 290
 files.
 
-### 18.1 Aspect-based replication
+### 19.1 Aspect-based replication
 
 The unit of replication is an **aspect** — a numbered slice of an entity's state
 (physics, script, health, …) that serialises independently. From
@@ -1975,7 +2145,7 @@ The unit of replication is an **aspect** — a numbered slice of an entity's sta
 to a client for the pawn it controls while keeping everything else
 server-authoritative.
 
-### 18.2 Arithmetic coding, per field
+### 19.2 Arithmetic coding, per field
 
 `Compression/` is 70 files, and this is the part that is rare:
 
@@ -2013,7 +2183,7 @@ net_defaultChannelBitRateToleranceLow/High, …PacketRateToleranceLow/High
 is a `HIGH_PRIORITY_ASPECT_MASK` with a *"'hack' scheduling policy group"* for
 aspects that must not be delayed.
 
-### 18.3 The rest
+### 19.3 The rest
 
 - **Contexts** (`INetContext`) manage the set of synchronised objects, with an
   explicit state machine — `eCVS_Begin` → `EstablishContext` → `ConfigureContext`
@@ -2109,7 +2279,15 @@ Ranked by what it would actually buy this project.
     continuous only because every sample within a froxel is offset by a
     per-frame jitter and integrated by a 0.9 history blend. The technique is what
     buys the low slice count.
-12. **Simulation as a bounded perturbation of an authored pose (§16.5, §17).**
+12. **The impostor system, nearly whole (§14.4).** 16 yaw views at 128 px in a 4×4
+    atlas, albedo *and* normals, baked by **resolving the real GBuffer** through a
+    dedicated pipeline configuration; at runtime one shared quad, with the atlas
+    cell picked in the vertex shader from *view angle + object yaw* so identical
+    meshes at different rotations do not show the same card. Add the pitch axis
+    and it is a modern impostor system. The two details that make it work are the
+    combined-angle cell selection and forcing the transmittance lighting model so
+    the treeline does not go flat where geometry stops.
+13. **Simulation as a bounded perturbation of an authored pose (§16.5, §17).**
     VCloth's `pullStiffness` toward the skinned position, the rope's three
     target-pose modes, the soft body's `maxDistAnim` rim clamp. A simulation that
     cannot drift far from what the artist authored is one that can ship. The
@@ -2149,7 +2327,10 @@ engine source:
 - **Virtual texturing** — an `AdvVirtualTexTopics` deck exists from the CryEngine
   2 era, but there is no VT in the shipped 5.x renderer.
 - **Vertex animation textures** — geometry caches instead (§16.4).
-- **Octahedral or multi-angle impostors** — one baked quad (§14.4).
+- **Octahedral impostors** — but multi-angle impostors *are* present: 16 yaw views
+  in a 4×4 atlas with albedo + normals, cell chosen in the vertex shader from view
+  angle plus object yaw (§14.4). What is missing is the pitch axis, so impostors
+  break when looked down on.
 - **Motion matching** — parametric blend spaces (LMG) instead (§16.2).
 - **Mesh shaders / GPU-driven culling** — coverage buffer on a CPU thread (§15).
 - **DLSS / FSR / XeSS** in the public source — FSR arrives in 5.11 (§20).
@@ -2164,13 +2345,17 @@ engine source:
 
 **Primary — source code and shipped data**
 
-- CRYENGINE Community Edition 1.0 (3 Oct 2025), MIT-licensed patch over 5.7 LTS,
-  Pterosoft — [github.com/Pterosoft/-CRYENGINE-Community-Edition-](https://github.com/Pterosoft/-CRYENGINE-Community-Edition-).
-  Redistributes the full `Engine/Shaders` tree and `Engine/Config`. **[SRC57], [CFG]**
+- **CRYENGINE 5.7.1 LTS complete source** — `CRYTEK/CRYENGINE_Source`, access
+  granted per [github.com/CRYTEK/CRYENGINE_ReadMe](https://github.com/CRYTEK/CRYENGINE_ReadMe)
+  (CRYENGINE.com account → dashboard → link GitHub → ~48 h). Local checkout at
+  `E:\Repos\CRYENGINE_Source`. Engine, shaders, Sandbox and tools. **[SRC57], [CFG]**
 - CRYENGINE 5.6.7 full engine source, public GitHub mirror —
-  [github.com/derplayer/CRYENGINE-5.6.7](https://github.com/derplayer/CRYENGINE-5.6.7). **[SRC567]**
-- Crytek's own repository landing page confirming source moved private with 5.7 LTS —
-  [github.com/CRYTEK/CRYENGINE_ReadMe](https://github.com/CRYTEK/CRYENGINE_ReadMe)
+  [github.com/derplayer/CRYENGINE-5.6.7](https://github.com/derplayer/CRYENGINE-5.6.7).
+  Used for the version diff in §0.2. **[SRC567]**
+- CRYENGINE Community Edition 1.0 (3 Oct 2025), MIT-licensed community patch over
+  5.7 LTS, Pterosoft — [github.com/Pterosoft/-CRYENGINE-Community-Edition-](https://github.com/Pterosoft/-CRYENGINE-Community-Edition-).
+  How the shader tree was read before the source access came through; still the
+  only redistributable copy.
 
 **Talks and papers** — all from the Internet Archive's
 [`crytek_presentations`](https://archive.org/details/crytek_presentations) collection
